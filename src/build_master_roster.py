@@ -682,6 +682,15 @@ def write_summary_sheet(
         ws.append([term, by_term[term]])
 
     ws.append([])
+    ws.append(["Chapter List"])
+    ws[ws.max_row][0].font = Font(bold=True)
+    ws.append(["Chapter"])
+    ws[ws.max_row][0].fill = PatternFill("solid", fgColor="D9EAF7")
+    ws[ws.max_row][0].font = Font(bold=True)
+    for chapter in sorted(chapters):
+        ws.append([chapter])
+
+    ws.append([])
     ws.append(["Import Issues"])
     ws[ws.max_row][0].font = Font(bold=True)
     if issues:
