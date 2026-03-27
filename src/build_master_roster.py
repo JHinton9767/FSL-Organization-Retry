@@ -259,7 +259,14 @@ def chapter_from_filename(path: Path) -> str:
         return "Unknown"
 
     cleaned = re.sub(r"\b(fall|spring|summer|winter)\b", "", stem, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bfall\s*20\d{2}\b", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\b(19|20)\d{2}\b", "", cleaned)
+    cleaned = re.sub(
+        r"\b(final|roster|updated|update|sept)\b|never responded to email",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"[_-]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_")
     return cleaned or "Unknown"
