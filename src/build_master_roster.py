@@ -139,6 +139,7 @@ GREEK_LETTER_WORDS = {
 }
 ALLOWED_CHAPTER_PHRASES = {
     "order of omega": "Order of Omega",
+    "kappa alpha": "Kappa Alpha Order",
 }
 
 CHAPTER_JUNK_PATTERNS = [
@@ -341,6 +342,11 @@ def normalize_chapter_name(value: str) -> str:
 
 def is_order_of_omega(chapter: str) -> bool:
     return normalize_chapter_name(chapter) == "Order of Omega"
+
+
+def is_excluded_chapter(chapter: str) -> bool:
+    normalized = normalize_chapter_name(chapter)
+    return normalized in {"Order of Omega", "Epsilon Lambda Alpha"}
 
 
 def chapter_from_filename(path: Path) -> str:
@@ -620,7 +626,7 @@ def infer_missing_spring_members(rows: List[ExtractedRow]) -> Tuple[List[Extract
 
 
 def remove_order_of_omega_rows(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
-    filtered = [row for row in rows if not is_order_of_omega(row.chapter)]
+    filtered = [row for row in rows if not is_excluded_chapter(row.chapter)]
     return filtered, len(rows) - len(filtered)
 
 

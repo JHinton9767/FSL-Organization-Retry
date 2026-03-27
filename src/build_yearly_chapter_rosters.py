@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from openpyxl import Workbook
 
-from src.build_master_roster import autosize_columns, is_order_of_omega, style_header
+from src.build_master_roster import autosize_columns, is_excluded_chapter, style_header
 from src.build_member_tenure_report import DEFAULT_MASTER_WORKBOOK, load_master_roster
 
 
@@ -118,7 +118,7 @@ def rows_to_yearly_chapters(master_rows) -> Dict[str, Dict[str, List[ChapterMemb
         chapter = row.chapter.strip() or "Unknown"
         if not academic_year or academic_year.lower() == "unknown":
             continue
-        if is_order_of_omega(chapter):
+        if is_excluded_chapter(chapter):
             continue
         if not any([row.last_name, row.first_name, row.banner_id]):
             continue
