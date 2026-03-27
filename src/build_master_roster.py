@@ -110,6 +110,19 @@ STATUS_MAP = {
     "T": "Transfer",
 }
 
+STATUS_PRIORITY = {
+    "Graduated": 90,
+    "Alumni": 85,
+    "Suspended": 80,
+    "Revoked": 75,
+    "Resigned": 70,
+    "Transfer": 65,
+    "Inactive": 60,
+    "New Member": 55,
+    "Active": 50,
+    "": 0,
+}
+
 GREEK_LETTER_WORDS = {
     "alpha",
     "beta",
@@ -258,6 +271,17 @@ def identity_key(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
     if row.last_name or row.first_name:
         return ("name", row.chapter.lower(), row.last_name.lower(), row.first_name.lower())
     return None
+
+
+def row_priority(row: ExtractedRow) -> Tuple[int, int, int, int, str, str]:
+    return (
+        STATUS_PRIORITY.get(row.status, 10),
+        1 if row.banner_id else 0,
+        1 if row.email else 0,
+        1 if row.semester_joined else 0,
+        row.source_file.lower(),
+        row.source_sheet.lower(),
+    )
 
 
 def parse_term_from_path(path: Path) -> Tuple[str, str]:
@@ -506,9 +530,7 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
 
 
 def dedupe_rows(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
-    seen: Set[Tuple[str, ...]] = set()
-    deduped: List[ExtractedRow] = []
-    removed = 0
+    best_rows: Dict[Tuple[str, ...], ExtractedRow] = {}
 
     for row in rows:
         if row.banner_id:
@@ -526,40 +548,50 @@ def dedupe_rows(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
                 row.semester_joined.lower(),
             )
 
-        if key in seen:
-            removed += 1
-            continue
-        seen.add(key)
-        deduped.append(row)
+        existing = best_rows.get(key)
+        if existing is None or row_priority(row) > row_priority(existing):
+            best_rows[key] = row
 
-    return deduped, removed
+    deduped = sorted(
+        best_rows.values(),
+        key=lambda item: (
+            item.academic_year.lower(),
+            item.term.lower(),
+            item.chapter.lower(),
+            item.banner_id.lower() if item.banner_id else "",
+            item.last_name.lower(),
+            item.first_name.lower(),
+        ),
+    )
+    return deduped, len(rows) - len(deduped)
 
 
 def dedupe_same_year_banner_ids(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
-    seen: Set[Tuple[str, str, str]] = set()
-    deduped: List[ExtractedRow] = []
-    removed = 0
+    best_rows: Dict[Tuple[str, str, str], ExtractedRow] = {}
 
-    for row in sorted(
-        rows,
-        key=lambda item: (
-            item.academic_year.lower(),
-            item.banner_id.lower() if item.banner_id else "zzzzzzzz",
-            item.term.lower(),
-            item.chapter.lower(),
-            item.source_file.lower(),
-            item.source_sheet.lower(),
-        ),
-    ):
+    for row in rows:
         if row.banner_id:
             key = (row.academic_year.lower(), row.term.lower(), row.banner_id.lower())
-            if key in seen:
-                removed += 1
-                continue
-            seen.add(key)
-        deduped.append(row)
+            existing = best_rows.get(key)
+            if existing is None or row_priority(row) > row_priority(existing):
+                best_rows[key] = row
+            continue
+        key = ("no-banner", row.academic_year.lower(), row.term.lower(), row.chapter.lower(), row.last_name.lower(), row.first_name.lower())
+        best_rows[key] = row
 
-    return deduped, removed
+    deduped = sorted(
+        best_rows.values(),
+        key=lambda item: (
+            item.academic_year.lower(),
+            item.term.lower(),
+            item.chapter.lower(),
+            item.banner_id.lower() if item.banner_id else "",
+            item.last_name.lower(),
+            item.first_name.lower(),
+        ),
+    )
+
+    return deduped, len(rows) - len(deduped)
 
 
 def infer_missing_spring_members(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:

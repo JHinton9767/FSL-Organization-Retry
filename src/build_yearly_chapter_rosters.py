@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from openpyxl import Workbook
 
-from src.build_master_roster import autosize_columns, is_excluded_chapter, style_header
+from src.build_master_roster import STATUS_PRIORITY, autosize_columns, is_excluded_chapter, style_header
 from src.build_member_tenure_report import DEFAULT_MASTER_WORKBOOK, load_master_roster
 
 
@@ -22,9 +22,10 @@ class ChapterMember:
     last_name: str
     first_name: str
     banner_id: str
+    status: str
 
     def as_list(self) -> List[str]:
-        return [self.last_name, self.first_name, self.banner_id]
+        return [self.last_name, self.first_name, self.banner_id, self.status]
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,39 +56,14 @@ def safe_sheet_name(value: str) -> str:
     return cleaned[:31] or "Unknown"
 
 
-def dedupe_members(rows: Iterable[ChapterMember]) -> List[ChapterMember]:
-    best_rows: Dict[Tuple[str, str, str, str], ChapterMember] = {}
-    for row in rows:
-        key = (
-            row.chapter.lower(),
-            row.banner_id.lower(),
-            row.last_name.lower(),
-            row.first_name.lower(),
-        )
-        existing = best_rows.get(key)
-        if existing is None:
-            best_rows[key] = row
-            continue
-
-        existing_has_banner = bool(existing.banner_id)
-        current_has_banner = bool(row.banner_id)
-        if current_has_banner and not existing_has_banner:
-            best_rows[key] = row
-
-    return sorted(
-        best_rows.values(),
-        key=lambda item: (
-            item.last_name.lower(),
-            item.first_name.lower(),
-            item.banner_id.lower(),
-        ),
-    )
-
-
 def choose_preferred_member(existing: ChapterMember, candidate: ChapterMember) -> ChapterMember:
     existing_unknown = existing.chapter.lower() == "unknown"
     candidate_unknown = candidate.chapter.lower() == "unknown"
     if existing_unknown and not candidate_unknown:
+        return candidate
+    if STATUS_PRIORITY.get(candidate.status, 10) > STATUS_PRIORITY.get(existing.status, 10):
+        return candidate
+    if bool(candidate.banner_id) and not bool(existing.banner_id):
         return candidate
     return existing
 
@@ -138,6 +114,7 @@ def rows_to_yearly_chapters(master_rows) -> Dict[str, Dict[str, List[ChapterMemb
                 last_name=row.last_name,
                 first_name=row.first_name,
                 banner_id=row.banner_id,
+                status=row.status,
             )
         )
 
@@ -150,7 +127,7 @@ def write_year_workbook(academic_year: str, chapter_rows: Dict[str, Sequence[Cha
 
     for chapter in sorted(chapter_rows):
         ws = wb.create_sheet(title=safe_sheet_name(chapter))
-        ws.append(["Last Name", "First Name", "Banner ID"])
+        ws.append(["Last Name", "First Name", "Banner ID", "Status"])
         style_header(ws)
         for member in dedupe_chapter_members(chapter_rows[chapter]):
             ws.append(member.as_list())
