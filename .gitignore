@@ -1,0 +1,8 @@
+data/inbox/academic/*
+!data/inbox/academic/.gitkeep
+data/inbox/rosters/*
+!data/inbox/rosters/.gitkeep
+data/raw/
+data/processed/
+output/
+.venv/

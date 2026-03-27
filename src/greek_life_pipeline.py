@@ -11,6 +11,8 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "column_aliases.json"
+INBOX_ACADEMIC_DIR = ROOT / "data" / "inbox" / "academic"
+INBOX_ROSTER_DIR = ROOT / "data" / "inbox" / "rosters"
 RAW_ACADEMIC_DIR = ROOT / "data" / "raw" / "academic"
 RAW_ROSTER_DIR = ROOT / "data" / "raw" / "rosters"
 PROCESSED_DIR = ROOT / "data" / "processed"
@@ -71,13 +73,33 @@ def build_alias_lookup() -> Dict[str, str]:
 
 
 def ensure_directories() -> None:
-    for path in [RAW_ACADEMIC_DIR, RAW_ROSTER_DIR, PROCESSED_DIR, METRICS_DIR, EXCEL_DIR]:
+    for path in [
+        INBOX_ACADEMIC_DIR,
+        INBOX_ROSTER_DIR,
+        RAW_ACADEMIC_DIR,
+        RAW_ROSTER_DIR,
+        PROCESSED_DIR,
+        METRICS_DIR,
+        EXCEL_DIR,
+    ]:
         path.mkdir(parents=True, exist_ok=True)
 
 
 def list_source_files(folder: Path) -> List[Path]:
     supported = {".csv", ".xlsx", ".xls"}
     return sorted(path for path in folder.rglob("*") if path.suffix.lower() in supported)
+
+
+def list_source_files_from_folders(folders: Iterable[Path]) -> List[Path]:
+    files: List[Path] = []
+    seen: set[Path] = set()
+    for folder in folders:
+        for path in list_source_files(folder):
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                files.append(path)
+    return sorted(files)
 
 
 def read_file(path: Path) -> pd.DataFrame:
@@ -100,9 +122,9 @@ def standardize_columns(df: pd.DataFrame, alias_lookup: Dict[str, str]) -> pd.Da
     return df.rename(columns=renamed)
 
 
-def combine_sources(folder: Path, source_type: str, alias_lookup: Dict[str, str]) -> pd.DataFrame:
+def combine_sources(folders: Iterable[Path], source_type: str, alias_lookup: Dict[str, str]) -> pd.DataFrame:
     frames = []
-    for path in list_source_files(folder):
+    for path in list_source_files_from_folders(folders):
         frame = read_file(path)
         frame = standardize_columns(frame, alias_lookup)
         frame["source_file"] = path.name
@@ -590,8 +612,8 @@ def main() -> None:
     ensure_directories()
     alias_lookup = build_alias_lookup()
 
-    academic_raw = combine_sources(RAW_ACADEMIC_DIR, "academic", alias_lookup)
-    roster_raw = combine_sources(RAW_ROSTER_DIR, "roster", alias_lookup)
+    academic_raw = combine_sources([INBOX_ACADEMIC_DIR, RAW_ACADEMIC_DIR], "academic", alias_lookup)
+    roster_raw = combine_sources([INBOX_ROSTER_DIR, RAW_ROSTER_DIR], "roster", alias_lookup)
 
     academic_df = normalize_academic_records(academic_raw)
     roster_df = normalize_roster_records(roster_raw)

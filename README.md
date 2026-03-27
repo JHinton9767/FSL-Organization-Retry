@@ -15,6 +15,9 @@ This project provides a scalable MVP pipeline for fraternity/sorority academic a
 config/
   column_aliases.json
 data/
+  inbox/
+    academic/
+    rosters/
   raw/
     academic/
     rosters/
@@ -34,7 +37,7 @@ requirements.txt
 
 ## What the pipeline does
 
-1. Reads all `.csv`, `.xlsx`, and `.xls` files from `data/raw/academic` and `data/raw/rosters`
+1. Reads all `.csv`, `.xlsx`, and `.xls` files from `data/inbox/academic`, `data/inbox/rosters`, `data/raw/academic`, and `data/raw/rosters`
 2. Maps inconsistent source columns to a standard schema
 3. Normalizes terms into sortable term keys
 4. Resolves identities using:
@@ -59,7 +62,12 @@ requirements.txt
 
 ## Run
 
-Create the input folders and place source files there:
+For the easiest manual workflow, drag and drop source files into:
+
+- `data/inbox/academic`
+- `data/inbox/rosters`
+
+The pipeline also still supports the original folders:
 
 - `data/raw/academic`
 - `data/raw/rosters`
@@ -70,6 +78,8 @@ Then run:
 python -m pip install -r requirements.txt
 python run_pipeline.py
 ```
+
+Files in `data/inbox/` and generated outputs are ignored by Git so you can work locally without committing source data.
 
 ## Excel / Power Query workflow
 
