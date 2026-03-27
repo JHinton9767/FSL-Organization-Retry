@@ -321,6 +321,10 @@ def normalize_chapter_name(value: str) -> str:
     normalized = re.sub(r"\s*-\s*", "-", normalized)
     normalized = re.sub(r"\(\s+", "(", normalized)
     normalized = re.sub(r"\s+\)", ")", normalized)
+    normalized = re.sub(r"\(\)", "", normalized)
+    normalized = normalized.replace("Alpha Kappa Alpha (Sigma Epsilon)", "Alpha Kappa Alpha")
+    normalized = normalized.replace("Phi Kappa Tau-Gamma Psi", "Phi Kappa Tau")
+    normalized = normalized.replace("Sigma Iota Alpha (Sigma Iota Alpha)", "Sigma Iota Alpha")
     normalized = re.sub(r"\s+", " ", normalized).strip(" -")
     return normalized or "Unknown"
 
