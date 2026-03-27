@@ -1,0 +1,120 @@
+{
+  "student_id": [
+    "student id",
+    "studentid",
+    "banner id",
+    "bannerid",
+    "id",
+    "z number",
+    "znumber"
+  ],
+  "first_name": [
+    "first name",
+    "firstname",
+    "given name"
+  ],
+  "last_name": [
+    "last name",
+    "lastname",
+    "surname",
+    "family name"
+  ],
+  "email": [
+    "email",
+    "email address",
+    "student email"
+  ],
+  "student_status": [
+    "student status",
+    "status",
+    "academic status",
+    "type"
+  ],
+  "major": [
+    "major",
+    "major description",
+    "program",
+    "curriculum"
+  ],
+  "term": [
+    "term",
+    "semester",
+    "term description",
+    "academic period"
+  ],
+  "year": [
+    "year",
+    "academic year"
+  ],
+  "gpa_term": [
+    "term gpa",
+    "gpa",
+    "semester gpa",
+    "texas state gpa"
+  ],
+  "gpa_cum": [
+    "overall gpa",
+    "cumulative gpa",
+    "cum gpa",
+    "cumulative txstate overall gpa",
+    "txstate overall gpa"
+  ],
+  "transfer_gpa": [
+    "transfer gpa"
+  ],
+  "credits_attempted": [
+    "semester hours",
+    "attempted hours",
+    "credits attempted",
+    "hours attempted"
+  ],
+  "credits_earned": [
+    "earned hours",
+    "credits earned",
+    "hours earned",
+    "semester hours earned"
+  ],
+  "academic_standing": [
+    "academic standing",
+    "standing"
+  ],
+  "chapter": [
+    "chapter",
+    "organization",
+    "org",
+    "fraternity/sorority"
+  ],
+  "membership_status": [
+    "membership status",
+    "status code",
+    "member status",
+    "roster status"
+  ],
+  "semester_joined": [
+    "semester joined",
+    "join term",
+    "joined term",
+    "date joined",
+    "semester initiated"
+  ],
+  "position": [
+    "position",
+    "role",
+    "title"
+  ],
+  "pell_flag": [
+    "pell",
+    "pell flag",
+    "pell eligible"
+  ],
+  "graduation_term": [
+    "graduation term",
+    "grad term",
+    "degree term"
+  ],
+  "graduation_year": [
+    "graduation year",
+    "grad year",
+    "degree year"
+  ]
+}
