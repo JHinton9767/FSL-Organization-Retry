@@ -109,6 +109,53 @@ STATUS_MAP = {
     "T": "Transfer",
 }
 
+GREEK_LETTER_WORDS = {
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+    "epsilon",
+    "zeta",
+    "eta",
+    "theta",
+    "iota",
+    "kappa",
+    "lambda",
+    "mu",
+    "nu",
+    "xi",
+    "omicron",
+    "pi",
+    "rho",
+    "sigma",
+    "tau",
+    "upsilon",
+    "phi",
+    "chi",
+    "psi",
+    "omega",
+}
+
+CHAPTER_JUNK_PATTERNS = [
+    r"never responded to email",
+    r"greek leadership honor society",
+    r"fraternity,\s*inc\.?",
+    r"fraternity",
+    r"sorority",
+    r"roster revised 2",
+    r"roster[_\s-]*update",
+    r"revised",
+    r"updated",
+    r"update",
+    r"final",
+    r"roster",
+    r"sept",
+    r"nov",
+    r"\bfall\s*20\d{2}\b",
+    r"\b(19|20)\d{2}\b",
+    r"\b2\b",
+]
+
 
 @dataclass(frozen=True)
 class ExtractedRow:
@@ -250,6 +297,34 @@ def is_placeholder_sheet_name(value: str) -> bool:
     return normalized in {"sheet1", "sheet2", "sheet3"}
 
 
+def normalize_chapter_name(value: str) -> str:
+    cleaned = clean_text(value)
+    if not cleaned:
+        return ""
+
+    for pattern in CHAPTER_JUNK_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"[_.,]+", " ", cleaned)
+    cleaned = re.sub(r"[^A-Za-z()\-\s]+", " ", cleaned)
+
+    parts = re.findall(r"[A-Za-z]+|[()-]", cleaned)
+    kept_parts: List[str] = []
+    for part in parts:
+        lower = part.lower()
+        if part in {"(", ")", "-"}:
+            kept_parts.append(part)
+        elif lower in GREEK_LETTER_WORDS:
+            kept_parts.append(lower.title())
+
+    normalized = " ".join(kept_parts)
+    normalized = re.sub(r"\s*-\s*", "-", normalized)
+    normalized = re.sub(r"\(\s+", "(", normalized)
+    normalized = re.sub(r"\s+\)", ")", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" -")
+    return normalized or "Unknown"
+
+
 def chapter_from_filename(path: Path) -> str:
     stem = clean_text(path.stem)
     if not stem:
@@ -258,18 +333,7 @@ def chapter_from_filename(path: Path) -> str:
     if stem.lower() == "raw roster data":
         return "Unknown"
 
-    cleaned = re.sub(r"\b(fall|spring|summer|winter)\b", "", stem, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bfall\s*20\d{2}\b", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b(19|20)\d{2}\b", "", cleaned)
-    cleaned = re.sub(
-        r"\b(final|roster|updated|update|sept)\b|never responded to email",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"[_-]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_")
-    return cleaned or "Unknown"
+    return normalize_chapter_name(stem)
 
 
 def infer_chapter(path: Path, sheet_name: str) -> str:
@@ -277,12 +341,12 @@ def infer_chapter(path: Path, sheet_name: str) -> str:
         return chapter_from_filename(path)
 
     for candidate in [sheet_name, path.stem, path.parent.name]:
-        cleaned = clean_text(candidate)
+        cleaned = normalize_chapter_name(candidate)
         if not cleaned:
             continue
         if SEMESTER_FOLDER_RE.fullmatch(cleaned):
             continue
-        if cleaned.lower() in {"copy of rosters", "rosters", "raw rosters", "master roster"}:
+        if cleaned.lower() in {"copy of rosters", "rosters", "raw rosters", "master roster", "unknown"}:
             continue
         if re.fullmatch(r"(19|20)\d{2}", cleaned):
             continue
@@ -385,7 +449,7 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
                 status = normalize_status(get_cell(row, header_map.get("status")))
                 semester_joined = get_cell(row, header_map.get("semester_joined"))
                 position = get_cell(row, header_map.get("position"))
-                chapter = get_cell(row, header_map.get("chapter")) or infer_chapter(path, ws.title)
+                chapter = normalize_chapter_name(get_cell(row, header_map.get("chapter"))) or infer_chapter(path, ws.title)
 
                 core_values = [last_name, first_name, banner_id, email, status, semester_joined, position, chapter]
                 if row_is_empty(core_values):
