@@ -60,9 +60,17 @@ STATUS_PRIORITY = {
     "Transfer": 65,
     "Inactive": 60,
     "Active": 50,
-    "New Member": 40,
+    "New Member": 55,
     "": 0,
 }
+
+OUTCOME_ORDER = [
+    "Graduated",
+    "Dropped",
+    "Suspended",
+    "Transfer",
+    "Still Active / Unknown",
+]
 
 
 @dataclass(frozen=True)
@@ -79,8 +87,10 @@ class MemberJourney:
     left_term: str
     exit_reason: str
     final_status: str
+    outcome_group: str
     returned_later: str
     semester_count: int
+    semesters_from_new_member: int
     term_history: str
     status_history: str
 
@@ -98,8 +108,10 @@ class MemberJourney:
             self.left_term,
             self.exit_reason,
             self.final_status,
+            self.outcome_group,
             self.returned_later,
             self.semester_count,
+            self.semesters_from_new_member,
             self.term_history,
             self.status_history,
         ]
@@ -149,6 +161,20 @@ def row_identity(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
     return None
 
 
+def canonical_text(value: str) -> str:
+    return " ".join(clean_text(value).lower().replace("/", " ").replace("-", " ").split())
+
+
+def is_new_member_marker(status: str, position: str) -> bool:
+    values = [canonical_text(status), canonical_text(position)]
+    return any(
+        value == "new member"
+        or "new member" in value
+        or value == "nm"
+        for value in values
+    )
+
+
 def dedupe_term_rows(rows: Sequence[ExtractedRow]) -> List[ExtractedRow]:
     best_rows: Dict[Tuple[str, ...], ExtractedRow] = {}
     for row in rows:
@@ -164,6 +190,8 @@ def dedupe_term_rows(rows: Sequence[ExtractedRow]) -> List[ExtractedRow]:
 
 def row_score(row: ExtractedRow) -> int:
     score = STATUS_PRIORITY.get(row.status, 10)
+    if is_new_member_marker(row.status, row.position):
+        score += 10
     if row.banner_id:
         score += 5
     if row.email:
@@ -184,6 +212,25 @@ def choose_status(rows: Sequence[ExtractedRow]) -> str:
 def term_label_sort(term_label: str) -> Tuple[int, int, str]:
     year_match = next((part for part in term_label.split() if part.isdigit() and len(part) == 4), "9999")
     return term_sort_key(year_match, term_label)
+
+
+def extract_term_year(term_label: str) -> Optional[int]:
+    for part in clean_text(term_label).split():
+        if part.isdigit() and len(part) == 4:
+            return int(part)
+    return None
+
+
+def classify_outcome(final_status: str) -> str:
+    if final_status in {"Graduated", "Alumni"}:
+        return "Graduated"
+    if final_status == "Suspended":
+        return "Suspended"
+    if final_status == "Transfer":
+        return "Transfer"
+    if final_status in {"Inactive", "Resigned", "Revoked"}:
+        return "Dropped"
+    return "Still Active / Unknown"
 
 
 def load_master_roster(master_path: Path) -> List[ExtractedRow]:
@@ -286,7 +333,7 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
         new_member_terms = [
             term
             for term, term_rows in zip(ordered_terms, ordered_term_rows)
-            if any(term_row.status == "New Member" for term_row in term_rows)
+            if any(is_new_member_marker(term_row.status, term_row.position) for term_row in term_rows)
         ]
 
         if new_member_terms:
@@ -297,8 +344,13 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
             start_basis = "First Observed"
 
         first_new_member_term = new_member_terms[0] if new_member_terms else ""
+        semesters_from_new_member = semester_count
+        if first_new_member_term:
+            first_new_member_index = ordered_terms.index(first_new_member_term)
+            semesters_from_new_member = len(ordered_terms[first_new_member_index:])
         last_observed_term = ordered_terms[-1]
         final_status = choose_status(ordered_term_rows[-1])
+        outcome_group = classify_outcome(final_status)
 
         left_term = ""
         exit_reason = ""
@@ -331,8 +383,10 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
                 left_term=left_term,
                 exit_reason=exit_reason,
                 final_status=final_status,
+                outcome_group=outcome_group,
                 returned_later=returned_later,
                 semester_count=semester_count,
+                semesters_from_new_member=semesters_from_new_member,
                 term_history=term_history,
                 status_history=status_history,
             )
@@ -350,6 +404,112 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
     )
 
 
+def filter_2015_plus_new_members(journeys: Sequence[MemberJourney]) -> List[MemberJourney]:
+    filtered: List[MemberJourney] = []
+    for journey in journeys:
+        if not journey.first_new_member_term:
+            continue
+        new_member_year = extract_term_year(journey.first_new_member_term)
+        if new_member_year is None or new_member_year < 2015:
+            continue
+        filtered.append(journey)
+    return filtered
+
+
+def write_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -> None:
+    ws = wb.create_sheet(title="Outcome Rates")
+    ws.append(
+        [
+            "Semesters From New Member",
+            "Members",
+            "Graduated Count",
+            "Graduated Rate",
+            "Dropped Count",
+            "Dropped Rate",
+            "Suspended Count",
+            "Suspended Rate",
+            "Transfer Count",
+            "Transfer Rate",
+            "Still Active / Unknown Count",
+            "Still Active / Unknown Rate",
+        ]
+    )
+    style_header(ws)
+
+    grouped: Dict[int, List[MemberJourney]] = defaultdict(list)
+    for journey in journeys:
+        grouped[journey.semesters_from_new_member].append(journey)
+
+    for semesters in sorted(grouped):
+        semester_group = grouped[semesters]
+        members = len(semester_group)
+        counts = {outcome: 0 for outcome in OUTCOME_ORDER}
+        for journey in semester_group:
+            counts[journey.outcome_group] = counts.get(journey.outcome_group, 0) + 1
+
+        ws.append(
+            [
+                semesters,
+                members,
+                counts["Graduated"],
+                counts["Graduated"] / members if members else 0,
+                counts["Dropped"],
+                counts["Dropped"] / members if members else 0,
+                counts["Suspended"],
+                counts["Suspended"] / members if members else 0,
+                counts["Transfer"],
+                counts["Transfer"] / members if members else 0,
+                counts["Still Active / Unknown"],
+                counts["Still Active / Unknown"] / members if members else 0,
+            ]
+        )
+
+    ws.freeze_panes = "A2"
+    autosize_columns(ws)
+
+
+def write_new_member_journeys_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -> None:
+    ws = wb.create_sheet(title="2015+ New Members")
+    headers = [
+        "Chapter",
+        "Last Name",
+        "First Name",
+        "Banner ID",
+        "Email",
+        "Start Term",
+        "Start Basis",
+        "First New Member Term",
+        "Last Observed Term",
+        "Left Term",
+        "Exit Reason",
+        "Final Status",
+        "Outcome Group",
+        "Returned Later",
+        "Confirmed Join In Window",
+        "Semester Count",
+        "Semesters From New Member",
+        "Term History",
+        "Status History",
+    ]
+    ws.append(headers)
+    style_header(ws)
+
+    for journey in sorted(
+        journeys,
+        key=lambda item: (
+            item.semesters_from_new_member,
+            item.chapter.lower(),
+            item.last_name.lower(),
+            item.first_name.lower(),
+            item.first_new_member_term.lower(),
+        ),
+    ):
+        ws.append(journey.as_list()[:13] + [journey.returned_later, journey.confirmed_join_within_window] + journey.as_list()[14:])
+
+    ws.freeze_panes = "A2"
+    autosize_columns(ws)
+
+
 def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_path: Path, raw_root: Path) -> None:
     ws = wb.active
     ws.title = "Summary"
@@ -360,6 +520,8 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
     confirmed_counts_by_semester = defaultdict(int)
     counts_by_exit_reason = defaultdict(int)
     returned_count = 0
+    new_member_2015_plus = filter_2015_plus_new_members(journeys)
+    outcome_counts = defaultdict(int)
 
     for journey in journeys:
         counts_by_semester[journey.semester_count] += 1
@@ -370,6 +532,9 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
         if journey.returned_later == "Yes":
             returned_count += 1
 
+    for journey in new_member_2015_plus:
+        outcome_counts[journey.outcome_group] += 1
+
     metrics = [
         ["Master workbook", str(master_path)],
         ["Raw roster folder", str(raw_root)],
@@ -379,6 +544,7 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
         ["Confirmed in-window joins", sum(1 for item in journeys if item.first_new_member_term)],
         ["Unconfirmed pre-window carryovers", sum(1 for item in journeys if not item.first_new_member_term)],
         ["Members who returned after a terminal status", returned_count],
+        ["2015+ new-member journeys", len(new_member_2015_plus)],
     ]
 
     for metric in metrics:
@@ -411,6 +577,19 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
     else:
         ws.append(["None observed", 0])
 
+    ws.append([])
+    ws.append(["2015+ New Member Outcomes", "Member Count", "Rate"])
+    for cell in ws[ws.max_row]:
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        cell.font = Font(bold=True)
+    if new_member_2015_plus:
+        total_new_members = len(new_member_2015_plus)
+        for outcome in OUTCOME_ORDER:
+            count = outcome_counts[outcome]
+            ws.append([outcome, count, count / total_new_members])
+    else:
+        ws.append(["None observed", 0, 0])
+
     ws.freeze_panes = "A2"
     autosize_columns(ws)
 
@@ -433,9 +612,11 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
         "Left Term",
         "Exit Reason",
         "Final Status",
+        "Outcome Group",
         "Returned Later",
         "Confirmed Join In Window",
         "Semester Count",
+        "Semesters From New Member",
         "Term History",
         "Status History",
     ]
@@ -449,7 +630,7 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
             cell.fill = PatternFill("solid", fgColor="D9EAF7")
             cell.font = Font(bold=True)
         for journey in grouped[semester_count]:
-            ws.append(journey.as_list()[:13] + [journey.confirmed_join_within_window] + journey.as_list()[13:])
+            ws.append(journey.as_list()[:14] + [journey.confirmed_join_within_window] + journey.as_list()[14:])
 
         ws.append([])
         ws.append(["Confirmed In-Window Joins Only"])
@@ -460,7 +641,7 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
             cell.font = Font(bold=True)
         for journey in grouped[semester_count]:
             if journey.first_new_member_term:
-                ws.append(journey.as_list()[:13] + [journey.confirmed_join_within_window] + journey.as_list()[13:])
+                ws.append(journey.as_list()[:14] + [journey.confirmed_join_within_window] + journey.as_list()[14:])
         ws.freeze_panes = "A2"
         autosize_columns(ws)
 
@@ -479,6 +660,8 @@ def build_member_tenure_report(master_path: Path, raw_root: Path, output_path: P
 
     wb = Workbook()
     write_summary_sheet(wb, journeys, master_path, raw_root)
+    write_outcome_rates_sheet(wb, filter_2015_plus_new_members(journeys))
+    write_new_member_journeys_sheet(wb, filter_2015_plus_new_members(journeys))
     write_semester_sheets(wb, journeys)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

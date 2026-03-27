@@ -97,6 +97,18 @@ This writes a `Yearly/` folder where:
 - each sheet is one chapter present that year
 - each sheet contains `Last Name`, `First Name`, and `Banner ID`
 
+You can also build a tenure and outcome workbook for 2015+ new members:
+
+```powershell
+python run_member_tenure_report.py
+```
+
+This report now:
+
+- treats `New Member` as valid when it appears in either `Status` or `Position`
+- tracks each student's semesters from first observed new-member term to last observed term
+- summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by semesters observed
+
 ## Excel / Power Query workflow
 
 The `powerquery/` folder contains M queries you can paste into Excel Power Query:
