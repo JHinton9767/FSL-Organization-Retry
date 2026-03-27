@@ -52,8 +52,6 @@ HEADER_ALIASES = {
         "student number",
         "banner number",
         "z number",
-        "org name",
-        "organization",
     ],
     "email": [
         "email",
@@ -86,6 +84,7 @@ HEADER_ALIASES = {
     ],
     "chapter": [
         "chapter",
+        "org name",
         "organization",
         "org",
         "group",
