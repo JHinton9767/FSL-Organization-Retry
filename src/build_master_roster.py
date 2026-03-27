@@ -245,7 +245,30 @@ def term_sort_key(academic_year: str, term: str) -> Tuple[int, int, str]:
     return year_value, season_value, term_lower
 
 
+def is_placeholder_sheet_name(value: str) -> bool:
+    normalized = re.sub(r"[\s_]+", "", clean_text(value)).lower()
+    return normalized in {"sheet1", "sheet2", "sheet3"}
+
+
+def chapter_from_filename(path: Path) -> str:
+    stem = clean_text(path.stem)
+    if not stem:
+        return ""
+
+    if stem.lower() == "raw roster data":
+        return "Unknown"
+
+    cleaned = re.sub(r"\b(fall|spring|summer|winter)\b", "", stem, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(19|20)\d{2}\b", "", cleaned)
+    cleaned = re.sub(r"[_-]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_")
+    return cleaned or "Unknown"
+
+
 def infer_chapter(path: Path, sheet_name: str) -> str:
+    if is_placeholder_sheet_name(sheet_name):
+        return chapter_from_filename(path)
+
     for candidate in [sheet_name, path.stem, path.parent.name]:
         cleaned = clean_text(candidate)
         if not cleaned:
