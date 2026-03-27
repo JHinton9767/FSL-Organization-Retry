@@ -137,6 +137,9 @@ GREEK_LETTER_WORDS = {
     "psi",
     "omega",
 }
+ALLOWED_CHAPTER_PHRASES = {
+    "order of omega": "Order of Omega",
+}
 
 CHAPTER_JUNK_PATTERNS = [
     r"never responded to email",
@@ -309,6 +312,11 @@ def normalize_chapter_name(value: str) -> str:
 
     cleaned = re.sub(r"[_.,]+", " ", cleaned)
     cleaned = re.sub(r"[^A-Za-z()\-\s]+", " ", cleaned)
+
+    lowered_cleaned = re.sub(r"\s+", " ", cleaned).strip().lower()
+    for phrase, canonical in ALLOWED_CHAPTER_PHRASES.items():
+        if phrase in lowered_cleaned:
+            return canonical
 
     parts = re.findall(r"[A-Za-z]+|[()-]", cleaned)
     kept_parts: List[str] = []
