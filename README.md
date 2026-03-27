@@ -30,7 +30,9 @@ powerquery/
   RosterFolderTransform.pq
   MasterDataset.pq
 src/
+  build_yearly_chapter_rosters.py
   greek_life_pipeline.py
+run_yearly_chapter_rosters.py
 run_pipeline.py
 requirements.txt
 ```
@@ -80,6 +82,20 @@ python run_pipeline.py
 ```
 
 Files in `data/inbox/` and generated outputs are ignored by Git so you can work locally without committing source data.
+
+## Master roster helpers
+
+Once `Master_FSL_Roster.xlsx` has been created, you can generate yearly chapter workbooks:
+
+```powershell
+python run_yearly_chapter_rosters.py
+```
+
+This writes a `Yearly/` folder where:
+
+- each workbook is one academic year like `2015.xlsx`
+- each sheet is one chapter present that year
+- each sheet contains `Last Name`, `First Name`, and `Banner ID`
 
 ## Excel / Power Query workflow
 

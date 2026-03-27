@@ -339,6 +339,10 @@ def normalize_chapter_name(value: str) -> str:
     return normalized or "Unknown"
 
 
+def is_order_of_omega(chapter: str) -> bool:
+    return normalize_chapter_name(chapter) == "Order of Omega"
+
+
 def chapter_from_filename(path: Path) -> str:
     stem = clean_text(path.stem)
     if not stem:
@@ -615,6 +619,11 @@ def infer_missing_spring_members(rows: List[ExtractedRow]) -> Tuple[List[Extract
     return rows + inferred_rows, len(inferred_rows)
 
 
+def remove_order_of_omega_rows(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
+    filtered = [row for row in rows if not is_order_of_omega(row.chapter)]
+    return filtered, len(rows) - len(filtered)
+
+
 def autosize_columns(ws) -> None:
     max_widths = defaultdict(int)
     for row in ws.iter_rows(values_only=True):
@@ -643,6 +652,7 @@ def write_summary_sheet(
     duplicates_removed: int,
     same_year_id_removed: int,
     inferred_spring_members: int,
+    order_of_omega_removed: int,
 ) -> None:
     ws = wb.active
     ws.title = "Summary"
@@ -675,6 +685,7 @@ def write_summary_sheet(
         ["Duplicate rows removed", duplicates_removed],
         ["Same-semester duplicate Banner IDs removed", same_year_id_removed],
         ["Inferred spring members added", inferred_spring_members],
+        ["Order of Omega rows removed", order_of_omega_removed],
     ]
     for item in metrics:
         ws.append(item)
@@ -812,6 +823,7 @@ def build_master_roster(
     if not keep_duplicates:
         all_rows, _ = dedupe_rows(all_rows)
 
+    all_rows, order_of_omega_removed = remove_order_of_omega_rows(all_rows)
     all_rows, same_year_id_removed = dedupe_same_year_banner_ids(all_rows)
 
     wb = Workbook()
@@ -824,6 +836,7 @@ def build_master_roster(
         duplicates_removed=duplicates_removed,
         same_year_id_removed=same_year_id_removed,
         inferred_spring_members=inferred_spring_members,
+        order_of_omega_removed=order_of_omega_removed,
     )
     write_year_sheets(wb, all_rows, chunk_size=chunk_size)
     output_file.parent.mkdir(parents=True, exist_ok=True)
