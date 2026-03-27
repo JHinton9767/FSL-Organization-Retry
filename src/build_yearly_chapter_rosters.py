@@ -92,13 +92,23 @@ def choose_preferred_member(existing: ChapterMember, candidate: ChapterMember) -
     return existing
 
 
-def dedupe_year_members(rows: Iterable[ChapterMember]) -> List[ChapterMember]:
-    best_rows: Dict[Tuple[str, str, str], ChapterMember] = {}
+def dedupe_chapter_members(rows: Iterable[ChapterMember]) -> List[ChapterMember]:
+    best_rows: Dict[Tuple[str, str, str, str], ChapterMember] = {}
     for row in rows:
         if row.banner_id:
-            key = ("banner", row.banner_id.lower(), "")
+            key = (
+                row.chapter.lower(),
+                "banner",
+                row.banner_id.lower(),
+                "",
+            )
         else:
-            key = ("name", row.last_name.lower(), row.first_name.lower())
+            key = (
+                row.chapter.lower(),
+                "name",
+                row.last_name.lower(),
+                row.first_name.lower(),
+            )
 
         existing = best_rows.get(key)
         if existing is None:
@@ -111,7 +121,6 @@ def dedupe_year_members(rows: Iterable[ChapterMember]) -> List[ChapterMember]:
 
 def rows_to_yearly_chapters(master_rows) -> Dict[str, Dict[str, List[ChapterMember]]]:
     grouped: Dict[str, Dict[str, List[ChapterMember]]] = defaultdict(lambda: defaultdict(list))
-    yearly_rows: Dict[str, List[ChapterMember]] = defaultdict(list)
 
     for row in master_rows:
         academic_year = row.academic_year.strip()
@@ -123,7 +132,7 @@ def rows_to_yearly_chapters(master_rows) -> Dict[str, Dict[str, List[ChapterMemb
         if not any([row.last_name, row.first_name, row.banner_id]):
             continue
 
-        yearly_rows[academic_year].append(
+        grouped[academic_year][chapter].append(
             ChapterMember(
                 chapter=chapter,
                 last_name=row.last_name,
@@ -131,10 +140,6 @@ def rows_to_yearly_chapters(master_rows) -> Dict[str, Dict[str, List[ChapterMemb
                 banner_id=row.banner_id,
             )
         )
-
-    for academic_year, members in yearly_rows.items():
-        for member in dedupe_year_members(members):
-            grouped[academic_year][member.chapter].append(member)
 
     return grouped
 
@@ -147,7 +152,7 @@ def write_year_workbook(academic_year: str, chapter_rows: Dict[str, Sequence[Cha
         ws = wb.create_sheet(title=safe_sheet_name(chapter))
         ws.append(["Last Name", "First Name", "Banner ID"])
         style_header(ws)
-        for member in dedupe_members(chapter_rows[chapter]):
+        for member in dedupe_chapter_members(chapter_rows[chapter]):
             ws.append(member.as_list())
         ws.freeze_panes = "A2"
         autosize_columns(ws)
