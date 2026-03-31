@@ -127,7 +127,7 @@ Recommended Excel setup:
 
 ## Structural notes
 
-- The Python exporter writes year-based Excel sheets with 1000-row blocks to align with the requested workbook structure.
+- The Python exporter writes semester-based Excel sheets within each academic year, split into 1000-row blocks for easier downstream upload/reporting.
 - The master dataset is long-format and extension-ready for Pell, major, and Greek vs non-Greek controls when those columns become available.
 - The pipeline is non-interactive by design: configuration lives in `config/column_aliases.json`.
 

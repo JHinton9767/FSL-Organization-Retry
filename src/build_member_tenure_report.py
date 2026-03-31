@@ -30,7 +30,6 @@ MASTER_REQUIRED_COLUMNS = {
     "Academic Year",
     "Term",
     "Source File",
-    "Source Sheet",
     "Chapter",
     "Last Name",
     "First Name",

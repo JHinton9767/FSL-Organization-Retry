@@ -21,7 +21,6 @@ STANDARD_COLUMNS = [
     "Academic Year",
     "Term",
     "Source File",
-    "Source Sheet",
     "Chapter",
     "Last Name",
     "First Name",
@@ -195,7 +194,6 @@ class ExtractedRow:
             self.academic_year,
             self.term,
             self.source_file,
-            self.source_sheet,
             self.chapter,
             self.last_name,
             self.first_name,
@@ -787,33 +785,31 @@ def write_summary_sheet(
 
 
 def write_year_sheets(wb: Workbook, rows: List[ExtractedRow], chunk_size: int = 1000) -> None:
-    grouped: Dict[str, List[ExtractedRow]] = defaultdict(list)
+    grouped: Dict[Tuple[str, str], List[ExtractedRow]] = defaultdict(list)
     for row in rows:
-        grouped[row.academic_year].append(row)
+        grouped[(row.academic_year, row.term)].append(row)
 
-    for academic_year in sorted(grouped.keys()):
-        year_rows = sorted(
-            grouped[academic_year],
+    for academic_year, term in sorted(grouped.keys(), key=lambda item: term_sort_key(item[0], item[1])):
+        semester_rows = sorted(
+            grouped[(academic_year, term)],
             key=lambda item: (
-                item.banner_id.lower() if item.banner_id else "zzzzzzzz",
+                item.chapter.lower(),
                 item.last_name.lower(),
                 item.first_name.lower(),
-                item.term.lower(),
-                item.chapter.lower(),
+                item.banner_id.lower() if item.banner_id else "zzzzzzzz",
                 item.source_file.lower(),
-                item.source_sheet.lower(),
             ),
         )
 
-        for start in range(0, len(year_rows), chunk_size):
-            end = min(start + chunk_size, len(year_rows))
-            label_start = start + 1
-            label_end = end
-            sheet_name = f"{academic_year}_{label_start:04d}_{label_end:04d}"
+        term_label = re.sub(r"[^A-Za-z0-9]+", "_", clean_text(term)).strip("_") or "Unknown"
+        for start in range(0, len(semester_rows), chunk_size):
+            end = min(start + chunk_size, len(semester_rows))
+            chunk_number = (start // chunk_size) + 1
+            sheet_name = f"{term_label}_{chunk_number:02d}"
             ws = wb.create_sheet(title=sheet_name[:31])
             ws.append(STANDARD_COLUMNS)
             style_header(ws)
-            for row in year_rows[start:end]:
+            for row in semester_rows[start:end]:
                 ws.append(row.as_list())
             ws.freeze_panes = "A2"
             autosize_columns(ws)
