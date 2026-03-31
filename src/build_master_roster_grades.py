@@ -75,6 +75,15 @@ GRADE_COLUMN_ALIASES = {
     "Student Status": {"student status"},
     "Major": {"major"},
     "Semester Hours": {"semester hours"},
+    "Cumulative Hours": {
+        "cumulative hours",
+        "cumulative earned hours",
+        "overall cumulative hours",
+        "txstate cumulative hours",
+        "earned hours to date",
+        "overall earned hours",
+        "cumulative passed hours",
+    },
     "Current Academic Standing": {"current academic standing", "academic standing"},
     "Texas State GPA": {"texas state gpa", "txstate gpa"},
     "Overall GPA": {"overall gpa"},
@@ -100,6 +109,7 @@ COMBINED_COLUMNS = [
     "Grade Student Status",
     "Major",
     "Semester Hours",
+    "Cumulative Hours",
     "Current Academic Standing",
     "Texas State GPA",
     "Overall GPA",
@@ -151,6 +161,7 @@ class GradeRow:
     student_status: str
     major: str
     semester_hours: str
+    cumulative_hours: str
     current_academic_standing: str
     texas_state_gpa: str
     overall_gpa: str
@@ -208,6 +219,7 @@ class CombinedRow:
             grade.student_status if grade else "",
             grade.major if grade else "",
             grade.semester_hours if grade else "",
+            grade.cumulative_hours if grade else "",
             grade.current_academic_standing if grade else "",
             grade.texas_state_gpa if grade else "",
             grade.overall_gpa if grade else "",
@@ -397,6 +409,7 @@ def load_grade_rows(grades_root: Path) -> List[GradeRow]:
                         student_status=get_cell(row, header_map.get("Student Status")),
                         major=get_cell(row, header_map.get("Major")),
                         semester_hours=get_cell(row, header_map.get("Semester Hours")),
+                        cumulative_hours=get_cell(row, header_map.get("Cumulative Hours")),
                         current_academic_standing=get_cell(row, header_map.get("Current Academic Standing")),
                         texas_state_gpa=get_cell(row, header_map.get("Texas State GPA")),
                         overall_gpa=get_cell(row, header_map.get("Overall GPA")),
@@ -653,6 +666,7 @@ def write_unmatched_grades_sheet(wb: Workbook, rows: Sequence[GradeRow]) -> None
             "Student Status",
             "Major",
             "Semester Hours",
+            "Cumulative Hours",
             "Current Academic Standing",
             "Texas State GPA",
             "Overall GPA",
@@ -676,6 +690,7 @@ def write_unmatched_grades_sheet(wb: Workbook, rows: Sequence[GradeRow]) -> None
                 row.student_status,
                 row.major,
                 row.semester_hours,
+                row.cumulative_hours,
                 row.current_academic_standing,
                 row.texas_state_gpa,
                 row.overall_gpa,

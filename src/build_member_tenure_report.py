@@ -24,7 +24,11 @@ from src.build_master_roster import (
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_MASTER_WORKBOOK = ROOT / "Master_FSL_Roster.xlsx"
+DEFAULT_MASTER_ROSTER_WORKBOOK = ROOT / "Master_FSL_Roster.xlsx"
+DEFAULT_MASTER_GRADES_WORKBOOK = ROOT / "Master_Roster_Grades.xlsx"
+DEFAULT_MASTER_WORKBOOK = (
+    DEFAULT_MASTER_GRADES_WORKBOOK if DEFAULT_MASTER_GRADES_WORKBOOK.exists() else DEFAULT_MASTER_ROSTER_WORKBOOK
+)
 DEFAULT_OUTPUT_WORKBOOK = ROOT / "Member_Tenure_Report.xlsx"
 MASTER_REQUIRED_COLUMNS = {
     "Academic Year",
@@ -38,6 +42,16 @@ MASTER_REQUIRED_COLUMNS = {
     "Status",
     "Semester Joined",
     "Position",
+}
+GRADE_AWARE_COLUMNS = {
+    "Grade Student Status",
+    "Semester Hours",
+    "Cumulative Hours",
+    "Current Academic Standing",
+    "Term GPA",
+    "TxState Cumulative GPA",
+    "Overall Cumulative GPA",
+    "Term Passed Hours",
 }
 
 TERMINAL_STATUSES = {
@@ -70,6 +84,43 @@ OUTCOME_ORDER = [
     "Transfer",
     "Still Active / Unknown",
 ]
+HOURS_PER_SEMESTER = 15.0
+
+
+@dataclass(frozen=True)
+class Observation:
+    academic_year: str
+    term: str
+    source_file: str
+    chapter: str
+    last_name: str
+    first_name: str
+    banner_id: str
+    email: str
+    status: str
+    semester_joined: str
+    position: str
+    grade_student_status: str = ""
+    semester_hours: str = ""
+    cumulative_hours: str = ""
+    current_academic_standing: str = ""
+    term_gpa: str = ""
+    txstate_cumulative_gpa: str = ""
+    overall_cumulative_gpa: str = ""
+    term_passed_hours: str = ""
+
+
+@dataclass(frozen=True)
+class GpaPoint:
+    banner_id: str
+    email: str
+    chapter: str
+    term: str
+    semester_at_school: int
+    term_gpa: Optional[float]
+    txstate_cumulative_gpa: Optional[float]
+    overall_cumulative_gpa: Optional[float]
+    cumulative_hours: Optional[float]
 
 
 @dataclass(frozen=True)
@@ -90,6 +141,11 @@ class MemberJourney:
     returned_later: str
     semester_count: int
     semesters_from_new_member: int
+    join_semester_at_school: int
+    exit_semester_at_school: int
+    avg_term_gpa: Optional[float]
+    latest_txstate_cumulative_gpa: Optional[float]
+    latest_overall_cumulative_gpa: Optional[float]
     term_history: str
     status_history: str
 
@@ -111,6 +167,11 @@ class MemberJourney:
             self.returned_later,
             self.semester_count,
             self.semesters_from_new_member,
+            self.join_semester_at_school,
+            self.exit_semester_at_school,
+            self.avg_term_gpa,
+            self.latest_txstate_cumulative_gpa,
+            self.latest_overall_cumulative_gpa,
             self.term_history,
             self.status_history,
         ]
