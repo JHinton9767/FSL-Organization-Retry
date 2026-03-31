@@ -109,6 +109,20 @@ This report now:
 - tracks each student's semesters from first observed new-member term to last observed term
 - summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by semesters observed
 
+You can combine the master roster, semester grade reports, and tenure workbook into one merged file:
+
+```powershell
+python run_master_roster_grades.py --grades-root "C:\path\to\grade reports"
+```
+
+This merged workbook:
+
+- matches semester grade report files named like `Fall 2015 1.xlsx`, `Spring 2016 2.xlsx`, etc.
+- also accepts in-progress filenames with update dates such as `Spring 2026 1 (3.31.26).xlsx`
+- joins grade data onto master roster rows primarily by `Term + Banner ID`, with email/name fallback
+- joins tenure fields by member identity
+- writes semester-based 1000-row chunks plus an `Unmatched Grades` sheet for anything that did not map cleanly
+
 ## Excel / Power Query workflow
 
 The `powerquery/` folder contains M queries you can paste into Excel Power Query:
