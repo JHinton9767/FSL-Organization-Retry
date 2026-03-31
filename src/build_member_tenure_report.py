@@ -184,18 +184,22 @@ class MemberJourney:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build a semester-count member tenure workbook from Master_FSL_Roster.xlsx and the Copy of Rosters folder."
+            "Build a semester-count member tenure workbook from Master_Roster_Grades.xlsx "
+            "(or Master_FSL_Roster.xlsx when the merged workbook is unavailable)."
         )
     )
     parser.add_argument(
         "--master",
         default=str(DEFAULT_MASTER_WORKBOOK),
-        help="Path to Master_FSL_Roster.xlsx. Default: Master_FSL_Roster.xlsx next to the code.",
+        help=(
+            "Path to Master_Roster_Grades.xlsx or Master_FSL_Roster.xlsx. "
+            "Default: Master_Roster_Grades.xlsx when present, otherwise Master_FSL_Roster.xlsx."
+        ),
     )
     parser.add_argument(
         "--raw-root",
         default=str(DEFAULT_INPUT_ROOT),
-        help="Path to the Copy of Rosters folder. Default: Copy of Rosters next to the code.",
+        help="Path to the Copy of Rosters folder. Used only as a fallback for roster-only runs.",
     )
     parser.add_argument(
         "-o",
@@ -211,7 +215,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def row_identity(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
+def to_float(value: str) -> Optional[float]:
+    text = clean_text(value).replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def row_identity(row: Observation) -> Optional[Tuple[str, ...]]:
     if row.banner_id:
         return ("banner", row.chapter.lower(), row.banner_id.lower())
     if row.email:
@@ -235,8 +249,21 @@ def is_new_member_marker(status: str, position: str) -> bool:
     )
 
 
-def dedupe_term_rows(rows: Sequence[ExtractedRow]) -> List[ExtractedRow]:
-    best_rows: Dict[Tuple[str, ...], ExtractedRow] = {}
+def has_grade_data(row: Observation) -> bool:
+    return any(
+        [
+            row.term_gpa,
+            row.txstate_cumulative_gpa,
+            row.overall_cumulative_gpa,
+            row.cumulative_hours,
+            row.semester_hours,
+            row.current_academic_standing,
+        ]
+    )
+
+
+def dedupe_term_rows(rows: Sequence[Observation]) -> List[Observation]:
+    best_rows: Dict[Tuple[str, ...], Observation] = {}
     for row in rows:
         identity = row_identity(row)
         if identity is None:
@@ -248,7 +275,7 @@ def dedupe_term_rows(rows: Sequence[ExtractedRow]) -> List[ExtractedRow]:
     return list(best_rows.values())
 
 
-def row_score(row: ExtractedRow) -> int:
+def row_score(row: Observation) -> int:
     score = STATUS_PRIORITY.get(row.status, 10)
     if is_new_member_marker(row.status, row.position):
         score += 10
@@ -258,15 +285,21 @@ def row_score(row: ExtractedRow) -> int:
         score += 3
     if row.semester_joined:
         score += 1
+    if has_grade_data(row):
+        score += 4
     return score
 
 
-def choose_best_identity_row(rows: Sequence[ExtractedRow]) -> ExtractedRow:
+def choose_best_identity_row(rows: Sequence[Observation]) -> Observation:
     return max(rows, key=row_score)
 
 
-def choose_status(rows: Sequence[ExtractedRow]) -> str:
+def choose_status(rows: Sequence[Observation]) -> str:
     return max((row.status for row in rows), key=lambda status: STATUS_PRIORITY.get(status, 10))
+
+
+def choose_best_term_observation(rows: Sequence[Observation]) -> Observation:
+    return max(rows, key=row_score)
 
 
 def term_label_sort(term_label: str) -> Tuple[int, int, str]:
@@ -293,11 +326,44 @@ def classify_outcome(final_status: str) -> str:
     return "Still Active / Unknown"
 
 
-def load_master_roster(master_path: Path) -> List[ExtractedRow]:
-    rows: List[ExtractedRow] = []
-    if not master_path.exists():
-        return rows
+def estimate_semester_number_from_cumulative_hours(cumulative_hours: Optional[float]) -> Optional[int]:
+    if cumulative_hours is None:
+        return None
+    return max(1, int(round(cumulative_hours / HOURS_PER_SEMESTER)) + 1)
 
+
+def infer_semester_numbers(term_rows: Sequence[Sequence[Observation]]) -> List[int]:
+    candidate_numbers: List[Optional[int]] = []
+    for rows in term_rows:
+        candidates = [
+            estimate_semester_number_from_cumulative_hours(to_float(row.cumulative_hours))
+            for row in rows
+            if to_float(row.cumulative_hours) is not None
+        ]
+        candidate_numbers.append(max(candidates) if candidates else None)
+
+    start_estimate = 1
+    for idx, candidate in enumerate(candidate_numbers):
+        if candidate is not None:
+            start_estimate = max(start_estimate, candidate - idx)
+
+    semester_numbers: List[int] = []
+    for idx, candidate in enumerate(candidate_numbers):
+        estimated = start_estimate + idx
+        if candidate is not None:
+            estimated = max(estimated, candidate)
+        if semester_numbers:
+            estimated = max(estimated, semester_numbers[-1] + 1)
+        semester_numbers.append(estimated)
+    return semester_numbers
+
+
+def load_master_observations(master_path: Path) -> Tuple[List[Observation], bool]:
+    rows: List[Observation] = []
+    if not master_path.exists():
+        return rows, False
+
+    grade_aware = False
     wb = load_workbook(master_path, data_only=True, read_only=True)
     try:
         for ws in wb.worksheets:
@@ -309,44 +375,41 @@ def load_master_roster(master_path: Path) -> List[ExtractedRow]:
                 continue
 
             header_values = [clean_text(value) for value in sheet_rows[0]]
-            if not MASTER_REQUIRED_COLUMNS.issubset(set(header_values)):
+            header_set = set(header_values)
+            if not MASTER_REQUIRED_COLUMNS.issubset(header_set):
                 continue
 
+            grade_aware = grade_aware or bool(GRADE_AWARE_COLUMNS.intersection(header_set))
             header_map = {header: idx for idx, header in enumerate(header_values)}
 
             for row in sheet_rows[1:]:
-                chapter = get_value(row, header_map, "Chapter")
-                last_name = get_value(row, header_map, "Last Name")
-                first_name = get_value(row, header_map, "First Name")
-                banner_id = normalize_banner_id(get_value(row, header_map, "Banner ID"))
-                email = get_value(row, header_map, "Email").lower()
-                status = normalize_status(get_value(row, header_map, "Status"))
-                semester_joined = get_value(row, header_map, "Semester Joined")
-                term = get_value(row, header_map, "Term")
-                academic_year = get_value(row, header_map, "Academic Year")
-
-                if not any([chapter, last_name, first_name, banner_id, email, status]):
-                    continue
-
-                rows.append(
-                    ExtractedRow(
-                        academic_year=academic_year,
-                        term=term,
-                        source_file=get_value(row, header_map, "Source File"),
-                        source_sheet=get_value(row, header_map, "Source Sheet"),
-                        chapter=chapter,
-                        last_name=last_name,
-                        first_name=first_name,
-                        banner_id=banner_id,
-                        email=email,
-                        status=status,
-                        semester_joined=semester_joined,
-                        position=get_value(row, header_map, "Position"),
-                    )
+                observation = Observation(
+                    academic_year=get_value(row, header_map, "Academic Year"),
+                    term=get_value(row, header_map, "Term"),
+                    source_file=get_value(row, header_map, "Source File"),
+                    chapter=get_value(row, header_map, "Chapter"),
+                    last_name=get_value(row, header_map, "Last Name"),
+                    first_name=get_value(row, header_map, "First Name"),
+                    banner_id=normalize_banner_id(get_value(row, header_map, "Banner ID")),
+                    email=get_value(row, header_map, "Email").lower(),
+                    status=normalize_status(get_value(row, header_map, "Status")),
+                    semester_joined=get_value(row, header_map, "Semester Joined"),
+                    position=get_value(row, header_map, "Position"),
+                    grade_student_status=get_value(row, header_map, "Grade Student Status"),
+                    semester_hours=get_value(row, header_map, "Semester Hours"),
+                    cumulative_hours=get_value(row, header_map, "Cumulative Hours"),
+                    current_academic_standing=get_value(row, header_map, "Current Academic Standing"),
+                    term_gpa=get_value(row, header_map, "Term GPA"),
+                    txstate_cumulative_gpa=get_value(row, header_map, "TxState Cumulative GPA"),
+                    overall_cumulative_gpa=get_value(row, header_map, "Overall Cumulative GPA"),
+                    term_passed_hours=get_value(row, header_map, "Term Passed Hours"),
                 )
+                if not any([observation.chapter, observation.last_name, observation.first_name, observation.banner_id, observation.email, observation.status]):
+                    continue
+                rows.append(observation)
     finally:
         wb.close()
-    return rows
+    return rows, grade_aware
 
 
 def get_value(row: Tuple[object, ...], header_map: Dict[str, int], column: str) -> str:
@@ -356,21 +419,37 @@ def get_value(row: Tuple[object, ...], header_map: Dict[str, int], column: str) 
     return clean_text(row[idx])
 
 
-def load_raw_rosters(raw_root: Path, verbose: bool = False) -> List[ExtractedRow]:
-    rows: List[ExtractedRow] = []
+def observation_from_extracted_row(row: ExtractedRow) -> Observation:
+    return Observation(
+        academic_year=row.academic_year,
+        term=row.term,
+        source_file=row.source_file,
+        chapter=row.chapter,
+        last_name=row.last_name,
+        first_name=row.first_name,
+        banner_id=row.banner_id,
+        email=row.email.lower(),
+        status=normalize_status(row.status),
+        semester_joined=row.semester_joined,
+        position=row.position,
+    )
+
+
+def load_raw_rosters(raw_root: Path, verbose: bool = False) -> List[Observation]:
+    rows: List[Observation] = []
     if not raw_root.exists():
         return rows
 
     files = sorted(path for path in raw_root.rglob("*") if path.suffix.lower() in SUPPORTED_EXTENSIONS)
     for path in files:
         extracted, _ = extract_rows_from_workbook(path, verbose=verbose)
-        rows.extend(extracted)
+        rows.extend(observation_from_extracted_row(row) for row in extracted)
     return rows
 
 
-def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
+def build_member_journeys(rows: Sequence[Observation]) -> Tuple[List[MemberJourney], List[GpaPoint]]:
     deduped_rows = dedupe_term_rows(rows)
-    rows_by_member: Dict[Tuple[str, ...], List[ExtractedRow]] = defaultdict(list)
+    rows_by_member: Dict[Tuple[str, ...], List[Observation]] = defaultdict(list)
 
     for row in deduped_rows:
         identity = row_identity(row)
@@ -379,35 +458,39 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
         rows_by_member[identity].append(row)
 
     journeys: List[MemberJourney] = []
+    gpa_points: List[GpaPoint] = []
 
     for member_rows in rows_by_member.values():
         best_identity = choose_best_identity_row(member_rows)
-        rows_by_term: Dict[str, List[ExtractedRow]] = defaultdict(list)
+        rows_by_term: Dict[str, List[Observation]] = defaultdict(list)
         for row in member_rows:
             rows_by_term[row.term].append(row)
 
         ordered_terms = sorted(rows_by_term.keys(), key=term_label_sort)
         ordered_term_rows = [rows_by_term[term] for term in ordered_terms]
+        best_term_rows = [choose_best_term_observation(term_rows) for term_rows in ordered_term_rows]
+        semester_numbers = infer_semester_numbers(ordered_term_rows)
         semester_count = len(ordered_terms)
 
-        new_member_terms = [
-            term
-            for term, term_rows in zip(ordered_terms, ordered_term_rows)
+        new_member_indices = [
+            idx
+            for idx, term_rows in enumerate(ordered_term_rows)
             if any(is_new_member_marker(term_row.status, term_row.position) for term_row in term_rows)
         ]
 
-        if new_member_terms:
-            start_term = new_member_terms[0]
+        if new_member_indices:
+            start_idx = new_member_indices[0]
+            start_term = ordered_terms[start_idx]
             start_basis = "Observed New Member"
         else:
+            start_idx = 0
             start_term = ordered_terms[0]
             start_basis = "First Observed"
 
-        first_new_member_term = new_member_terms[0] if new_member_terms else ""
-        semesters_from_new_member = semester_count
-        if first_new_member_term:
-            first_new_member_index = ordered_terms.index(first_new_member_term)
-            semesters_from_new_member = len(ordered_terms[first_new_member_index:])
+        first_new_member_term = ordered_terms[start_idx] if new_member_indices else ""
+        semesters_from_new_member = len(ordered_terms[start_idx:])
+        join_semester_at_school = semester_numbers[start_idx]
+        exit_semester_at_school = semester_numbers[-1]
         last_observed_term = ordered_terms[-1]
         final_status = choose_status(ordered_term_rows[-1])
         outcome_group = classify_outcome(final_status)
@@ -429,6 +512,23 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
             f"{term}: {choose_status(term_rows)}" for term, term_rows in zip(ordered_terms, ordered_term_rows)
         )
 
+        term_gpas = [to_float(row.term_gpa) for row in best_term_rows[start_idx:] if to_float(row.term_gpa) is not None]
+        avg_term_gpa = sum(term_gpas) / len(term_gpas) if term_gpas else None
+
+        txstate_cumulative_values = [
+            to_float(row.txstate_cumulative_gpa)
+            for row in best_term_rows[start_idx:]
+            if to_float(row.txstate_cumulative_gpa) is not None
+        ]
+        latest_txstate_cumulative_gpa = txstate_cumulative_values[-1] if txstate_cumulative_values else None
+
+        overall_cumulative_values = [
+            to_float(row.overall_cumulative_gpa)
+            for row in best_term_rows[start_idx:]
+            if to_float(row.overall_cumulative_gpa) is not None
+        ]
+        latest_overall_cumulative_gpa = overall_cumulative_values[-1] if overall_cumulative_values else None
+
         journeys.append(
             MemberJourney(
                 chapter=best_identity.chapter,
@@ -447,20 +547,46 @@ def build_member_journeys(rows: Sequence[ExtractedRow]) -> List[MemberJourney]:
                 returned_later=returned_later,
                 semester_count=semester_count,
                 semesters_from_new_member=semesters_from_new_member,
+                join_semester_at_school=join_semester_at_school,
+                exit_semester_at_school=exit_semester_at_school,
+                avg_term_gpa=avg_term_gpa,
+                latest_txstate_cumulative_gpa=latest_txstate_cumulative_gpa,
+                latest_overall_cumulative_gpa=latest_overall_cumulative_gpa,
                 term_history=term_history,
                 status_history=status_history,
             )
         )
 
-    return sorted(
-        journeys,
-        key=lambda item: (
-            item.semester_count,
-            item.chapter.lower(),
-            item.last_name.lower(),
-            item.first_name.lower(),
-            item.start_term.lower(),
+        new_member_year = extract_term_year(first_new_member_term)
+        if first_new_member_term and new_member_year is not None and new_member_year >= 2015:
+            for idx in range(start_idx, len(ordered_terms)):
+                term_row = best_term_rows[idx]
+                gpa_points.append(
+                    GpaPoint(
+                        banner_id=best_identity.banner_id,
+                        email=best_identity.email,
+                        chapter=best_identity.chapter,
+                        term=ordered_terms[idx],
+                        semester_at_school=semester_numbers[idx],
+                        term_gpa=to_float(term_row.term_gpa),
+                        txstate_cumulative_gpa=to_float(term_row.txstate_cumulative_gpa),
+                        overall_cumulative_gpa=to_float(term_row.overall_cumulative_gpa),
+                        cumulative_hours=to_float(term_row.cumulative_hours),
+                    )
+                )
+
+    return (
+        sorted(
+            journeys,
+            key=lambda item: (
+                item.exit_semester_at_school,
+                item.chapter.lower(),
+                item.last_name.lower(),
+                item.first_name.lower(),
+                item.start_term.lower(),
+            ),
         ),
+        gpa_points,
     )
 
 
@@ -480,7 +606,7 @@ def write_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -
     ws = wb.create_sheet(title="Outcome Rates")
     ws.append(
         [
-            "Semesters From New Member",
+            "Estimated Semesters At School",
             "Members",
             "Graduated Count",
             "Graduated Rate",
@@ -492,24 +618,39 @@ def write_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -
             "Transfer Rate",
             "Still Active / Unknown Count",
             "Still Active / Unknown Rate",
+            "Average Term GPA",
+            "Latest TxState Cumulative GPA",
+            "Latest Overall Cumulative GPA",
         ]
     )
     style_header(ws)
 
     grouped: Dict[int, List[MemberJourney]] = defaultdict(list)
     for journey in journeys:
-        grouped[journey.semesters_from_new_member].append(journey)
+        grouped[journey.exit_semester_at_school].append(journey)
 
-    for semesters in sorted(grouped):
-        semester_group = grouped[semesters]
+    for semester_at_school in sorted(grouped):
+        semester_group = grouped[semester_at_school]
         members = len(semester_group)
         counts = {outcome: 0 for outcome in OUTCOME_ORDER}
         for journey in semester_group:
             counts[journey.outcome_group] = counts.get(journey.outcome_group, 0) + 1
 
+        avg_term_values = [journey.avg_term_gpa for journey in semester_group if journey.avg_term_gpa is not None]
+        latest_txstate_values = [
+            journey.latest_txstate_cumulative_gpa
+            for journey in semester_group
+            if journey.latest_txstate_cumulative_gpa is not None
+        ]
+        latest_overall_values = [
+            journey.latest_overall_cumulative_gpa
+            for journey in semester_group
+            if journey.latest_overall_cumulative_gpa is not None
+        ]
+
         ws.append(
             [
-                semesters,
+                semester_at_school,
                 members,
                 counts["Graduated"],
                 counts["Graduated"] / members if members else 0,
@@ -521,6 +662,63 @@ def write_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -
                 counts["Transfer"] / members if members else 0,
                 counts["Still Active / Unknown"],
                 counts["Still Active / Unknown"] / members if members else 0,
+                sum(avg_term_values) / len(avg_term_values) if avg_term_values else "",
+                sum(latest_txstate_values) / len(latest_txstate_values) if latest_txstate_values else "",
+                sum(latest_overall_values) / len(latest_overall_values) if latest_overall_values else "",
+            ]
+        )
+
+    ws.freeze_panes = "A2"
+    autosize_columns(ws)
+
+
+def write_gpa_by_semester_sheet(wb: Workbook, points: Sequence[GpaPoint]) -> None:
+    ws = wb.create_sheet(title="GPA by Semester")
+    ws.append(
+        [
+            "Estimated Semesters At School",
+            "Records",
+            "Distinct Members",
+            "Average Term GPA",
+            "Average TxState Cumulative GPA",
+            "Average Overall Cumulative GPA",
+            "Average Cumulative Hours",
+        ]
+    )
+    style_header(ws)
+
+    grouped: Dict[int, List[GpaPoint]] = defaultdict(list)
+    for point in points:
+        grouped[point.semester_at_school].append(point)
+
+    for semester_at_school in sorted(grouped):
+        semester_points = grouped[semester_at_school]
+        members = {
+            (point.banner_id.lower() if point.banner_id else "", point.email.lower())
+            for point in semester_points
+        }
+        term_gpas = [point.term_gpa for point in semester_points if point.term_gpa is not None]
+        txstate_cumulative = [
+            point.txstate_cumulative_gpa
+            for point in semester_points
+            if point.txstate_cumulative_gpa is not None
+        ]
+        overall_cumulative = [
+            point.overall_cumulative_gpa
+            for point in semester_points
+            if point.overall_cumulative_gpa is not None
+        ]
+        cumulative_hours = [point.cumulative_hours for point in semester_points if point.cumulative_hours is not None]
+
+        ws.append(
+            [
+                semester_at_school,
+                len(semester_points),
+                len(members),
+                sum(term_gpas) / len(term_gpas) if term_gpas else "",
+                sum(txstate_cumulative) / len(txstate_cumulative) if txstate_cumulative else "",
+                sum(overall_cumulative) / len(overall_cumulative) if overall_cumulative else "",
+                sum(cumulative_hours) / len(cumulative_hours) if cumulative_hours else "",
             ]
         )
 
@@ -548,6 +746,11 @@ def write_new_member_journeys_sheet(wb: Workbook, journeys: Sequence[MemberJourn
         "Confirmed Join In Window",
         "Semester Count",
         "Semesters From New Member",
+        "Join Semester At School",
+        "Exit Semester At School",
+        "Average Term GPA",
+        "Latest TxState Cumulative GPA",
+        "Latest Overall Cumulative GPA",
         "Term History",
         "Status History",
     ]
@@ -557,7 +760,7 @@ def write_new_member_journeys_sheet(wb: Workbook, journeys: Sequence[MemberJourn
     for journey in sorted(
         journeys,
         key=lambda item: (
-            item.semesters_from_new_member,
+            item.exit_semester_at_school,
             item.chapter.lower(),
             item.last_name.lower(),
             item.first_name.lower(),
@@ -570,13 +773,21 @@ def write_new_member_journeys_sheet(wb: Workbook, journeys: Sequence[MemberJourn
     autosize_columns(ws)
 
 
-def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_path: Path, raw_root: Path) -> None:
+def write_summary_sheet(
+    wb: Workbook,
+    journeys: Sequence[MemberJourney],
+    gpa_points: Sequence[GpaPoint],
+    master_path: Path,
+    raw_root: Path,
+    used_raw_fallback: bool,
+) -> None:
     ws = wb.active
     ws.title = "Summary"
     ws.append(["Metric", "Value"])
     style_header(ws)
 
     counts_by_semester = defaultdict(int)
+    counts_by_school_semester = defaultdict(int)
     confirmed_counts_by_semester = defaultdict(int)
     counts_by_exit_reason = defaultdict(int)
     returned_count = 0
@@ -585,6 +796,7 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
 
     for journey in journeys:
         counts_by_semester[journey.semester_count] += 1
+        counts_by_school_semester[journey.exit_semester_at_school] += 1
         if journey.first_new_member_term:
             confirmed_counts_by_semester[journey.semester_count] += 1
         if journey.exit_reason:
@@ -598,6 +810,7 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
     metrics = [
         ["Master workbook", str(master_path)],
         ["Raw roster folder", str(raw_root)],
+        ["Used raw roster fallback", "Yes" if used_raw_fallback else "No"],
         ["Distinct member journeys", len(journeys)],
         ["Journeys with observed new-member term", sum(1 for item in journeys if item.first_new_member_term)],
         ["Journeys with inferred first-observed start", sum(1 for item in journeys if not item.first_new_member_term)],
@@ -605,6 +818,7 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
         ["Unconfirmed pre-window carryovers", sum(1 for item in journeys if not item.first_new_member_term)],
         ["Members who returned after a terminal status", returned_count],
         ["2015+ new-member journeys", len(new_member_2015_plus)],
+        ["2015+ GPA observations", len(gpa_points)],
     ]
 
     for metric in metrics:
@@ -617,6 +831,14 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
         cell.font = Font(bold=True)
     for semester_count in sorted(counts_by_semester):
         ws.append([semester_count, counts_by_semester[semester_count]])
+
+    ws.append([])
+    ws.append(["Estimated Semesters At School", "Member Count"])
+    for cell in ws[ws.max_row]:
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        cell.font = Font(bold=True)
+    for semester_count in sorted(counts_by_school_semester):
+        ws.append([semester_count, counts_by_school_semester[semester_count]])
 
     ws.append([])
     ws.append(["Semester Count", "Confirmed In-Window Join Count"])
@@ -657,7 +879,7 @@ def write_summary_sheet(wb: Workbook, journeys: Sequence[MemberJourney], master_
 def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> None:
     grouped: Dict[int, List[MemberJourney]] = defaultdict(list)
     for journey in journeys:
-        grouped[journey.semester_count].append(journey)
+        grouped[journey.exit_semester_at_school].append(journey)
 
     headers = [
         "Chapter",
@@ -675,21 +897,26 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
         "Outcome Group",
         "Returned Later",
         "Confirmed Join In Window",
-        "Semester Count",
+        "Observed Semester Count",
         "Semesters From New Member",
+        "Join Semester At School",
+        "Exit Semester At School",
+        "Average Term GPA",
+        "Latest TxState Cumulative GPA",
+        "Latest Overall Cumulative GPA",
         "Term History",
         "Status History",
     ]
 
-    for semester_count in sorted(grouped):
-        ws = wb.create_sheet(title=f"{semester_count}_Semester"[:31])
+    for semester_at_school in sorted(grouped):
+        ws = wb.create_sheet(title=f"{semester_at_school}_Semester"[:31])
         ws.append(["All Observed Members"])
         ws[ws.max_row][0].font = Font(bold=True)
         ws.append(headers)
         for cell in ws[ws.max_row]:
             cell.fill = PatternFill("solid", fgColor="D9EAF7")
             cell.font = Font(bold=True)
-        for journey in grouped[semester_count]:
+        for journey in grouped[semester_at_school]:
             ws.append(journey.as_list()[:14] + [journey.confirmed_join_within_window] + journey.as_list()[14:])
 
         ws.append([])
@@ -699,7 +926,7 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
         for cell in ws[ws.max_row]:
             cell.fill = PatternFill("solid", fgColor="D9EAF7")
             cell.font = Font(bold=True)
-        for journey in grouped[semester_count]:
+        for journey in grouped[semester_at_school]:
             if journey.first_new_member_term:
                 ws.append(journey.as_list()[:14] + [journey.confirmed_join_within_window] + journey.as_list()[14:])
         ws.freeze_panes = "A2"
@@ -707,21 +934,27 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
 
 
 def build_member_tenure_report(master_path: Path, raw_root: Path, output_path: Path, verbose: bool = False) -> None:
-    master_rows = load_master_roster(master_path)
-    raw_rows = load_raw_rosters(raw_root, verbose=verbose)
+    master_rows, grade_aware = load_master_observations(master_path)
+    raw_rows: List[Observation] = []
+    used_raw_fallback = False
+    if not grade_aware:
+        raw_rows = load_raw_rosters(raw_root, verbose=verbose)
+        used_raw_fallback = bool(raw_rows)
 
     all_rows = master_rows + raw_rows
     if not all_rows:
         raise FileNotFoundError(
-            "No usable roster rows were found in Master_FSL_Roster.xlsx or the Copy of Rosters folder."
+            "No usable roster rows were found in the supplied master workbook or the Copy of Rosters folder."
         )
 
-    journeys = build_member_journeys(all_rows)
+    journeys, gpa_points = build_member_journeys(all_rows)
+    new_member_journeys = filter_2015_plus_new_members(journeys)
 
     wb = Workbook()
-    write_summary_sheet(wb, journeys, master_path, raw_root)
-    write_outcome_rates_sheet(wb, filter_2015_plus_new_members(journeys))
-    write_new_member_journeys_sheet(wb, filter_2015_plus_new_members(journeys))
+    write_summary_sheet(wb, journeys, gpa_points, master_path, raw_root, used_raw_fallback)
+    write_outcome_rates_sheet(wb, new_member_journeys)
+    write_gpa_by_semester_sheet(wb, gpa_points)
+    write_new_member_journeys_sheet(wb, new_member_journeys)
     write_semester_sheets(wb, journeys)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

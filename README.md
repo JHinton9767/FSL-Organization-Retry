@@ -106,8 +106,10 @@ python run_member_tenure_report.py
 This report now:
 
 - treats `New Member` as valid when it appears in either `Status` or `Position`
+- prefers `Master_Roster_Grades.xlsx` when available and uses cumulative hours to estimate semesters already spent in school
 - tracks each student's semesters from first observed new-member term to last observed term
-- summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by semesters observed
+- summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by estimated semesters at school
+- adds GPA averages by semester-at-school using the merged roster/grades workbook
 
 You can combine the master roster, semester grade reports, and tenure workbook into one merged file:
 
