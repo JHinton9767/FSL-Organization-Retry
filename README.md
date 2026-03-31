@@ -112,7 +112,7 @@ This report now:
 You can combine the master roster, semester grade reports, and tenure workbook into one merged file:
 
 ```powershell
-python run_master_roster_grades.py --grades-root "C:\path\to\grade reports"
+python run_master_roster_grades.py
 ```
 
 This merged workbook:
@@ -122,6 +122,8 @@ This merged workbook:
 - joins grade data onto master roster rows primarily by `Term + Banner ID`, with email/name fallback
 - joins tenure fields by member identity
 - writes semester-based 1000-row chunks plus an `Unmatched Grades` sheet for anything that did not map cleanly
+
+By default, the merge script now reads grade reports from `data/inbox/academic`.
 
 ## Excel / Power Query workflow
 

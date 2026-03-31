@@ -22,6 +22,7 @@ from src.build_member_tenure_report import DEFAULT_MASTER_WORKBOOK
 
 
 ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_GRADES_ROOT = ROOT / "data" / "inbox" / "academic"
 DEFAULT_TENURE_WORKBOOK = ROOT / "Member_Tenure_Report.xlsx"
 DEFAULT_OUTPUT_WORKBOOK = ROOT / "Master_Roster_Grades.xlsx"
 GRADE_TERM_RE = re.compile(
@@ -246,8 +247,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--grades-root",
-        required=True,
-        help="Folder containing semester grade report workbooks such as 'Fall 2015 1.xlsx'.",
+        default=str(DEFAULT_GRADES_ROOT),
+        help="Folder containing semester grade report workbooks. Default: data\\inbox\\academic",
     )
     parser.add_argument(
         "--tenure",
