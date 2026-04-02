@@ -54,6 +54,11 @@ CSV_FILES = {
     "change_log": "change_log.csv",
 }
 
+UNRESOLVED_OUTCOME_BUCKETS = {
+    "Active/Unknown",
+    "No Further Observation",
+}
+
 
 @dataclass
 class SourceBundle:
@@ -254,6 +259,26 @@ def get_metric_row(
     return matches.iloc[0]
 
 
+def resolved_outcome_mask(frame: pd.DataFrame) -> pd.Series:
+    latest = frame["Latest Known Outcome Bucket"].fillna("").astype(str).str.strip()
+    return ~latest.isin(UNRESOLVED_OUTCOME_BUCKETS)
+
+
+def adjusted_graduation_rate(
+    frame: pd.DataFrame,
+    graduation_field: str,
+    measurable_field: Optional[str] = None,
+) -> Tuple[object, int]:
+    eligible = frame.copy()
+    if measurable_field and measurable_field in eligible.columns:
+        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
+    eligible = eligible.loc[resolved_outcome_mask(eligible)]
+    if eligible.empty:
+        return "", 0
+    graduates = yes_mask(eligible[graduation_field]).sum()
+    return float(graduates) / float(len(eligible)), int(len(eligible))
+
+
 def build_kpis(source_bundle: SourceBundle) -> Tuple[List[Dict[str, object]], List[str]]:
     summary = source_bundle.tables["student_summary"].copy()
     metrics = source_bundle.tables["cohort_metrics"].copy()
@@ -288,15 +313,20 @@ def build_kpis(source_bundle: SourceBundle) -> Tuple[List[Dict[str, object]], Li
         },
     ]
 
+    adjusted_eventual_grad, adjusted_grad_denominator = adjusted_graduation_rate(
+        summary,
+        "Eventual Observed Graduation From Org Entry",
+    )
+    unresolved_share = ""
+    if len(summary):
+        unresolved_share = 1.0 - (adjusted_grad_denominator / float(len(summary)))
+
     metric_specs = [
         (
-            "Observed eventual graduation after joining",
-            "Graduation Outcomes",
-            "Observed eventual graduation from first observed organization term",
-            "Observed Graduation",
-            "Yes",
-            "Rate",
-            "Share of students who are eventually observed as graduated after first observed organization entry.",
+            "Observed graduation rate after joining, excluding unresolved outcomes",
+            adjusted_eventual_grad,
+            "Share of students observed as graduated after first observed organization entry, excluding students whose latest outcome is still unresolved.",
+            "percent",
         ),
         (
             "Returned the next term after joining",
@@ -354,7 +384,18 @@ def build_kpis(source_bundle: SourceBundle) -> Tuple[List[Dict[str, object]], Li
         ),
     ]
 
-    for label, metric_group, metric_label, dimension, value, field_name, explanation in metric_specs:
+    first_item = metric_specs[0]
+    kpis.append(
+        {
+            "Label": first_item[0],
+            "Value": first_item[1],
+            "Display": percent_text(first_item[1]),
+            "Format": first_item[3],
+            "Explanation": f"{first_item[2]} Based on {count_text(adjusted_grad_denominator)} students with a more resolved latest outcome.",
+        }
+    )
+
+    for label, metric_group, metric_label, dimension, value, field_name, explanation in metric_specs[1:]:
         row = get_metric_row(metrics, metric_group, metric_label, "Overall", dimension, value)
         metric_value = row.get(field_name, "") if row is not None else ""
         is_rate = field_name == "Rate"
@@ -367,6 +408,16 @@ def build_kpis(source_bundle: SourceBundle) -> Tuple[List[Dict[str, object]], Li
                 "Explanation": explanation,
             }
         )
+
+    kpis.append(
+        {
+            "Label": "Outcomes still unresolved",
+            "Value": unresolved_share,
+            "Display": percent_text(unresolved_share),
+            "Format": "percent",
+            "Explanation": "Students whose latest outcome is still active/unknown or otherwise unresolved and who are excluded from the adjusted graduation rate.",
+        }
+    )
 
     outcome_rows = metrics[
         (metrics["Metric Group"].fillna("").astype(str) == "Cohort Counts")
@@ -504,36 +555,30 @@ def build_frames(
 
     graduation_rows = []
     for cohort in sorted([value for value in summary["Organization Entry Cohort"].unique().tolist() if clean_text(value)], key=sort_term_label_key):
-        eventual = get_metric_row(
-            metrics,
-            "Graduation Outcomes",
-            "Observed eventual graduation from first observed organization term",
-            cohort,
-            "Observed Graduation",
-            "Yes",
+        cohort_rows = summary.loc[summary["Organization Entry Cohort"] == cohort].copy()
+        eventual, eventual_n = adjusted_graduation_rate(
+            cohort_rows,
+            "Eventual Observed Graduation From Org Entry",
         )
-        grad4 = get_metric_row(
-            metrics,
-            "Graduation Outcomes",
-            "Graduated within 4 years of first observed organization term",
-            cohort,
-            "Observed Graduation",
-            "Yes",
+        grad4, grad4_n = adjusted_graduation_rate(
+            cohort_rows,
+            "Observed Graduation Within 4 Years Of Org Entry",
+            "Observed Graduation Within 4 Years Of Org Entry Measurable",
         )
-        grad6 = get_metric_row(
-            metrics,
-            "Graduation Outcomes",
-            "Graduated within 6 years of first observed organization term",
-            cohort,
-            "Observed Graduation",
-            "Yes",
+        grad6, grad6_n = adjusted_graduation_rate(
+            cohort_rows,
+            "Observed Graduation Within 6 Years Of Org Entry",
+            "Observed Graduation Within 6 Years Of Org Entry Measurable",
         )
         graduation_rows.append(
             {
                 "Cohort": cohort,
-                "Observed eventual graduation": eventual.get("Rate", "") if eventual is not None else "",
-                "Graduated within 4 years": grad4.get("Rate", "") if grad4 is not None else "",
-                "Graduated within 6 years": grad6.get("Rate", "") if grad6 is not None else "",
+                "Observed graduation, excluding unresolved outcomes": eventual,
+                "Graduated within 4 years, excluding unresolved outcomes": grad4,
+                "Graduated within 6 years, excluding unresolved outcomes": grad6,
+                "Students with resolved outcomes": eventual_n,
+                "Resolved 4-year denominator": grad4_n,
+                "Resolved 6-year denominator": grad6_n,
             }
         )
     frames["Graduation by Cohort"] = pd.DataFrame(graduation_rows)
@@ -623,15 +668,34 @@ def build_frames(
             & (segments["Group Size"] >= segment_min_size)
         ].copy()
         if not join_hours.empty:
-            frames["Join Hours Comparison"] = join_hours[
-                [
-                    "Value",
-                    "Group Size",
-                    "Observed Eventual Graduation Rate From Org Entry",
-                    "Retained In Organization To Next Fall",
-                    "Continued Academically To Next Fall",
-                ]
-            ].rename(columns={"Value": "Entry cumulative hours bucket"})
+            join_rows = []
+            for bucket in sorted(join_hours["Value"].dropna().astype(str).unique().tolist()):
+                bucket_rows = summary.loc[summary["Entry Cumulative Hours Bucket"].fillna("").astype(str) == bucket].copy()
+                grad_rate, resolved_n = adjusted_graduation_rate(
+                    bucket_rows,
+                    "Eventual Observed Graduation From Org Entry",
+                )
+                retained_rows = bucket_rows.loc[yes_mask(bucket_rows["Organization Next Fall Measurable"])]
+                acad_rows = bucket_rows.loc[yes_mask(bucket_rows["Academic Next Fall Measurable"])]
+                join_rows.append(
+                    {
+                        "Entry cumulative hours bucket": bucket,
+                        "Group Size": len(bucket_rows),
+                        "Observed graduation, excluding unresolved outcomes": grad_rate,
+                        "Students with resolved outcomes": resolved_n,
+                        "Retained In Organization To Next Fall": (
+                            yes_mask(retained_rows["Retained In Organization To Next Fall"]).sum() / len(retained_rows)
+                            if len(retained_rows)
+                            else ""
+                        ),
+                        "Continued Academically To Next Fall": (
+                            yes_mask(acad_rows["Continued Academically To Next Fall"]).sum() / len(acad_rows)
+                            if len(acad_rows)
+                            else ""
+                        ),
+                    }
+                )
+            frames["Join Hours Comparison"] = pd.DataFrame(join_rows)
         else:
             withheld.append("Join Hours Comparison withheld because no entry-hours groups met the minimum sample size.")
 
@@ -647,16 +711,31 @@ def build_frames(
     )
     chapter_grouped = chapter_grouped[chapter_grouped["Students"] >= chapter_min_size].copy()
     if not chapter_grouped.empty:
-        chapter_grouped["Observed eventual graduation"] = chapter_grouped["Graduated"] / chapter_grouped["Students"]
+        adjusted_chapter_rows = []
+        for _, row in chapter_grouped.iterrows():
+            chapter = row["Initial Chapter"]
+            chapter_rows = summary.loc[summary["Initial Chapter"] == chapter].copy()
+            grad_rate, resolved_n = adjusted_graduation_rate(
+                chapter_rows,
+                "Eventual Observed Graduation From Org Entry",
+            )
+            adjusted_chapter_rows.append((chapter, grad_rate, resolved_n))
+        adjusted_map = {chapter: (rate, resolved_n) for chapter, rate, resolved_n in adjusted_chapter_rows}
+        chapter_grouped["Observed graduation, excluding unresolved outcomes"] = chapter_grouped["Initial Chapter"].map(
+            lambda value: adjusted_map.get(value, ("", ""))[0]
+        )
+        chapter_grouped["Students with resolved outcomes"] = chapter_grouped["Initial Chapter"].map(
+            lambda value: adjusted_map.get(value, ("", ""))[1]
+        )
         chapter_grouped["Returned the following fall"] = chapter_grouped.apply(
             lambda row: row["NextFallRetained"] / row["NextFallEligible"] if row["NextFallEligible"] else math.nan,
             axis=1,
         )
         chapter_grouped = chapter_grouped.sort_values(
-            by=["Students", "Observed eventual graduation"], ascending=[False, False]
+            by=["Students", "Observed graduation, excluding unresolved outcomes"], ascending=[False, False]
         ).head(top_chapters)
         frames["Chapter Comparison"] = chapter_grouped[
-            ["Initial Chapter", "Students", "Observed eventual graduation", "Returned the following fall"]
+            ["Initial Chapter", "Students", "Students with resolved outcomes", "Observed graduation, excluding unresolved outcomes", "Returned the following fall"]
         ].rename(columns={"Initial Chapter": "Chapter"})
     else:
         withheld.append("Chapter Comparison withheld because no chapters met the minimum sample size.")
@@ -668,11 +747,11 @@ def build_takeaways(kpis: Sequence[Dict[str, object]], frames: Dict[str, pd.Data
     by_label = {item["Label"]: item for item in kpis}
     takeaways: List[str] = []
 
-    grad = by_label.get("Observed eventual graduation after joining", {}).get("Display", "Not available")
+    grad = by_label.get("Observed graduation rate after joining, excluding unresolved outcomes", {}).get("Display", "Not available")
     next_fall = by_label.get("Returned the following fall after joining", {}).get("Display", "Not available")
     good_standing = by_label.get("In good academic standing in the first term after joining", {}).get("Display", "Not available")
     takeaways.append(
-        f"Across all observed students, {grad} eventually graduated after first observed organization entry, and {next_fall} were still in the organization the following fall."
+        f"After removing students whose latest outcomes are still unresolved, {grad} of students with more resolved outcomes eventually graduated after first observed organization entry, and {next_fall} were still in the organization the following fall."
     )
     takeaways.append(
         f"Early academic footing looks strongest where students enter and remain in good standing; {good_standing} were in good standing in their first observed academic term after joining."
@@ -726,6 +805,9 @@ def build_definitions_and_limitations(source_bundle: SourceBundle) -> Tuple[List
 def build_qa_notes(source_bundle: SourceBundle, frames: Dict[str, pd.DataFrame], withheld: Sequence[str]) -> List[str]:
     notes: List[str] = []
     qa = source_bundle.tables["qa_checks"].copy()
+    notes.append(
+        "Executive graduation views exclude students whose latest outcome is still 'Active/Unknown' or 'No Further Observation' so recent in-progress cohorts do not artificially lower the displayed graduation rate."
+    )
     if not qa.empty:
         flagged = qa[qa["Status"].fillna("").astype(str) == "Flag"]
         notes.append(f"QA checks flagged in source bundle: {len(flagged)}.")
@@ -943,13 +1025,13 @@ def build_chart_specs(frames: Dict[str, pd.DataFrame]) -> List[Dict[str, object]
         ("cohort_overview", "Cohort Overview", "Students in each organization-entry cohort", "Counts of students first observed in the organization by cohort term", "bar", "Cohort", ["Students"], "count", "This shows where the largest observed entry cohorts appear in the timeline."),
         ("retention_by_cohort", "Retention by Cohort", "Returned after joining", "Compares next-term and next-fall organization retention by cohort", "line", "Cohort", ["Returned the next term", "Returned the following fall"], "percent", "This shows how consistently students remained involved after joining."),
         ("school_continuation_by_cohort", "School Continuation by Cohort", "Still enrolled after joining", "Compares next-term and next-fall academic continuation by cohort", "line", "Cohort", ["Still enrolled next term", "Still enrolled the following fall"], "percent", "This shows how often students are still present in the academic records after joining."),
-        ("graduation_by_cohort", "Graduation Outcomes by Cohort", "Observed graduation after joining", "Compares eventual, 4-year, and 6-year observed graduation rates where measurable", "line", "Cohort", ["Observed eventual graduation", "Graduated within 4 years", "Graduated within 6 years"], "percent", "Long-window graduation rates should be read carefully because recent cohorts are still in progress."),
+        ("graduation_by_cohort", "Graduation Outcomes by Cohort", "Observed graduation after joining", "Compares eventual, 4-year, and 6-year observed graduation rates after removing unresolved outcomes from the denominator", "line", "Cohort", ["Observed graduation, excluding unresolved outcomes", "Graduated within 4 years, excluding unresolved outcomes", "Graduated within 6 years, excluding unresolved outcomes"], "percent", "Long-window graduation rates should be read carefully because recent cohorts are still in progress."),
         ("outcome_mix", "Latest Observed Outcome Mix", "Where students most recently appear to land", "Shows the mix of latest observed outcome categories across all tracked students", "bar", "Latest observed outcome", ["Percent of students"], "percent", "This helps show whether the most common latest outcomes are graduation, transfer, suspension, or uncertain exits."),
         ("credit_momentum", "Credit Momentum After Joining", "Passed hours in the first term and first year", "Shows the share of students meeting common passed-hours milestones after joining", "bar", "Measure", ["Rate"], "percent", "Higher values suggest stronger early academic credit progress."),
         ("gpa_relative_term", "Average GPA After Joining", "Early academic performance after organization entry", "Shows GPA patterns after joining using either relative-term averages or summary-level fallback values", "line", "Relative term after joining", ["Average term GPA"], "decimal", "This helps show whether academic performance looks stable, improving, or weaker after entry."),
         ("standing_overview", "Academic Standing Overview", "First observed academic standing after joining", "Shows how students first appear academically after organization entry", "bar", "Standing group", ["Rate"], "percent", "This helps show whether most students start in good standing or in higher-risk academic situations."),
-        ("join_hours_comparison", "Join Hours Comparison", "Outcomes by cumulative hours at joining", "Compares outcomes for students who joined with different numbers of cumulative hours already completed", "line", "Entry cumulative hours bucket", ["Observed Eventual Graduation Rate From Org Entry", "Retained In Organization To Next Fall", "Continued Academically To Next Fall"], "percent", "This suggests whether students entering at different academic stages had different observed outcomes."),
-        ("chapter_comparison", "Chapter Comparison", "Observed outcomes by chapter", "Compares the largest chapters only, using minimum-size rules to reduce misleading comparisons", "bar", "Chapter", ["Observed eventual graduation", "Returned the following fall"], "percent", "These comparisons are best used as a conversation starter, not as a final judgment of a chapter."),
+        ("join_hours_comparison", "Join Hours Comparison", "Outcomes by cumulative hours at joining", "Compares outcomes for students who joined with different numbers of cumulative hours already completed", "line", "Entry cumulative hours bucket", ["Observed graduation, excluding unresolved outcomes", "Retained In Organization To Next Fall", "Continued Academically To Next Fall"], "percent", "This suggests whether students entering at different academic stages had different observed outcomes."),
+        ("chapter_comparison", "Chapter Comparison", "Observed outcomes by chapter", "Compares the largest chapters only, using minimum-size rules to reduce misleading comparisons", "bar", "Chapter", ["Observed graduation, excluding unresolved outcomes", "Returned the following fall"], "percent", "These comparisons are best used as a conversation starter, not as a final judgment of a chapter."),
     ]
     frame_lookup = {
         "Cohort Overview": "Cohort Overview",
@@ -1166,10 +1248,47 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         sheet.freeze_panes = "A8"
         autosize_columns(sheet)
         if frame.shape[1] >= 2:
+            chart_frame = frame.copy()
+            if frame_key == "Graduation by Cohort":
+                chart_frame = frame[
+                    [
+                        "Cohort",
+                        "Observed graduation, excluding unresolved outcomes",
+                        "Graduated within 4 years, excluding unresolved outcomes",
+                        "Graduated within 6 years, excluding unresolved outcomes",
+                    ]
+                ]
+            elif frame_key == "Chapter Comparison":
+                chart_frame = frame[
+                    [
+                        "Chapter",
+                        "Observed graduation, excluding unresolved outcomes",
+                        "Returned the following fall",
+                    ]
+                ]
+            elif frame_key == "Join Hours Comparison":
+                chart_frame = frame[
+                    [
+                        "Entry cumulative hours bucket",
+                        "Observed graduation, excluding unresolved outcomes",
+                        "Retained In Organization To Next Fall",
+                        "Continued Academically To Next Fall",
+                    ]
+                ]
+            chart_row_start = max(table_end + 3, 7)
+            chart_percent_columns = [col for col in chart_frame.columns if "rate" in col.lower() or "percent" in col.lower()]
+            chart_decimal_columns = [col for col in chart_frame.columns if "gpa" in col.lower() or "average" in col.lower()]
+            chart_table_start, chart_table_end = write_dataframe(
+                sheet,
+                chart_frame,
+                start_row=chart_row_start,
+                percent_columns=chart_percent_columns,
+                decimal_columns=chart_decimal_columns,
+            )
             if chart_type == "line":
-                add_line_chart(sheet, table_start, table_end, sheet_name, frame.columns[0], "Rate" if percent_columns else "Value", chart_anchor, bool(percent_columns))
+                add_line_chart(sheet, chart_table_start, chart_table_end, sheet_name, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, bool(chart_percent_columns))
             else:
-                add_bar_chart(sheet, table_start, table_end, sheet_name, frame.columns[0], "Rate" if percent_columns else "Value", chart_anchor, False, bool(percent_columns))
+                add_bar_chart(sheet, chart_table_start, chart_table_end, sheet_name, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, False, bool(chart_percent_columns))
 
     outcome_ws = wb["Outcome Breakdown"]
     if "Join Hours Comparison" in report.frames and not report.frames["Join Hours Comparison"].empty:
