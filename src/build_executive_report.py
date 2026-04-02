@@ -766,10 +766,10 @@ def build_takeaways(kpis: Sequence[Dict[str, object]], frames: Dict[str, pd.Data
 
     join_hours = frames.get("Join Hours Comparison", pd.DataFrame())
     if not join_hours.empty:
-        valid = join_hours.dropna(subset=["Observed Eventual Graduation Rate From Org Entry"]).copy()
+        valid = join_hours.dropna(subset=["Observed graduation, excluding unresolved outcomes"]).copy()
         if not valid.empty:
             best_row = valid.sort_values(
-                by="Observed Eventual Graduation Rate From Org Entry", ascending=False
+                by="Observed graduation, excluding unresolved outcomes", ascending=False
             ).iloc[0]
             takeaways.append(
                 f"Students who joined with {best_row['Entry cumulative hours bucket']} completed hours had the strongest observed graduation results among the join-hours groups shown."
@@ -1295,7 +1295,16 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         outcome_ws["A24"] = "Additional segment view"
         outcome_ws["A24"].font = Font(bold=True, color=TITLE_FILL)
         outcome_ws["A25"] = "This comparison looks at students based on cumulative hours already completed when they first joined."
-        write_dataframe(outcome_ws, report.frames["Join Hours Comparison"], start_row=27, percent_columns=["Observed Eventual Graduation Rate From Org Entry", "Retained In Organization To Next Fall", "Continued Academically To Next Fall"])
+        write_dataframe(
+            outcome_ws,
+            report.frames["Join Hours Comparison"],
+            start_row=27,
+            percent_columns=[
+                "Observed graduation, excluding unresolved outcomes",
+                "Retained In Organization To Next Fall",
+                "Continued Academically To Next Fall",
+            ],
+        )
         autosize_columns(outcome_ws)
 
     retention_ws = wb["Retention"]
