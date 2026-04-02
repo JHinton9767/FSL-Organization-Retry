@@ -504,17 +504,19 @@ def build_member_journeys(rows: Sequence[Observation]) -> Tuple[List[MemberJourn
             start_idx = new_member_indices[0]
             start_term = ordered_terms[start_idx]
             start_basis = "Observed New Member"
+            join_cumulative_hours = to_float(best_term_rows[start_idx].cumulative_hours)
+            join_cumulative_hours_bucket = bucket_cumulative_hours(join_cumulative_hours)
         else:
             start_idx = 0
             start_term = ordered_terms[0]
             start_basis = "First Observed"
+            join_cumulative_hours = None
+            join_cumulative_hours_bucket = "Unknown"
 
         first_new_member_term = ordered_terms[start_idx] if new_member_indices else ""
         semesters_from_new_member = len(ordered_terms[start_idx:])
         join_semester_at_school = semester_numbers[start_idx]
         exit_semester_at_school = semester_numbers[-1]
-        join_cumulative_hours = to_float(best_term_rows[start_idx].cumulative_hours)
-        join_cumulative_hours_bucket = bucket_cumulative_hours(join_cumulative_hours)
         last_observed_term = ordered_terms[-1]
         final_status = choose_status(ordered_term_rows[-1])
         outcome_group = classify_outcome(final_status)
@@ -901,7 +903,8 @@ def write_summary_sheet(
     for journey in journeys:
         counts_by_semester[journey.semester_count] += 1
         counts_by_school_semester[journey.exit_semester_at_school] += 1
-        counts_by_join_hours_bucket[journey.join_cumulative_hours_bucket] += 1
+        if journey.first_new_member_term:
+            counts_by_join_hours_bucket[journey.join_cumulative_hours_bucket] += 1
         if journey.first_new_member_term:
             confirmed_counts_by_semester[journey.semester_count] += 1
         if journey.exit_reason:
@@ -946,7 +949,7 @@ def write_summary_sheet(
         ws.append([semester_count, counts_by_school_semester[semester_count]])
 
     ws.append([])
-    ws.append(["Join Cumulative Hours Bucket", "Member Count"])
+    ws.append(["Observed Join Cumulative Hours Bucket", "Member Count"])
     for cell in ws[ws.max_row]:
         cell.fill = PatternFill("solid", fgColor="D9EAF7")
         cell.font = Font(bold=True)

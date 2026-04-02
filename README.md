@@ -109,6 +109,7 @@ This report now:
 - prefers `Master_Roster_Grades.xlsx` when available and uses cumulative hours to estimate semesters already spent in school
 - tracks each student's semesters from first observed new-member term to last observed term
 - summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by estimated semesters at school
+- groups observed new-member cohorts into join-hour buckets like `0-29`, `30-59`, `60-89`, etc. and calculates outcome rates for each bucket
 - adds GPA averages by semester-at-school using the merged roster/grades workbook
 
 You can combine the master roster, semester grade reports, and tenure workbook into one merged file:
@@ -126,6 +127,18 @@ This merged workbook:
 - writes semester-based 1000-row chunks plus an `Unmatched Grades` sheet for anything that did not map cleanly
 
 By default, the merge script now reads grade reports from `data/inbox/academic`.
+
+For a fully additive observed-outcomes layer on top of the merged workbook, run:
+
+```powershell
+python run_enhanced_org_analytics.py
+```
+
+This creates a new timestamped folder under `output/enhanced_metrics/` and does not overwrite any existing workbook, CSV, Power Query file, or prior output. The enhanced run writes:
+
+- a versioned Excel workbook with `Master_Longitudinal`, `Student_Summary`, `Cohort_Metrics`, QA, documentation, and segmentation sheets
+- CSV exports for the longitudinal table, student summary, cohort metrics, graduation metrics, continuation metrics, GPA metrics, credit momentum metrics, academic standing metrics, transitions, QA, and changelog
+- `methodology.md` and `CHANGELOG.md` alongside the generated tables
 
 ## Excel / Power Query workflow
 
