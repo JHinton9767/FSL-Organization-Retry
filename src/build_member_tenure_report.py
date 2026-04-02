@@ -85,6 +85,7 @@ OUTCOME_ORDER = [
     "Still Active / Unknown",
 ]
 HOURS_PER_SEMESTER = 15.0
+JOIN_HOURS_BUCKET_SIZE = 30
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,8 @@ class MemberJourney:
     semesters_from_new_member: int
     join_semester_at_school: int
     exit_semester_at_school: int
+    join_cumulative_hours: Optional[float]
+    join_cumulative_hours_bucket: str
     avg_term_gpa: Optional[float]
     latest_txstate_cumulative_gpa: Optional[float]
     latest_overall_cumulative_gpa: Optional[float]
@@ -169,6 +172,8 @@ class MemberJourney:
             self.semesters_from_new_member,
             self.join_semester_at_school,
             self.exit_semester_at_school,
+            self.join_cumulative_hours,
+            self.join_cumulative_hours_bucket,
             self.avg_term_gpa,
             self.latest_txstate_cumulative_gpa,
             self.latest_overall_cumulative_gpa,
@@ -324,6 +329,23 @@ def classify_outcome(final_status: str) -> str:
     if final_status in {"Inactive", "Resigned", "Revoked"}:
         return "Dropped"
     return "Still Active / Unknown"
+
+
+def bucket_cumulative_hours(cumulative_hours: Optional[float]) -> str:
+    if cumulative_hours is None or cumulative_hours < 0:
+        return "Unknown"
+    lower = int(cumulative_hours // JOIN_HOURS_BUCKET_SIZE) * JOIN_HOURS_BUCKET_SIZE
+    upper = lower + JOIN_HOURS_BUCKET_SIZE - 1
+    return f"{lower}-{upper}"
+
+
+def join_hours_bucket_sort_key(bucket: str) -> Tuple[int, int, str]:
+    if bucket == "Unknown":
+        return (1, 999999, bucket)
+    lower_text = bucket.split("-", 1)[0]
+    if lower_text.isdigit():
+        return (0, int(lower_text), bucket)
+    return (1, 999999, bucket)
 
 
 def estimate_semester_number_from_cumulative_hours(cumulative_hours: Optional[float]) -> Optional[int]:
@@ -491,6 +513,8 @@ def build_member_journeys(rows: Sequence[Observation]) -> Tuple[List[MemberJourn
         semesters_from_new_member = len(ordered_terms[start_idx:])
         join_semester_at_school = semester_numbers[start_idx]
         exit_semester_at_school = semester_numbers[-1]
+        join_cumulative_hours = to_float(best_term_rows[start_idx].cumulative_hours)
+        join_cumulative_hours_bucket = bucket_cumulative_hours(join_cumulative_hours)
         last_observed_term = ordered_terms[-1]
         final_status = choose_status(ordered_term_rows[-1])
         outcome_group = classify_outcome(final_status)
@@ -549,6 +573,8 @@ def build_member_journeys(rows: Sequence[Observation]) -> Tuple[List[MemberJourn
                 semesters_from_new_member=semesters_from_new_member,
                 join_semester_at_school=join_semester_at_school,
                 exit_semester_at_school=exit_semester_at_school,
+                join_cumulative_hours=join_cumulative_hours,
+                join_cumulative_hours_bucket=join_cumulative_hours_bucket,
                 avg_term_gpa=avg_term_gpa,
                 latest_txstate_cumulative_gpa=latest_txstate_cumulative_gpa,
                 latest_overall_cumulative_gpa=latest_overall_cumulative_gpa,
@@ -672,6 +698,81 @@ def write_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -
     autosize_columns(ws)
 
 
+def write_join_hours_outcome_rates_sheet(wb: Workbook, journeys: Sequence[MemberJourney]) -> None:
+    ws = wb.create_sheet(title="Join Hours Rates")
+    ws.append(
+        [
+            "Join Cumulative Hours Bucket",
+            "Members",
+            "Graduated Count",
+            "Graduated Rate",
+            "Dropped Count",
+            "Dropped Rate",
+            "Suspended Count",
+            "Suspended Rate",
+            "Transfer Count",
+            "Transfer Rate",
+            "Still Active / Unknown Count",
+            "Still Active / Unknown Rate",
+            "Average Join Cumulative Hours",
+            "Average Term GPA",
+            "Latest TxState Cumulative GPA",
+            "Latest Overall Cumulative GPA",
+        ]
+    )
+    style_header(ws)
+
+    grouped: Dict[str, List[MemberJourney]] = defaultdict(list)
+    for journey in journeys:
+        grouped[journey.join_cumulative_hours_bucket].append(journey)
+
+    for bucket in sorted(grouped, key=join_hours_bucket_sort_key):
+        bucket_group = grouped[bucket]
+        members = len(bucket_group)
+        counts = {outcome: 0 for outcome in OUTCOME_ORDER}
+        for journey in bucket_group:
+            counts[journey.outcome_group] = counts.get(journey.outcome_group, 0) + 1
+
+        join_hours_values = [
+            journey.join_cumulative_hours for journey in bucket_group if journey.join_cumulative_hours is not None
+        ]
+        avg_term_values = [journey.avg_term_gpa for journey in bucket_group if journey.avg_term_gpa is not None]
+        latest_txstate_values = [
+            journey.latest_txstate_cumulative_gpa
+            for journey in bucket_group
+            if journey.latest_txstate_cumulative_gpa is not None
+        ]
+        latest_overall_values = [
+            journey.latest_overall_cumulative_gpa
+            for journey in bucket_group
+            if journey.latest_overall_cumulative_gpa is not None
+        ]
+
+        ws.append(
+            [
+                bucket,
+                members,
+                counts["Graduated"],
+                counts["Graduated"] / members if members else 0,
+                counts["Dropped"],
+                counts["Dropped"] / members if members else 0,
+                counts["Suspended"],
+                counts["Suspended"] / members if members else 0,
+                counts["Transfer"],
+                counts["Transfer"] / members if members else 0,
+                counts["Still Active / Unknown"],
+                counts["Still Active / Unknown"] / members if members else 0,
+                sum(join_hours_values) / len(join_hours_values) if join_hours_values else "",
+                sum(avg_term_values) / len(avg_term_values) if avg_term_values else "",
+                sum(latest_txstate_values) / len(latest_txstate_values) if latest_txstate_values else "",
+                sum(latest_overall_values) / len(latest_overall_values) if latest_overall_values else "",
+            ]
+        )
+
+    ws.freeze_panes = "A2"
+    autosize_columns(ws)
+
+
 def write_gpa_by_semester_sheet(wb: Workbook, points: Sequence[GpaPoint]) -> None:
     ws = wb.create_sheet(title="GPA by Semester")
     ws.append(
@@ -748,6 +849,8 @@ def write_new_member_journeys_sheet(wb: Workbook, journeys: Sequence[MemberJourn
         "Semesters From New Member",
         "Join Semester At School",
         "Exit Semester At School",
+        "Join Cumulative Hours",
+        "Join Cumulative Hours Bucket",
         "Average Term GPA",
         "Latest TxState Cumulative GPA",
         "Latest Overall Cumulative GPA",
@@ -788,6 +891,7 @@ def write_summary_sheet(
 
     counts_by_semester = defaultdict(int)
     counts_by_school_semester = defaultdict(int)
+    counts_by_join_hours_bucket = defaultdict(int)
     confirmed_counts_by_semester = defaultdict(int)
     counts_by_exit_reason = defaultdict(int)
     returned_count = 0
@@ -797,6 +901,7 @@ def write_summary_sheet(
     for journey in journeys:
         counts_by_semester[journey.semester_count] += 1
         counts_by_school_semester[journey.exit_semester_at_school] += 1
+        counts_by_join_hours_bucket[journey.join_cumulative_hours_bucket] += 1
         if journey.first_new_member_term:
             confirmed_counts_by_semester[journey.semester_count] += 1
         if journey.exit_reason:
@@ -839,6 +944,14 @@ def write_summary_sheet(
         cell.font = Font(bold=True)
     for semester_count in sorted(counts_by_school_semester):
         ws.append([semester_count, counts_by_school_semester[semester_count]])
+
+    ws.append([])
+    ws.append(["Join Cumulative Hours Bucket", "Member Count"])
+    for cell in ws[ws.max_row]:
+        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        cell.font = Font(bold=True)
+    for bucket in sorted(counts_by_join_hours_bucket, key=join_hours_bucket_sort_key):
+        ws.append([bucket, counts_by_join_hours_bucket[bucket]])
 
     ws.append([])
     ws.append(["Semester Count", "Confirmed In-Window Join Count"])
@@ -901,6 +1014,8 @@ def write_semester_sheets(wb: Workbook, journeys: Sequence[MemberJourney]) -> No
         "Semesters From New Member",
         "Join Semester At School",
         "Exit Semester At School",
+        "Join Cumulative Hours",
+        "Join Cumulative Hours Bucket",
         "Average Term GPA",
         "Latest TxState Cumulative GPA",
         "Latest Overall Cumulative GPA",
@@ -953,6 +1068,7 @@ def build_member_tenure_report(master_path: Path, raw_root: Path, output_path: P
     wb = Workbook()
     write_summary_sheet(wb, journeys, gpa_points, master_path, raw_root, used_raw_fallback)
     write_outcome_rates_sheet(wb, new_member_journeys)
+    write_join_hours_outcome_rates_sheet(wb, new_member_journeys)
     write_gpa_by_semester_sheet(wb, gpa_points)
     write_new_member_journeys_sheet(wb, new_member_journeys)
     write_semester_sheets(wb, journeys)
