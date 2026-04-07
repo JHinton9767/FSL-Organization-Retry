@@ -279,6 +279,27 @@ def adjusted_graduation_rate(
     return float(graduates) / float(len(eligible)), int(len(eligible))
 
 
+def selected_cumulative_gpa(frame: pd.DataFrame) -> pd.Series:
+    overall = coerce_numeric(frame["Latest Overall Cumulative GPA"]) if "Latest Overall Cumulative GPA" in frame.columns else pd.Series(index=frame.index, dtype=float)
+    txstate = coerce_numeric(frame["Latest TxState Cumulative GPA"]) if "Latest TxState Cumulative GPA" in frame.columns else pd.Series(index=frame.index, dtype=float)
+    return overall.where(overall.notna(), txstate)
+
+
+def cumulative_gpa_band(value: object) -> str:
+    if value in ("", None) or (isinstance(value, float) and math.isnan(value)):
+        return "Unknown"
+    gpa = float(value)
+    if gpa < 2.0:
+        return "Below 2.0"
+    if gpa < 2.5:
+        return "2.0 to 2.49"
+    if gpa < 3.0:
+        return "2.5 to 2.99"
+    if gpa < 3.5:
+        return "3.0 to 3.49"
+    return "3.5 to 4.00"
+
+
 def build_kpis(source_bundle: SourceBundle) -> Tuple[List[Dict[str, object]], List[str]]:
     summary = source_bundle.tables["student_summary"].copy()
     metrics = source_bundle.tables["cohort_metrics"].copy()
@@ -637,6 +658,61 @@ def build_frames(
             "GPA by Relative Term uses summary-level fallback values because Master_Longitudinal was not available or usable."
         )
 
+    gpa_summary = summary.copy()
+    gpa_summary["Selected Cumulative GPA"] = selected_cumulative_gpa(gpa_summary)
+    gpa_summary["Selected Cumulative GPA Band"] = gpa_summary["Selected Cumulative GPA"].apply(cumulative_gpa_band)
+    resolved_gpa_rows = gpa_summary.loc[
+        resolved_outcome_mask(gpa_summary) & gpa_summary["Selected Cumulative GPA"].notna()
+    ].copy()
+
+    if not resolved_gpa_rows.empty:
+        outcome_groups = []
+        for label, mask in [
+            ("Graduated", resolved_gpa_rows["Latest Known Outcome Bucket"].fillna("").astype(str) == "Graduated"),
+            (
+                "Dropped / Suspended / Inactive-type outcomes",
+                resolved_gpa_rows["Latest Known Outcome Bucket"].fillna("").astype(str).isin(
+                    ["Dropped/Resigned/Revoked/Inactive", "Suspended"]
+                ),
+            ),
+            ("Transfer", resolved_gpa_rows["Latest Known Outcome Bucket"].fillna("").astype(str) == "Transfer"),
+        ]:
+            group = resolved_gpa_rows.loc[mask].copy()
+            if group.empty:
+                continue
+            outcome_groups.append(
+                {
+                    "Outcome group": label,
+                    "Students": len(group),
+                    "Average latest cumulative GPA": group["Selected Cumulative GPA"].mean(),
+                }
+            )
+        if outcome_groups:
+            frames["Average GPA by Outcome Group"] = pd.DataFrame(outcome_groups)
+        else:
+            withheld.append("Average GPA by Outcome Group withheld because no resolved GPA outcome groups were available.")
+
+        gpa_band_rows = []
+        band_order = ["Below 2.0", "2.0 to 2.49", "2.5 to 2.99", "3.0 to 3.49", "3.5 to 4.00"]
+        for band in band_order:
+            band_group = resolved_gpa_rows.loc[resolved_gpa_rows["Selected Cumulative GPA Band"] == band].copy()
+            if band_group.empty:
+                continue
+            gpa_band_rows.append(
+                {
+                    "Latest cumulative GPA band": band,
+                    "Students with GPA and resolved outcome": len(band_group),
+                    "Observed graduation rate": yes_mask(band_group["Eventual Observed Graduation From Org Entry"]).sum() / len(band_group),
+                    "Average latest cumulative GPA": band_group["Selected Cumulative GPA"].mean(),
+                }
+            )
+        if gpa_band_rows:
+            frames["Graduation Rate by GPA Band"] = pd.DataFrame(gpa_band_rows)
+        else:
+            withheld.append("Graduation Rate by GPA Band withheld because no resolved cumulative GPA bands were available.")
+    else:
+        withheld.append("GPA-based outcome views were withheld because no resolved students had a usable latest cumulative GPA.")
+
     standing_rows = []
     standing_series = (
         summary["First Academic Standing After Org Entry"]
@@ -775,6 +851,13 @@ def build_takeaways(kpis: Sequence[Dict[str, object]], frames: Dict[str, pd.Data
                 f"Students who joined with {best_row['Entry cumulative hours bucket']} completed hours had the strongest observed graduation results among the join-hours groups shown."
             )
 
+    gpa_band = frames.get("Graduation Rate by GPA Band", pd.DataFrame())
+    if not gpa_band.empty:
+        best_band = gpa_band.sort_values(by="Observed graduation rate", ascending=False).iloc[0]
+        takeaways.append(
+            f"Students in the {best_band['Latest cumulative GPA band']} latest cumulative GPA range had the strongest observed graduation rate among the GPA bands shown."
+        )
+
     takeaways.append(
         "Recent cohorts should be interpreted cautiously because long-term outcomes are still in progress and not every student has had enough observed time to reach 4-year or 6-year milestones."
     )
@@ -789,6 +872,7 @@ def build_definitions_and_limitations(source_bundle: SourceBundle) -> Tuple[List
         ("Earned credit momentum", "How quickly students passed hours after joining, such as passing 15+ hours in the first term or 30+ hours in the first year."),
         ("Observed", "The result is based on records present in the available dataset, not on a complete history from a student’s first day at the university."),
         ("Why some recent cohorts are excluded from long-window metrics", "Recent cohorts have not yet had enough observed time to reach 4-year or 6-year graduation windows, so those rates are shown only where the timeline makes sense."),
+        ("Latest cumulative GPA used in the executive report", "The GPA comparison views use the latest available overall cumulative GPA when present, and otherwise fall back to the latest Texas State cumulative GPA."),
     ]
 
     limitations = [
@@ -1028,7 +1112,9 @@ def build_chart_specs(frames: Dict[str, pd.DataFrame]) -> List[Dict[str, object]
         ("graduation_by_cohort", "Graduation Outcomes by Cohort", "Observed graduation after joining", "Compares eventual, 4-year, and 6-year observed graduation rates after removing unresolved outcomes from the denominator", "line", "Cohort", ["Observed graduation, excluding unresolved outcomes", "Graduated within 4 years, excluding unresolved outcomes", "Graduated within 6 years, excluding unresolved outcomes"], "percent", "Long-window graduation rates should be read carefully because recent cohorts are still in progress."),
         ("outcome_mix", "Latest Observed Outcome Mix", "Where students most recently appear to land", "Shows the mix of latest observed outcome categories across all tracked students", "bar", "Latest observed outcome", ["Percent of students"], "percent", "This helps show whether the most common latest outcomes are graduation, transfer, suspension, or uncertain exits."),
         ("credit_momentum", "Credit Momentum After Joining", "Passed hours in the first term and first year", "Shows the share of students meeting common passed-hours milestones after joining", "bar", "Measure", ["Rate"], "percent", "Higher values suggest stronger early academic credit progress."),
-        ("gpa_relative_term", "Average GPA After Joining", "Early academic performance after organization entry", "Shows GPA patterns after joining using either relative-term averages or summary-level fallback values", "line", "Relative term after joining", ["Average term GPA"], "decimal", "This helps show whether academic performance looks stable, improving, or weaker after entry."),
+        ("gpa_relative_term", "Average GPA Over Time After Joining", "Early academic performance after organization entry", "Shows GPA patterns after joining using either relative-term averages or summary-level fallback values", "line", "Relative term after joining", ["Average term GPA"], "decimal", "This helps show whether academic performance looks stable, improving, or weaker after entry."),
+        ("gpa_outcome_comparison", "Average GPA by Outcome Group", "Average cumulative GPA by outcome group", "Compares the latest available cumulative GPA for graduates versus key non-graduate outcome groups", "bar", "Outcome group", ["Average latest cumulative GPA"], "decimal", "This helps show whether graduates and higher-risk outcome groups appear academically different by latest cumulative GPA."),
+        ("gpa_band_grad_rate", "Graduation Rate by GPA Band", "Graduation outcomes by cumulative GPA range", "Shows the share of students who graduate within each latest cumulative GPA range, excluding unresolved outcomes", "line", "Latest cumulative GPA band", ["Observed graduation rate"], "percent", "This gives a simple view of how graduation rates change across GPA ranges."),
         ("standing_overview", "Academic Standing Overview", "First observed academic standing after joining", "Shows how students first appear academically after organization entry", "bar", "Standing group", ["Rate"], "percent", "This helps show whether most students start in good standing or in higher-risk academic situations."),
         ("join_hours_comparison", "Join Hours Comparison", "Outcomes by cumulative hours at joining", "Compares outcomes for students who joined with different numbers of cumulative hours already completed", "line", "Entry cumulative hours bucket", ["Observed graduation, excluding unresolved outcomes", "Retained In Organization To Next Fall", "Continued Academically To Next Fall"], "percent", "This suggests whether students entering at different academic stages had different observed outcomes."),
         ("chapter_comparison", "Chapter Comparison", "Observed outcomes by chapter", "Compares the largest chapters only, using minimum-size rules to reduce misleading comparisons", "bar", "Chapter", ["Observed graduation, excluding unresolved outcomes", "Returned the following fall"], "percent", "These comparisons are best used as a conversation starter, not as a final judgment of a chapter."),
@@ -1040,7 +1126,9 @@ def build_chart_specs(frames: Dict[str, pd.DataFrame]) -> List[Dict[str, object]
         "Graduation Outcomes by Cohort": "Graduation by Cohort",
         "Latest Observed Outcome Mix": "Outcome Mix",
         "Credit Momentum After Joining": "Credit Momentum Overview",
-        "Average GPA After Joining": "GPA by Relative Term",
+        "Average GPA Over Time After Joining": "GPA by Relative Term",
+        "Average GPA by Outcome Group": "Average GPA by Outcome Group",
+        "Graduation Rate by GPA Band": "Graduation Rate by GPA Band",
         "Academic Standing Overview": "Academic Standing Overview",
         "Join Hours Comparison": "Join Hours Comparison",
         "Chapter Comparison": "Chapter Comparison",
@@ -1285,10 +1373,11 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
                 percent_columns=chart_percent_columns,
                 decimal_columns=chart_decimal_columns,
             )
+            chart_title = "Average GPA Over Time After Joining" if frame_key == "GPA by Relative Term" else sheet_name
             if chart_type == "line":
-                add_line_chart(sheet, chart_table_start, chart_table_end, sheet_name, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, bool(chart_percent_columns))
+                add_line_chart(sheet, chart_table_start, chart_table_end, chart_title, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, bool(chart_percent_columns))
             else:
-                add_bar_chart(sheet, chart_table_start, chart_table_end, sheet_name, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, False, bool(chart_percent_columns))
+                add_bar_chart(sheet, chart_table_start, chart_table_end, chart_title, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, False, bool(chart_percent_columns))
 
     outcome_ws = wb["Outcome Breakdown"]
     if "Join Hours Comparison" in report.frames and not report.frames["Join Hours Comparison"].empty:
@@ -1320,6 +1409,74 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             percent_columns=["Still enrolled next term", "Still enrolled the following fall"],
         )
         autosize_columns(retention_ws)
+
+    gpa_ws = wb["GPA and Academic Progress"]
+    outcome_gpa_frame = report.frames.get("Average GPA by Outcome Group", pd.DataFrame())
+    gpa_band_frame = report.frames.get("Graduation Rate by GPA Band", pd.DataFrame())
+    gpa_section_row = 24
+    if not outcome_gpa_frame.empty:
+        gpa_ws[f"A{gpa_section_row}"] = "Average cumulative GPA by outcome group"
+        gpa_ws[f"A{gpa_section_row}"].font = Font(bold=True, color=TITLE_FILL)
+        gpa_ws[f"A{gpa_section_row + 1}"] = "This compares the latest available cumulative GPA for graduates versus the key non-graduate outcome groups."
+        gpa_ws[f"A{gpa_section_row + 1}"].alignment = Alignment(wrap_text=True)
+        _, outcome_end = write_dataframe(
+            gpa_ws,
+            outcome_gpa_frame,
+            start_row=gpa_section_row + 3,
+            decimal_columns=["Average latest cumulative GPA"],
+        )
+        outcome_chart_frame = outcome_gpa_frame[["Outcome group", "Average latest cumulative GPA"]].copy()
+        outcome_chart_start, outcome_chart_end = write_dataframe(
+            gpa_ws,
+            outcome_chart_frame,
+            start_row=gpa_section_row + 3,
+            start_col=8,
+            decimal_columns=["Average latest cumulative GPA"],
+        )
+        add_bar_chart(
+            gpa_ws,
+            outcome_chart_start,
+            outcome_chart_end,
+            "Average GPA by Outcome Group",
+            "Outcome group",
+            "Average cumulative GPA",
+            "F24",
+            False,
+            False,
+        )
+        gpa_section_row = outcome_end + 4
+
+    if not gpa_band_frame.empty:
+        gpa_ws[f"A{gpa_section_row}"] = "Graduation rate by cumulative GPA band"
+        gpa_ws[f"A{gpa_section_row}"].font = Font(bold=True, color=TITLE_FILL)
+        gpa_ws[f"A{gpa_section_row + 1}"] = "This shows the percent of students who graduate within each latest cumulative GPA range, excluding unresolved outcomes."
+        gpa_ws[f"A{gpa_section_row + 1}"].alignment = Alignment(wrap_text=True)
+        _, band_end = write_dataframe(
+            gpa_ws,
+            gpa_band_frame,
+            start_row=gpa_section_row + 3,
+            percent_columns=["Observed graduation rate"],
+            decimal_columns=["Average latest cumulative GPA"],
+        )
+        gpa_band_chart_frame = gpa_band_frame[["Latest cumulative GPA band", "Observed graduation rate"]].copy()
+        band_chart_start, band_chart_end = write_dataframe(
+            gpa_ws,
+            gpa_band_chart_frame,
+            start_row=gpa_section_row + 3,
+            start_col=8,
+            percent_columns=["Observed graduation rate"],
+        )
+        add_line_chart(
+            gpa_ws,
+            band_chart_start,
+            band_chart_end,
+            "Graduation Rate by GPA Band",
+            "Latest cumulative GPA band",
+            "Graduation rate",
+            f"F{gpa_section_row}",
+            True,
+        )
+        autosize_columns(gpa_ws)
 
     definitions_ws = wb.create_sheet(title="Definitions and Notes")
     style_sheet_title(definitions_ws, "Definitions and Notes", "Short plain-language explanations of how to read the measures in this package.")
