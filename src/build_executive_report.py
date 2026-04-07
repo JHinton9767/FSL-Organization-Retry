@@ -92,6 +92,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segment-min-size", type=int, default=DEFAULT_SEGMENT_MIN_SIZE)
     parser.add_argument("--chapter-min-size", type=int, default=DEFAULT_CHAPTER_MIN_SIZE)
     parser.add_argument("--top-chapters", type=int, default=DEFAULT_TOP_CHAPTER_COUNT)
+    parser.add_argument("--include-charts", action="store_true")
     parser.add_argument("--skip-chart-export", action="store_true")
     return parser.parse_args()
 
@@ -1161,7 +1162,9 @@ def build_chart_specs(frames: Dict[str, pd.DataFrame]) -> List[Dict[str, object]
     return specs
 
 
-def write_chart_data(output_folder: Path, frames: Dict[str, pd.DataFrame], chart_specs: Sequence[Dict[str, object]]) -> Path:
+def write_chart_data(output_folder: Path, frames: Dict[str, pd.DataFrame], chart_specs: Sequence[Dict[str, object]]) -> Optional[Path]:
+    if not chart_specs:
+        return None
     charts_dir = output_folder / "charts"
     data_dir = charts_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -1209,7 +1212,13 @@ def write_markdown_summary(output_folder: Path, report: ReportBundle) -> Path:
     return path
 
 
-def write_reporting_readme(output_folder: Path, report: ReportBundle, workbook_path: Path, slides_path: Path) -> Path:
+def write_reporting_readme(
+    output_folder: Path,
+    report: ReportBundle,
+    workbook_path: Path,
+    slides_path: Path,
+    include_charts: bool,
+) -> Path:
     path = output_folder / "Reporting_README.md"
     lines = [
         "# Reporting Package",
@@ -1221,11 +1230,12 @@ def write_reporting_readme(output_folder: Path, report: ReportBundle, workbook_p
         f"- `{workbook_path.name}`: executive-facing workbook with summary pages, charts, supporting tables, definitions, QA, and appendix material.",
         f"- `{slides_path.name}`: chart-ready and slide-ready data tables.",
         "- `Executive_Summary.md`: one-page plain-English summary.",
-        "- `charts/`: exported PNG charts and chart source data.",
         "",
         "## Source bundle used",
         "",
     ]
+    if include_charts:
+        lines.insert(10, "- `charts/`: exported PNG charts and chart source data.")
     for item in report.source_bundle.sources_used:
         lines.append(f"- `{item}`")
     lines.extend(["", "## Sources intentionally not used directly", ""])
@@ -1266,7 +1276,7 @@ def write_slides_data_workbook(output_folder: Path, report: ReportBundle) -> Pat
     return workbook_path
 
 
-def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
+def write_executive_workbook(output_folder: Path, report: ReportBundle, include_charts: bool) -> Path:
     workbook_path = output_folder / "Executive_Report.xlsx"
     wb = Workbook()
     ws = wb.active
@@ -1337,7 +1347,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         table_start, table_end = write_dataframe(sheet, frame, start_row=7, percent_columns=percent_columns, decimal_columns=decimal_columns)
         sheet.freeze_panes = "A8"
         autosize_columns(sheet)
-        if frame.shape[1] >= 2:
+        if include_charts and frame.shape[1] >= 2:
             chart_frame = frame.copy()
             if frame_key == "Graduation by Cohort":
                 chart_frame = frame[
@@ -1462,32 +1472,33 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         gpa_ws[f"A{gpa_section_row}"].font = Font(bold=True, color=TITLE_FILL)
         gpa_ws[f"A{gpa_section_row + 1}"] = "This compares the latest available cumulative GPA for graduates versus the key non-graduate outcome groups."
         gpa_ws[f"A{gpa_section_row + 1}"].alignment = Alignment(wrap_text=True)
-        _, outcome_end = write_dataframe(
+        outcome_start, outcome_end = write_dataframe(
             gpa_ws,
             outcome_gpa_frame,
             start_row=gpa_section_row + 3,
             decimal_columns=["Average latest cumulative GPA"],
         )
-        outcome_chart_frame = outcome_gpa_frame[["Outcome group", "Average latest cumulative GPA"]].copy()
-        outcome_chart_start, outcome_chart_end = write_dataframe(
-            gpa_ws,
-            outcome_chart_frame,
-            start_row=gpa_section_row + 3,
-            start_col=12,
-            decimal_columns=["Average latest cumulative GPA"],
-        )
-        hide_column_range(gpa_ws, 12, 12 + len(outcome_chart_frame.columns) - 1)
-        add_bar_chart(
-            gpa_ws,
-            outcome_chart_start,
-            outcome_chart_end,
-            "Average GPA by Outcome Group",
-            "Outcome group",
-            "Average cumulative GPA",
-            f"A{outcome_chart_end + 3}",
-            False,
-            False,
-        )
+        if include_charts:
+            outcome_chart_frame = outcome_gpa_frame[["Outcome group", "Average latest cumulative GPA"]].copy()
+            outcome_chart_start, outcome_chart_end = write_dataframe(
+                gpa_ws,
+                outcome_chart_frame,
+                start_row=gpa_section_row + 3,
+                start_col=12,
+                decimal_columns=["Average latest cumulative GPA"],
+            )
+            hide_column_range(gpa_ws, 12, 12 + len(outcome_chart_frame.columns) - 1)
+            add_bar_chart(
+                gpa_ws,
+                outcome_chart_start,
+                outcome_chart_end,
+                "Average GPA by Outcome Group",
+                "Outcome group",
+                "Average cumulative GPA",
+                f"A{outcome_chart_end + 3}",
+                False,
+                False,
+            )
         gpa_section_row = outcome_end + 4
 
     if not gpa_band_frame.empty:
@@ -1495,32 +1506,33 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         gpa_ws[f"A{gpa_section_row}"].font = Font(bold=True, color=TITLE_FILL)
         gpa_ws[f"A{gpa_section_row + 1}"] = "This shows the percent of students who graduate within each latest cumulative GPA range, excluding unresolved outcomes."
         gpa_ws[f"A{gpa_section_row + 1}"].alignment = Alignment(wrap_text=True)
-        _, band_end = write_dataframe(
+        band_start, band_end = write_dataframe(
             gpa_ws,
             gpa_band_frame,
             start_row=gpa_section_row + 3,
             percent_columns=["Observed graduation rate"],
             decimal_columns=["Average latest cumulative GPA"],
         )
-        gpa_band_chart_frame = gpa_band_frame[["Latest cumulative GPA band", "Observed graduation rate"]].copy()
-        band_chart_start, band_chart_end = write_dataframe(
-            gpa_ws,
-            gpa_band_chart_frame,
-            start_row=gpa_section_row + 3,
-            start_col=12,
-            percent_columns=["Observed graduation rate"],
-        )
-        hide_column_range(gpa_ws, 12, 12 + len(gpa_band_chart_frame.columns) - 1)
-        add_line_chart(
-            gpa_ws,
-            band_chart_start,
-            band_chart_end,
-            "Graduation Rate by GPA Band",
-            "Latest cumulative GPA band",
-            "Graduation rate",
-            f"A{band_chart_end + 3}",
-            True,
-        )
+        if include_charts:
+            gpa_band_chart_frame = gpa_band_frame[["Latest cumulative GPA band", "Observed graduation rate"]].copy()
+            band_chart_start, band_chart_end = write_dataframe(
+                gpa_ws,
+                gpa_band_chart_frame,
+                start_row=gpa_section_row + 3,
+                start_col=12,
+                percent_columns=["Observed graduation rate"],
+            )
+            hide_column_range(gpa_ws, 12, 12 + len(gpa_band_chart_frame.columns) - 1)
+            add_line_chart(
+                gpa_ws,
+                band_chart_start,
+                band_chart_end,
+                "Graduation Rate by GPA Band",
+                "Latest cumulative GPA band",
+                "Graduation rate",
+                f"A{band_chart_end + 3}",
+                True,
+            )
         autosize_columns(gpa_ws)
 
     definitions_ws = wb.create_sheet(title="Definitions and Notes")
@@ -1582,7 +1594,9 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
     return workbook_path
 
 
-def export_png_charts(output_folder: Path, skip: bool) -> Tuple[bool, str]:
+def export_png_charts(output_folder: Path, include_charts: bool, skip: bool) -> Tuple[bool, str]:
+    if not include_charts:
+        return False, "Chart export disabled for this run."
     if skip:
         return False, "Chart export skipped by flag."
     script_path = ROOT / "scripts" / "export_executive_charts.ps1"
@@ -1632,17 +1646,19 @@ def build_executive_report(
     segment_min_size: int,
     chapter_min_size: int,
     top_chapters: int,
+    include_charts: bool,
     skip_chart_export: bool,
 ) -> Dict[str, object]:
     source_bundle = load_latest_bundle(enhanced_root, explicit_folder, explicit_workbook)
     report = build_report_bundle(source_bundle, segment_min_size, chapter_min_size, top_chapters)
     output_folder = make_output_folder(output_root)
-    chart_manifest = write_chart_data(output_folder, report.frames, report.chart_specs)
+    chart_specs = report.chart_specs if include_charts else []
+    chart_manifest = write_chart_data(output_folder, report.frames, chart_specs)
     slides_path = write_slides_data_workbook(output_folder, report)
-    workbook_path = write_executive_workbook(output_folder, report)
+    workbook_path = write_executive_workbook(output_folder, report, include_charts)
     summary_path = write_markdown_summary(output_folder, report)
-    readme_path = write_reporting_readme(output_folder, report, workbook_path, slides_path)
-    exported, export_message = export_png_charts(output_folder, skip_chart_export)
+    readme_path = write_reporting_readme(output_folder, report, workbook_path, slides_path, include_charts)
+    exported, export_message = export_png_charts(output_folder, include_charts, skip_chart_export)
     return {
         "output_folder": output_folder,
         "executive_workbook": workbook_path,
@@ -1670,6 +1686,7 @@ def main() -> None:
         segment_min_size=args.segment_min_size,
         chapter_min_size=args.chapter_min_size,
         top_chapters=args.top_chapters,
+        include_charts=args.include_charts,
         skip_chart_export=args.skip_chart_export,
     )
     print(f"Executive reporting package created: {result['output_folder']}")
