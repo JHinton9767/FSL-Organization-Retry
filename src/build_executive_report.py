@@ -998,6 +998,11 @@ def autosize_columns(ws, max_width: int = 40) -> None:
         ws.column_dimensions[get_column_letter(column)].width = max(12, width)
 
 
+def hide_column_range(ws, start_col: int, end_col: int) -> None:
+    for column in range(start_col, end_col + 1):
+        ws.column_dimensions[get_column_letter(column)].hidden = True
+
+
 def write_dataframe(
     ws,
     df: pd.DataFrame,
@@ -1048,8 +1053,8 @@ def add_bar_chart(
     chart.title = title
     chart.y_axis.title = x_title
     chart.x_axis.title = y_title
-    chart.height = 8
-    chart.width = 13
+    chart.height = 11
+    chart.width = 20
     if stacked:
         chart.grouping = "stacked"
         chart.overlap = 100
@@ -1057,9 +1062,7 @@ def add_bar_chart(
     categories = Reference(ws, min_col=1, min_row=table_start_row + 1, max_row=table_end_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(categories)
-    chart.legend.position = "r"
-    chart.dLbls = DataLabelList()
-    chart.dLbls.showVal = True
+    chart.legend.position = "b"
     if percent_axis:
         chart.x_axis.numFmt = "0%"
     ws.add_chart(chart, chart_anchor)
@@ -1082,15 +1085,14 @@ def add_line_chart(
     chart.title = title
     chart.y_axis.title = y_title
     chart.x_axis.title = x_title
-    chart.height = 8
-    chart.width = 13
+    chart.height = 11
+    chart.width = 20
     data = Reference(ws, min_col=2, max_col=ws.max_column, min_row=table_start_row, max_row=table_end_row)
     categories = Reference(ws, min_col=1, min_row=table_start_row + 1, max_row=table_end_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(categories)
-    chart.legend.position = "r"
-    chart.dLbls = DataLabelList()
-    chart.dLbls.showVal = False
+    chart.legend.position = "b"
+    chart.smooth = False
     if percent_axis:
         chart.y_axis.numFmt = "0%"
     ws.add_chart(chart, chart_anchor)
@@ -1309,16 +1311,16 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
     autosize_columns(takeaways_ws)
 
     sheet_plan = [
-        ("Cohort Overview", "Cohort Overview", "A11", "bar"),
-        ("Retention", "Retention by Cohort", "F4", "line"),
-        ("Graduation Outcomes", "Graduation by Cohort", "F4", "line"),
-        ("Credit Momentum", "Credit Momentum Overview", "F4", "bar"),
-        ("GPA and Academic Progress", "GPA by Relative Term", "F4", "line"),
-        ("Academic Standing", "Academic Standing Overview", "F4", "bar"),
-        ("Outcome Breakdown", "Chapter Comparison", "F4", "bar"),
+        ("Cohort Overview", "Cohort Overview", "bar"),
+        ("Retention", "Retention by Cohort", "line"),
+        ("Graduation Outcomes", "Graduation by Cohort", "line"),
+        ("Credit Momentum", "Credit Momentum Overview", "bar"),
+        ("GPA and Academic Progress", "GPA by Relative Term", "line"),
+        ("Academic Standing", "Academic Standing Overview", "bar"),
+        ("Outcome Breakdown", "Chapter Comparison", "bar"),
     ]
 
-    for sheet_name, frame_key, chart_anchor, chart_type in sheet_plan:
+    for sheet_name, frame_key, chart_type in sheet_plan:
         frame = report.frames.get(frame_key, pd.DataFrame())
         sheet = wb.create_sheet(title=sheet_name[:31])
         heading, note = table_description(sheet_name)
@@ -1345,7 +1347,13 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
                         "Graduated within 4 years, excluding unresolved outcomes",
                         "Graduated within 6 years, excluding unresolved outcomes",
                     ]
-                ]
+                ].rename(
+                    columns={
+                        "Observed graduation, excluding unresolved outcomes": "Observed graduation",
+                        "Graduated within 4 years, excluding unresolved outcomes": "4-year graduation",
+                        "Graduated within 6 years, excluding unresolved outcomes": "6-year graduation",
+                    }
+                )
             elif frame_key == "Chapter Comparison":
                 chart_frame = frame[
                     [
@@ -1353,7 +1361,12 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
                         "Observed graduation, excluding unresolved outcomes",
                         "Returned the following fall",
                     ]
-                ]
+                ].rename(
+                    columns={
+                        "Observed graduation, excluding unresolved outcomes": "Graduation",
+                        "Returned the following fall": "Returned next fall",
+                    }
+                )
             elif frame_key == "Join Hours Comparison":
                 chart_frame = frame[
                     [
@@ -1362,18 +1375,48 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
                         "Retained In Organization To Next Fall",
                         "Continued Academically To Next Fall",
                     ]
-                ]
-            chart_row_start = max(table_end + 3, 7)
+                ].rename(
+                    columns={
+                        "Observed graduation, excluding unresolved outcomes": "Graduation",
+                        "Retained In Organization To Next Fall": "Org retention",
+                        "Continued Academically To Next Fall": "School continuation",
+                    }
+                )
+            elif frame_key == "Retention by Cohort":
+                chart_frame = frame.rename(
+                    columns={
+                        "Returned the next term": "Next term",
+                        "Returned the following fall": "Next fall",
+                    }
+                )
+            elif frame_key == "School Continuation by Cohort":
+                chart_frame = frame.rename(
+                    columns={
+                        "Still enrolled next term": "Enrolled next term",
+                        "Still enrolled the following fall": "Enrolled next fall",
+                    }
+                )
+            elif frame_key == "GPA by Relative Term":
+                chart_frame = frame.rename(
+                    columns={
+                        "Average term GPA": "Average GPA",
+                        "Average GPA": "Average GPA",
+                    }
+                )
+            chart_row_start = max(table_end + 3, 12)
             chart_percent_columns = [col for col in chart_frame.columns if "rate" in col.lower() or "percent" in col.lower()]
             chart_decimal_columns = [col for col in chart_frame.columns if "gpa" in col.lower() or "average" in col.lower()]
             chart_table_start, chart_table_end = write_dataframe(
                 sheet,
                 chart_frame,
                 start_row=chart_row_start,
+                start_col=12,
                 percent_columns=chart_percent_columns,
                 decimal_columns=chart_decimal_columns,
             )
+            hide_column_range(sheet, 12, 12 + len(chart_frame.columns) - 1)
             chart_title = "Average GPA Over Time After Joining" if frame_key == "GPA by Relative Term" else sheet_name
+            chart_anchor = f"A{chart_table_end + 3}"
             if chart_type == "line":
                 add_line_chart(sheet, chart_table_start, chart_table_end, chart_title, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, bool(chart_percent_columns))
             else:
@@ -1430,9 +1473,10 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             gpa_ws,
             outcome_chart_frame,
             start_row=gpa_section_row + 3,
-            start_col=8,
+            start_col=12,
             decimal_columns=["Average latest cumulative GPA"],
         )
+        hide_column_range(gpa_ws, 12, 12 + len(outcome_chart_frame.columns) - 1)
         add_bar_chart(
             gpa_ws,
             outcome_chart_start,
@@ -1440,7 +1484,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             "Average GPA by Outcome Group",
             "Outcome group",
             "Average cumulative GPA",
-            "F24",
+            f"A{outcome_chart_end + 3}",
             False,
             False,
         )
@@ -1463,9 +1507,10 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             gpa_ws,
             gpa_band_chart_frame,
             start_row=gpa_section_row + 3,
-            start_col=8,
+            start_col=12,
             percent_columns=["Observed graduation rate"],
         )
+        hide_column_range(gpa_ws, 12, 12 + len(gpa_band_chart_frame.columns) - 1)
         add_line_chart(
             gpa_ws,
             band_chart_start,
@@ -1473,7 +1518,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             "Graduation Rate by GPA Band",
             "Latest cumulative GPA band",
             "Graduation rate",
-            f"F{gpa_section_row}",
+            f"A{band_chart_end + 3}",
             True,
         )
         autosize_columns(gpa_ws)
