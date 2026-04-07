@@ -242,7 +242,7 @@ def build_priority_list(summary: pd.DataFrame) -> pd.DataFrame:
             "Last Name",
             "First Name",
         ],
-        ascending=[False, False, True, True, True],
+        ascending=[False, False, True, True, True, True],
     ).reset_index(drop=True)
     priority = priority.drop(columns=["_cohort_year_sort"])
     priority.insert(0, "Priority Rank", range(1, len(priority) + 1))
