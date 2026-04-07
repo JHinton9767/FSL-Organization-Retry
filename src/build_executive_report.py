@@ -13,7 +13,6 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import pandas as pd
 from openpyxl import Workbook, load_workbook
 from openpyxl.chart import BarChart, LineChart, Reference
-from openpyxl.chart.label import DataLabelList
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -31,6 +30,13 @@ CARD_FILL = "F7FBFF"
 HEADER_FILL = "DCE6F1"
 TEXT_DARK = "1F1F1F"
 BORDER_COLOR = "B7C9D6"
+CHART_COLORS = [
+    "1F4E79",
+    "4F81BD",
+    "70AD47",
+    "ED7D31",
+    "A5A5A5",
+]
 
 SHEET_COLUMNS = {
     "student_summary": "Student_Summary",
@@ -1035,6 +1041,24 @@ def write_dataframe(
     return start_row, start_row + len(df)
 
 
+def apply_series_colors(chart) -> None:
+    for index, series in enumerate(chart.series):
+        color = CHART_COLORS[index % len(CHART_COLORS)]
+        try:
+            series.graphicalProperties.line.solidFill = color
+        except Exception:
+            pass
+        try:
+            series.graphicalProperties.solidFill = color
+        except Exception:
+            pass
+        try:
+            series.marker.graphicalProperties.solidFill = color
+            series.marker.graphicalProperties.line.solidFill = color
+        except Exception:
+            pass
+
+
 def add_bar_chart(
     ws,
     table_start_row: int,
@@ -1054,8 +1078,8 @@ def add_bar_chart(
     chart.title = title
     chart.y_axis.title = x_title
     chart.x_axis.title = y_title
-    chart.height = 11
-    chart.width = 20
+    chart.height = 13
+    chart.width = 24
     if stacked:
         chart.grouping = "stacked"
         chart.overlap = 100
@@ -1063,7 +1087,10 @@ def add_bar_chart(
     categories = Reference(ws, min_col=1, min_row=table_start_row + 1, max_row=table_end_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(categories)
-    chart.legend.position = "b"
+    chart.legend.position = "b" if len(chart.series) > 1 else "r"
+    if len(chart.series) <= 1:
+        chart.legend = None
+    apply_series_colors(chart)
     if percent_axis:
         chart.x_axis.numFmt = "0%"
     ws.add_chart(chart, chart_anchor)
@@ -1086,14 +1113,17 @@ def add_line_chart(
     chart.title = title
     chart.y_axis.title = y_title
     chart.x_axis.title = x_title
-    chart.height = 11
-    chart.width = 20
+    chart.height = 13
+    chart.width = 24
     data = Reference(ws, min_col=2, max_col=ws.max_column, min_row=table_start_row, max_row=table_end_row)
     categories = Reference(ws, min_col=1, min_row=table_start_row + 1, max_row=table_end_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(categories)
-    chart.legend.position = "b"
+    chart.legend.position = "b" if len(chart.series) > 1 else "r"
+    if len(chart.series) <= 1:
+        chart.legend = None
     chart.smooth = False
+    apply_series_colors(chart)
     if percent_axis:
         chart.y_axis.numFmt = "0%"
     ws.add_chart(chart, chart_anchor)
@@ -1279,6 +1309,7 @@ def write_slides_data_workbook(output_folder: Path, report: ReportBundle) -> Pat
 def write_executive_workbook(output_folder: Path, report: ReportBundle, include_charts: bool) -> Path:
     workbook_path = output_folder / "Executive_Report.xlsx"
     wb = Workbook()
+    sheet_chart_configs: Dict[str, Dict[str, object]] = {}
     ws = wb.active
     ws.title = "Executive Summary"
     style_sheet_title(ws, "Executive Summary", "A presentation-ready overview of student outcomes after first observed organization entry. Labels are intentionally cautious and do not claim true first-time-in-college rates.")
@@ -1349,7 +1380,11 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
         autosize_columns(sheet)
         if include_charts and frame.shape[1] >= 2:
             chart_frame = frame.copy()
-            if frame_key == "Graduation by Cohort":
+            chart_title = sheet_name
+            if frame_key == "Cohort Overview":
+                chart_frame = frame.loc[frame["Cohort"].fillna("").astype(str) != "Spring 2015", ["Cohort", "Students"]].copy()
+                chart_title = "Cohort Overview (Excluding Spring 2015)"
+            elif frame_key == "Graduation by Cohort":
                 chart_frame = frame[
                     [
                         "Cohort",
@@ -1362,6 +1397,17 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
                         "Observed graduation, excluding unresolved outcomes": "Observed graduation",
                         "Graduated within 4 years, excluding unresolved outcomes": "4-year graduation",
                         "Graduated within 6 years, excluding unresolved outcomes": "6-year graduation",
+                    }
+                )
+            elif frame_key == "Credit Momentum Overview":
+                chart_frame = frame.replace(
+                    {
+                        "Measure": {
+                            "Passed 12+ hours in first academic term after joining": "12+ hours, first term",
+                            "Passed 15+ hours in first academic term after joining": "15+ hours, first term",
+                            "Passed 24+ hours in first academic year after joining": "24+ hours, first year",
+                            "Passed 30+ hours in first academic year after joining": "30+ hours, first year",
+                        }
                     }
                 )
             elif frame_key == "Chapter Comparison":
@@ -1377,21 +1423,6 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
                         "Returned the following fall": "Returned next fall",
                     }
                 )
-            elif frame_key == "Join Hours Comparison":
-                chart_frame = frame[
-                    [
-                        "Entry cumulative hours bucket",
-                        "Observed graduation, excluding unresolved outcomes",
-                        "Retained In Organization To Next Fall",
-                        "Continued Academically To Next Fall",
-                    ]
-                ].rename(
-                    columns={
-                        "Observed graduation, excluding unresolved outcomes": "Graduation",
-                        "Retained In Organization To Next Fall": "Org retention",
-                        "Continued Academically To Next Fall": "School continuation",
-                    }
-                )
             elif frame_key == "Retention by Cohort":
                 chart_frame = frame.rename(
                     columns={
@@ -1399,38 +1430,22 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
                         "Returned the following fall": "Next fall",
                     }
                 )
-            elif frame_key == "School Continuation by Cohort":
-                chart_frame = frame.rename(
-                    columns={
-                        "Still enrolled next term": "Enrolled next term",
-                        "Still enrolled the following fall": "Enrolled next fall",
-                    }
-                )
+            elif frame_key == "Academic Standing Overview":
+                chart_frame = frame[["Standing group", "Rate"]].rename(columns={"Rate": "Share"})
             elif frame_key == "GPA by Relative Term":
-                chart_frame = frame.rename(
-                    columns={
-                        "Average term GPA": "Average GPA",
-                        "Average GPA": "Average GPA",
-                    }
-                )
-            chart_row_start = max(table_end + 3, 12)
-            chart_percent_columns = [col for col in chart_frame.columns if "rate" in col.lower() or "percent" in col.lower()]
-            chart_decimal_columns = [col for col in chart_frame.columns if "gpa" in col.lower() or "average" in col.lower()]
-            chart_table_start, chart_table_end = write_dataframe(
-                sheet,
-                chart_frame,
-                start_row=chart_row_start,
-                start_col=12,
-                percent_columns=chart_percent_columns,
-                decimal_columns=chart_decimal_columns,
-            )
-            hide_column_range(sheet, 12, 12 + len(chart_frame.columns) - 1)
-            chart_title = "Average GPA Over Time After Joining" if frame_key == "GPA by Relative Term" else sheet_name
-            chart_anchor = f"A{chart_table_end + 3}"
-            if chart_type == "line":
-                add_line_chart(sheet, chart_table_start, chart_table_end, chart_title, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, bool(chart_percent_columns))
-            else:
-                add_bar_chart(sheet, chart_table_start, chart_table_end, chart_title, chart_frame.columns[0], "Rate" if chart_percent_columns else "Value", chart_anchor, False, bool(chart_percent_columns))
+                gpa_band_chart = report.frames.get("Graduation Rate by GPA Band", pd.DataFrame()).copy()
+                if not gpa_band_chart.empty:
+                    chart_frame = gpa_band_chart[["Latest cumulative GPA band", "Observed graduation rate"]].copy()
+                    chart_title = "Graduation Rate by GPA Band"
+                else:
+                    chart_frame = frame.rename(columns={"Average term GPA": "Average GPA", "Average GPA": "Average GPA"})
+                    chart_title = "Average GPA Over Time After Joining"
+            if not chart_frame.empty:
+                sheet_chart_configs[sheet.title] = {
+                    "frame": chart_frame,
+                    "type": chart_type,
+                    "title": chart_title,
+                }
 
     outcome_ws = wb["Outcome Breakdown"]
     if "Join Hours Comparison" in report.frames and not report.frames["Join Hours Comparison"].empty:
@@ -1478,27 +1493,6 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
             start_row=gpa_section_row + 3,
             decimal_columns=["Average latest cumulative GPA"],
         )
-        if include_charts:
-            outcome_chart_frame = outcome_gpa_frame[["Outcome group", "Average latest cumulative GPA"]].copy()
-            outcome_chart_start, outcome_chart_end = write_dataframe(
-                gpa_ws,
-                outcome_chart_frame,
-                start_row=gpa_section_row + 3,
-                start_col=12,
-                decimal_columns=["Average latest cumulative GPA"],
-            )
-            hide_column_range(gpa_ws, 12, 12 + len(outcome_chart_frame.columns) - 1)
-            add_bar_chart(
-                gpa_ws,
-                outcome_chart_start,
-                outcome_chart_end,
-                "Average GPA by Outcome Group",
-                "Outcome group",
-                "Average cumulative GPA",
-                f"A{outcome_chart_end + 3}",
-                False,
-                False,
-            )
         gpa_section_row = outcome_end + 4
 
     if not gpa_band_frame.empty:
@@ -1513,27 +1507,51 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle, include_
             percent_columns=["Observed graduation rate"],
             decimal_columns=["Average latest cumulative GPA"],
         )
-        if include_charts:
-            gpa_band_chart_frame = gpa_band_frame[["Latest cumulative GPA band", "Observed graduation rate"]].copy()
-            band_chart_start, band_chart_end = write_dataframe(
-                gpa_ws,
-                gpa_band_chart_frame,
-                start_row=gpa_section_row + 3,
-                start_col=12,
-                percent_columns=["Observed graduation rate"],
-            )
-            hide_column_range(gpa_ws, 12, 12 + len(gpa_band_chart_frame.columns) - 1)
-            add_line_chart(
-                gpa_ws,
-                band_chart_start,
-                band_chart_end,
-                "Graduation Rate by GPA Band",
-                "Latest cumulative GPA band",
-                "Graduation rate",
-                f"A{band_chart_end + 3}",
-                True,
-            )
         autosize_columns(gpa_ws)
+
+    if include_charts:
+        for sheet_name, config in sheet_chart_configs.items():
+            sheet = wb[sheet_name]
+            chart_frame = config["frame"]
+            if chart_frame is None or getattr(chart_frame, "empty", True):
+                continue
+            visible_last_row = max(sheet.max_row, 7)
+            chart_percent_columns = [col for col in chart_frame.columns if "rate" in col.lower() or "percent" in col.lower() or col.lower() == "share"]
+            chart_decimal_columns = [col for col in chart_frame.columns if "gpa" in col.lower() or "average" in col.lower()]
+            chart_table_start, chart_table_end = write_dataframe(
+                sheet,
+                chart_frame,
+                start_row=4,
+                start_col=12,
+                percent_columns=chart_percent_columns,
+                decimal_columns=chart_decimal_columns,
+            )
+            hide_column_range(sheet, 12, 12 + len(chart_frame.columns) - 1)
+            chart_anchor = f"A{visible_last_row + 3}"
+            if config["type"] == "line":
+                add_line_chart(
+                    sheet,
+                    chart_table_start,
+                    chart_table_end,
+                    config["title"],
+                    chart_frame.columns[0],
+                    "Rate" if chart_percent_columns else "Value",
+                    chart_anchor,
+                    bool(chart_percent_columns),
+                )
+            else:
+                add_bar_chart(
+                    sheet,
+                    chart_table_start,
+                    chart_table_end,
+                    config["title"],
+                    chart_frame.columns[0],
+                    "Rate" if chart_percent_columns else "Value",
+                    chart_anchor,
+                    False,
+                    bool(chart_percent_columns),
+                )
+            autosize_columns(sheet)
 
     definitions_ws = wb.create_sheet(title="Definitions and Notes")
     style_sheet_title(definitions_ws, "Definitions and Notes", "Short plain-language explanations of how to read the measures in this package.")

@@ -30,7 +30,7 @@ function Set-ChartStyle {
     )
 
     $Chart.Width = 1200
-    $Chart.Height = 675
+    $Chart.Height = 750
     $Chart.BackColor = [System.Drawing.Color]::White
     $Chart.Palette = [System.Windows.Forms.DataVisualization.Charting.ChartColorPalette]::None
     $Chart.PaletteCustomColors = @(
@@ -75,12 +75,12 @@ function Set-ChartStyle {
     }
 
     $legend = $Chart.Legends[0]
-    $legend.Docking = [System.Windows.Forms.DataVisualization.Charting.Docking]::Right
+    $legend.Docking = [System.Windows.Forms.DataVisualization.Charting.Docking]::Bottom
     $legend.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 
     foreach ($series in $Chart.Series) {
         $series.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        $series.IsValueShownAsLabel = $true
+        $series.IsValueShownAsLabel = $false
         if ($YFormat -eq "percent") {
             $series.LabelFormat = "P0"
         } elseif ($YFormat -eq "decimal") {
