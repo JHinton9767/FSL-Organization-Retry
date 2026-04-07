@@ -1543,7 +1543,22 @@ def export_png_charts(output_folder: Path, skip: bool) -> Tuple[bool, str]:
     script_path = ROOT / "scripts" / "export_executive_charts.ps1"
     if not script_path.exists():
         return False, f"Chart export helper not found at {script_path}."
-    command = ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-InputDir", str(output_folder / "charts"), "-OutputDir", str(output_folder / "charts")]
+    input_dir = str(output_folder / "charts").replace("'", "''")
+    output_dir = str(output_folder / "charts").replace("'", "''")
+    script_text = script_path.read_text(encoding="utf-8")
+    command_text = (
+        f"$InputDir = '{input_dir}'\n"
+        f"$OutputDir = '{output_dir}'\n"
+        + script_text
+    )
+    command = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command_text,
+    ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=False)
     except OSError as exc:
