@@ -140,6 +140,31 @@ This creates a new timestamped folder under `output/enhanced_metrics/` and does 
 - CSV exports for the longitudinal table, student summary, cohort metrics, graduation metrics, continuation metrics, GPA metrics, credit momentum metrics, academic standing metrics, transitions, QA, and changelog
 - `methodology.md` and `CHANGELOG.md` alongside the generated tables
 
+If you also have one-row-per-student current academic snapshot files with fields such as `Student ID`, `Overall GPA`, `Institutional GPA`, `Total Credit Hours`, `TXST Credit Hours`, and current status columns, place them in:
+
+- `data/inbox/academic`
+
+The snapshot loader now looks for files named like:
+
+- `New Member (1).xlsx`
+- `New Member (2).xlsx`
+- `New Member (15).xlsx`
+
+Then run:
+
+```powershell
+python run_current_snapshot_analytics.py
+```
+
+This additive step does not overwrite the semester-based analytics. Instead, it creates a new versioned folder under `output/current_snapshot_metrics/` with:
+
+- a workbook that merges the current snapshot onto `Student_Summary`
+- augmented graduation and chapter metrics that can resolve some previously unresolved outcomes
+- estimated pre-organization credit-hour buckets based on current credit totals minus observed passed hours during the organization window
+- QA and methodology files explaining what is estimated versus directly observed
+
+Only files whose names start with `New Member` are used by this step, so the semester grade-report files in the same folder are ignored.
+
 ## Excel / Power Query workflow
 
 The `powerquery/` folder contains M queries you can paste into Excel Power Query:

@@ -1,5 +1,7 @@
 data/inbox/academic/*
 !data/inbox/academic/.gitkeep
+data/inbox/current_snapshot/*
+!data/inbox/current_snapshot/.gitkeep
 data/inbox/rosters/*
 !data/inbox/rosters/.gitkeep
 data/raw/
