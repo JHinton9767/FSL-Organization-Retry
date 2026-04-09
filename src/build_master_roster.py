@@ -261,6 +261,20 @@ def normalize_banner_id(value: str) -> str:
     return re.sub(r"\.0$", "", text)
 
 
+def is_new_member_row(row: ExtractedRow) -> bool:
+    status = clean_text(row.status).lower()
+    position = clean_text(row.position).lower()
+    return status == "new member" or "new member" in position
+
+
+def is_active_member_row(row: ExtractedRow) -> bool:
+    return clean_text(row.status).lower() == "active"
+
+
+def companion_output_path(output_file: Path, suffix: str) -> Path:
+    return output_file.with_name(f"{output_file.stem}_{suffix}{output_file.suffix}")
+
+
 def identity_key(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
     if row.banner_id:
         return ("banner", row.banner_id.lower())
@@ -699,6 +713,8 @@ def write_summary_sheet(
     with_banner = 0
     missing_banner = 0
     chapters = set()
+    new_member_rows = 0
+    active_rows = 0
 
     for row in rows:
         by_year[row.academic_year] += 1
@@ -707,6 +723,10 @@ def write_summary_sheet(
             with_banner += 1
         else:
             missing_banner += 1
+        if is_new_member_row(row):
+            new_member_rows += 1
+        if is_active_member_row(row):
+            active_rows += 1
         if row.chapter:
             chapters.add(row.chapter)
 
@@ -715,6 +735,8 @@ def write_summary_sheet(
         ["Total extracted rows", len(rows)],
         ["Rows with Banner ID", with_banner],
         ["Rows missing Banner ID", missing_banner],
+        ["Rows classified as New Member", new_member_rows],
+        ["Rows classified as Active", active_rows],
         ["Distinct academic years", len(by_year)],
         ["Distinct chapters", len(chapters)],
         ["Duplicate rows removed", duplicates_removed],
@@ -815,13 +837,42 @@ def write_year_sheets(wb: Workbook, rows: List[ExtractedRow], chunk_size: int = 
             autosize_columns(ws)
 
 
+def write_roster_workbook(
+    output_file: Path,
+    rows: List[ExtractedRow],
+    issues: List[str],
+    file_statuses: List[FileExtractionStatus],
+    total_files: int,
+    duplicates_removed: int,
+    same_year_id_removed: int,
+    inferred_spring_members: int,
+    order_of_omega_removed: int,
+    chunk_size: int,
+) -> None:
+    wb = Workbook()
+    write_summary_sheet(
+        wb,
+        rows,
+        issues,
+        file_statuses,
+        total_files=total_files,
+        duplicates_removed=duplicates_removed,
+        same_year_id_removed=same_year_id_removed,
+        inferred_spring_members=inferred_spring_members,
+        order_of_omega_removed=order_of_omega_removed,
+    )
+    write_year_sheets(wb, rows, chunk_size=chunk_size)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_file)
+
+
 def build_master_roster(
     input_root: Path,
     output_file: Path,
     chunk_size: int,
     keep_duplicates: bool,
     verbose: bool,
-) -> None:
+) -> Dict[str, Path]:
     all_rows: List[ExtractedRow] = []
     issues: List[str] = []
     file_statuses: List[FileExtractionStatus] = []
@@ -859,21 +910,55 @@ def build_master_roster(
     all_rows, order_of_omega_removed = remove_order_of_omega_rows(all_rows)
     all_rows, same_year_id_removed = dedupe_same_year_banner_ids(all_rows)
 
-    wb = Workbook()
-    write_summary_sheet(
-        wb,
-        all_rows,
-        issues,
-        file_statuses,
+    write_roster_workbook(
+        output_file=output_file,
+        rows=all_rows,
+        issues=issues,
+        file_statuses=file_statuses,
         total_files=len(files),
         duplicates_removed=duplicates_removed,
         same_year_id_removed=same_year_id_removed,
         inferred_spring_members=inferred_spring_members,
         order_of_omega_removed=order_of_omega_removed,
+        chunk_size=chunk_size,
     )
-    write_year_sheets(wb, all_rows, chunk_size=chunk_size)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_file)
+
+    new_member_output = companion_output_path(output_file, "New_Members")
+    active_output = companion_output_path(output_file, "Active_Members")
+
+    new_member_rows = [row for row in all_rows if is_new_member_row(row)]
+    active_rows = [row for row in all_rows if is_active_member_row(row)]
+
+    write_roster_workbook(
+        output_file=new_member_output,
+        rows=new_member_rows,
+        issues=issues,
+        file_statuses=file_statuses,
+        total_files=len(files),
+        duplicates_removed=duplicates_removed,
+        same_year_id_removed=same_year_id_removed,
+        inferred_spring_members=inferred_spring_members,
+        order_of_omega_removed=order_of_omega_removed,
+        chunk_size=chunk_size,
+    )
+    write_roster_workbook(
+        output_file=active_output,
+        rows=active_rows,
+        issues=issues,
+        file_statuses=file_statuses,
+        total_files=len(files),
+        duplicates_removed=duplicates_removed,
+        same_year_id_removed=same_year_id_removed,
+        inferred_spring_members=inferred_spring_members,
+        order_of_omega_removed=order_of_omega_removed,
+        chunk_size=chunk_size,
+    )
+
+    return {
+        "master": output_file,
+        "new_members": new_member_output,
+        "active_members": active_output,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -919,14 +1004,16 @@ def main() -> None:
     input_root = Path(args.input_root).expanduser().resolve()
     output_file = Path(args.output).expanduser().resolve()
 
-    build_master_roster(
+    outputs = build_master_roster(
         input_root=input_root,
         output_file=output_file,
         chunk_size=args.chunk_size,
         keep_duplicates=args.keep_duplicates,
         verbose=args.verbose,
     )
-    print(f"Master roster created: {output_file}")
+    print(f"Master roster created: {outputs['master']}")
+    print(f"New-member roster created: {outputs['new_members']}")
+    print(f"Active-member roster created: {outputs['active_members']}")
 
 
 if __name__ == "__main__":
