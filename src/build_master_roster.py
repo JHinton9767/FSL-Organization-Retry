@@ -31,6 +31,26 @@ STANDARD_COLUMNS = [
     "Position",
 ]
 
+UNIQUE_BANNER_COLUMNS = [
+    "Banner ID",
+    "Last Name",
+    "First Name",
+    "Email",
+    "Initial Chapter",
+    "Latest Chapter",
+    "First Observed Academic Year",
+    "First Observed Term",
+    "Latest Observed Academic Year",
+    "Latest Observed Term",
+    "Latest Status",
+    "Semester Joined",
+    "Latest Position",
+    "Terms Observed",
+    "Chapters Seen",
+    "Statuses Seen",
+    "Source Files Seen",
+]
+
 HEADER_ALIASES = {
     "last_name": [
         "last name",
@@ -219,6 +239,48 @@ class FileExtractionStatus:
         return "Yes" if self.rows_extracted > 0 else "No"
 
 
+@dataclass(frozen=True)
+class UniqueBannerRow:
+    banner_id: str
+    last_name: str
+    first_name: str
+    email: str
+    initial_chapter: str
+    latest_chapter: str
+    first_observed_academic_year: str
+    first_observed_term: str
+    latest_observed_academic_year: str
+    latest_observed_term: str
+    latest_status: str
+    semester_joined: str
+    latest_position: str
+    terms_observed: int
+    chapters_seen: str
+    statuses_seen: str
+    source_files_seen: str
+
+    def as_list(self) -> List[object]:
+        return [
+            self.banner_id,
+            self.last_name,
+            self.first_name,
+            self.email,
+            self.initial_chapter,
+            self.latest_chapter,
+            self.first_observed_academic_year,
+            self.first_observed_term,
+            self.latest_observed_academic_year,
+            self.latest_observed_term,
+            self.latest_status,
+            self.semester_joined,
+            self.latest_position,
+            self.terms_observed,
+            self.chapters_seen,
+            self.statuses_seen,
+            self.source_files_seen,
+        ]
+
+
 def clean_text(value: object) -> str:
     if value is None:
         return ""
@@ -273,6 +335,21 @@ def is_active_member_row(row: ExtractedRow) -> bool:
 
 def companion_output_path(output_file: Path, suffix: str) -> Path:
     return output_file.with_name(f"{output_file.stem}_{suffix}{output_file.suffix}")
+
+
+def unique_non_blank(values: Iterable[str]) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for value in values:
+        text = clean_text(value)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(text)
+    return ordered
 
 
 def identity_key(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
@@ -866,6 +943,119 @@ def write_roster_workbook(
     wb.save(output_file)
 
 
+def build_unique_banner_rows(rows: List[ExtractedRow]) -> List[UniqueBannerRow]:
+    grouped: Dict[str, List[ExtractedRow]] = defaultdict(list)
+    for row in rows:
+        if not row.banner_id:
+            continue
+        grouped[row.banner_id.lower()].append(row)
+
+    unique_rows: List[UniqueBannerRow] = []
+    for _, banner_rows in grouped.items():
+        ordered_rows = sorted(
+            banner_rows,
+            key=lambda item: (
+                term_sort_key(item.academic_year, item.term),
+                item.chapter.lower(),
+                item.last_name.lower(),
+                item.first_name.lower(),
+                item.source_file.lower(),
+            ),
+        )
+        first_row = ordered_rows[0]
+        latest_row = max(
+            ordered_rows,
+            key=lambda item: (
+                term_sort_key(item.academic_year, item.term),
+                STATUS_PRIORITY.get(item.status, 10),
+                1 if item.position else 0,
+                item.source_file.lower(),
+            ),
+        )
+
+        last_name = next((row.last_name for row in reversed(ordered_rows) if row.last_name), first_row.last_name)
+        first_name = next((row.first_name for row in reversed(ordered_rows) if row.first_name), first_row.first_name)
+        email = next((row.email for row in reversed(ordered_rows) if row.email), first_row.email)
+        semester_joined = next((row.semester_joined for row in ordered_rows if row.semester_joined), "")
+        latest_position = next((row.position for row in reversed(ordered_rows) if row.position), latest_row.position)
+
+        chapters_seen = unique_non_blank(row.chapter for row in ordered_rows)
+        statuses_seen = unique_non_blank(row.status for row in ordered_rows)
+        source_files_seen = unique_non_blank(row.source_file for row in ordered_rows)
+        distinct_terms = {
+            (clean_text(row.academic_year).lower(), clean_text(row.term).lower())
+            for row in ordered_rows
+            if row.academic_year or row.term
+        }
+
+        unique_rows.append(
+            UniqueBannerRow(
+                banner_id=first_row.banner_id,
+                last_name=last_name,
+                first_name=first_name,
+                email=email,
+                initial_chapter=first_row.chapter,
+                latest_chapter=latest_row.chapter,
+                first_observed_academic_year=first_row.academic_year,
+                first_observed_term=first_row.term,
+                latest_observed_academic_year=latest_row.academic_year,
+                latest_observed_term=latest_row.term,
+                latest_status=latest_row.status,
+                semester_joined=semester_joined,
+                latest_position=latest_position,
+                terms_observed=len(distinct_terms),
+                chapters_seen=" | ".join(chapters_seen),
+                statuses_seen=" | ".join(statuses_seen),
+                source_files_seen=" | ".join(source_files_seen),
+            )
+        )
+
+    return sorted(
+        unique_rows,
+        key=lambda item: (
+            item.banner_id.lower(),
+            item.last_name.lower(),
+            item.first_name.lower(),
+        ),
+    )
+
+
+def write_unique_banner_workbook(output_file: Path, rows: List[UniqueBannerRow], chunk_size: int) -> None:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["Metric", "Value"])
+    style_header(ws)
+
+    initial_chapters = {row.initial_chapter for row in rows if row.initial_chapter}
+    latest_chapters = {row.latest_chapter for row in rows if row.latest_chapter}
+    metrics = [
+        ["Distinct Banner IDs", len(rows)],
+        ["Rows with Email", sum(1 for row in rows if row.email)],
+        ["Distinct initial chapters", len(initial_chapters)],
+        ["Distinct latest chapters", len(latest_chapters)],
+        ["Workbook purpose", "One row per Banner ID for one-time academic record pulls"],
+    ]
+    for metric in metrics:
+        ws.append(metric)
+    ws.freeze_panes = "A2"
+    autosize_columns(ws)
+
+    for start in range(0, len(rows), chunk_size):
+        end = min(start + chunk_size, len(rows))
+        chunk_number = (start // chunk_size) + 1
+        chunk_ws = wb.create_sheet(title=f"Banner_IDs_{chunk_number:02d}"[:31])
+        chunk_ws.append(UNIQUE_BANNER_COLUMNS)
+        style_header(chunk_ws)
+        for row in rows[start:end]:
+            chunk_ws.append(row.as_list())
+        chunk_ws.freeze_panes = "A2"
+        autosize_columns(chunk_ws)
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_file)
+
+
 def build_master_roster(
     input_root: Path,
     output_file: Path,
@@ -925,9 +1115,11 @@ def build_master_roster(
 
     new_member_output = companion_output_path(output_file, "New_Members")
     active_output = companion_output_path(output_file, "Active_Members")
+    unique_banner_output = companion_output_path(output_file, "Unique_Banner_IDs")
 
     new_member_rows = [row for row in all_rows if is_new_member_row(row)]
     active_rows = [row for row in all_rows if is_active_member_row(row)]
+    unique_banner_rows = build_unique_banner_rows(all_rows)
 
     write_roster_workbook(
         output_file=new_member_output,
@@ -953,11 +1145,17 @@ def build_master_roster(
         order_of_omega_removed=order_of_omega_removed,
         chunk_size=chunk_size,
     )
+    write_unique_banner_workbook(
+        output_file=unique_banner_output,
+        rows=unique_banner_rows,
+        chunk_size=chunk_size,
+    )
 
     return {
         "master": output_file,
         "new_members": new_member_output,
         "active_members": active_output,
+        "unique_banner_ids": unique_banner_output,
     }
 
 
@@ -1014,6 +1212,7 @@ def main() -> None:
     print(f"Master roster created: {outputs['master']}")
     print(f"New-member roster created: {outputs['new_members']}")
     print(f"Active-member roster created: {outputs['active_members']}")
+    print(f"Unique Banner ID roster created: {outputs['unique_banner_ids']}")
 
 
 if __name__ == "__main__":
