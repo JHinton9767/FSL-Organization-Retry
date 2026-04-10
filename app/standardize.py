@@ -336,7 +336,8 @@ def standardize_snapshot_summary(
     settings: dict[str, object],
 ) -> pd.DataFrame:
     frame = standardize_enhanced_summary(summary, chapter_mapping, settings)
-    frame["latest_outcome_bucket"] = _text(summary, "Augmented Latest Outcome Bucket").replace("", frame["latest_outcome_bucket"])
+    augmented_outcome = _text(summary, "Augmented Latest Outcome Bucket")
+    frame["latest_outcome_bucket"] = augmented_outcome.where(augmented_outcome.ne(""), frame["latest_outcome_bucket"])
     frame["graduated_eventual"] = _flag(summary, "Augmented Ever Graduated Flag")
     frame["snapshot_matched"] = _flag(summary, "Snapshot Matched")
     frame["current_total_hours"] = _numeric(summary, "Snapshot Total Credit Hours")
