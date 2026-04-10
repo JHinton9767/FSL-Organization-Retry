@@ -11,6 +11,7 @@ from app.io_utils import (
     normalize_text,
     parse_term_label,
 )
+from app.status_framework import build_outcome_resolution_fields
 from src.build_current_snapshot_analytics import bucket_30_hours
 
 
@@ -173,6 +174,9 @@ def _finalize_summary(
         lambda value: category_from_bool(value, "Snapshot Matched", "No Snapshot Match")
     )
     result["status_group"] = result["latest_outcome_bucket"].fillna("").astype(str).str.strip().replace("", "Unknown")
+    outcome_resolution = build_outcome_resolution_fields(result, settings.get("outcome_resolution", {}))
+    for column in outcome_resolution.columns:
+        result[column] = outcome_resolution[column]
     result["major_group"] = result["major"].fillna("").astype(str).str.strip().replace("", "Unknown")
     result["chapter_group"] = result["chapter_group"].fillna("").astype(str).str.strip().replace("", "Unassigned")
     result["council"] = result["council"].fillna("").astype(str).str.strip().replace("", "Unknown")

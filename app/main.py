@@ -25,9 +25,18 @@ from app.config_loader import load_metric_catalog, load_settings, load_status_co
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import safe_slug
 from app.legacy_bridge import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
-from app.metrics_engine import available_metrics, compute_metric, format_metric_value, metric_by_key, metric_caption
+from app.metrics_engine import (
+    ALL_STUDENTS_LABEL,
+    RESOLVED_OUTCOMES_ONLY_LABEL,
+    available_metrics,
+    compute_metric_views,
+    format_metric_value,
+    metric_by_key,
+    metric_caption,
+)
 from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
+from app.status_framework import outcome_population_summary
 
 
 st.set_page_config(
@@ -50,6 +59,7 @@ def _reset_state_for_dataset(version_key: str, metrics: List[MetricDefinition], 
     st.session_state["compare_values"] = []
     st.session_state["control_field"] = "None"
     st.session_state["population"] = "FSL Only"
+    st.session_state["outcome_population_view"] = ALL_STUDENTS_LABEL
     st.session_state["min_n"] = 5
 
     numeric_join_years = pd.to_numeric(summary.get("join_year", pd.Series(dtype=float)), errors="coerce").dropna()
@@ -76,6 +86,7 @@ def _reset_state_for_dataset(version_key: str, metrics: List[MetricDefinition], 
         "families",
         "join_terms",
         "statuses",
+        "resolved_outcome_groups",
         "majors",
         "pell_groups",
         "transfer_groups",
@@ -106,6 +117,7 @@ def _collect_filters() -> Dict[str, object]:
         "families": st.session_state.get("families", []),
         "join_terms": st.session_state.get("join_terms", []),
         "statuses": st.session_state.get("statuses", []),
+        "resolved_outcome_groups": st.session_state.get("resolved_outcome_groups", []),
         "majors": st.session_state.get("majors", []),
         "pell_groups": st.session_state.get("pell_groups", []),
         "transfer_groups": st.session_state.get("transfer_groups", []),
@@ -122,7 +134,7 @@ def _apply_preset(name: str) -> None:
     payload = load_preset(name)
     for key, value in payload.get("filters", {}).items():
         st.session_state[key] = value
-    for key in ["metric_key", "group_field", "compare_field", "compare_values", "control_field"]:
+    for key in ["metric_key", "group_field", "compare_field", "compare_values", "control_field", "outcome_population_view"]:
         if key in payload:
             st.session_state[key] = payload[key]
 
@@ -213,6 +225,69 @@ def _render_data_status_panel(bundle, source_statuses: List[DataSourceStatus]) -
             _render_source_file_status(source_statuses)
 
 
+def _population_transparency_frame(metric: MetricDefinition, metric_views: dict[str, object], filtered_summary: pd.DataFrame) -> pd.DataFrame:
+    population_summary = outcome_population_summary(filtered_summary)
+    all_result = metric_views["all"]
+    resolved_result = metric_views["resolved_only"]
+
+    return pd.DataFrame(
+        [
+            {
+                "Population View": ALL_STUDENTS_LABEL,
+                "Metric Value": all_result["value"],
+                "Formatted Value": format_metric_value(all_result["value"], metric.format),
+                "Numerator": all_result["numerator"],
+                "Denominator": all_result["denominator"],
+                "Students Included": all_result["students"],
+                "Excluded Active/Unknown N": metric_views["excluded_active_unknown_n"],
+                "Excluded Active/Unknown Share": metric_views["excluded_active_unknown_share"],
+            },
+            {
+                "Population View": RESOLVED_OUTCOMES_ONLY_LABEL,
+                "Metric Value": resolved_result["value"],
+                "Formatted Value": format_metric_value(resolved_result["value"], metric.format),
+                "Numerator": resolved_result["numerator"],
+                "Denominator": resolved_result["denominator"],
+                "Students Included": resolved_result["students"],
+                "Excluded Active/Unknown N": metric_views["excluded_active_unknown_n"],
+                "Excluded Active/Unknown Share": metric_views["excluded_active_unknown_share"],
+            },
+        ]
+    )
+
+
+def _render_population_summary(metric: MetricDefinition, metric_views: dict[str, object], filtered_summary: pd.DataFrame) -> pd.DataFrame:
+    population_summary = outcome_population_summary(filtered_summary)
+    all_result = metric_views["all"]
+    resolved_result = metric_views["resolved_only"]
+
+    population_columns = st.columns(5)
+    with population_columns[0]:
+        st.metric(ALL_STUDENTS_LABEL, format_metric_value(population_summary["all_students"], "integer"))
+    with population_columns[1]:
+        st.metric(RESOLVED_OUTCOMES_ONLY_LABEL, format_metric_value(population_summary["resolved_students"], "integer"))
+    with population_columns[2]:
+        st.metric("Excluded Still Active/Unknown", format_metric_value(population_summary["excluded_students"], "integer"))
+    with population_columns[3]:
+        st.metric(
+            f"{metric.display_name} ({ALL_STUDENTS_LABEL})",
+            format_metric_value(all_result["value"], metric.format),
+        )
+    with population_columns[4]:
+        st.metric(
+            f"{metric.display_name} ({RESOLVED_OUTCOMES_ONLY_LABEL})",
+            format_metric_value(resolved_result["value"], metric.format),
+        )
+
+    transparency = _population_transparency_frame(metric, metric_views, filtered_summary)
+    st.caption(
+        "The current/full view preserves the existing calculation. "
+        "The resolved-only view uses the same formula after excluding students classified as Still Active, Unknown, or other unresolved/unmapped outcomes by the configured status rules."
+    )
+    st.dataframe(transparency, use_container_width=True, hide_index=True)
+    return transparency
+
+
 def main() -> None:
     settings = load_settings()
     metric_catalog = load_metric_catalog()
@@ -289,6 +364,7 @@ def main() -> None:
                 "compare_field": st.session_state.get("compare_field"),
                 "compare_values": st.session_state.get("compare_values", []),
                 "control_field": st.session_state.get("control_field", "None"),
+                "outcome_population_view": st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL),
                 "filters": _collect_filters(),
             }
             path = save_preset(save_name, payload)
@@ -325,6 +401,11 @@ def main() -> None:
             options=control_options,
             format_func=lambda key: "No control" if key == "None" else dimension_map[key],
             key="control_field",
+        )
+        st.selectbox(
+            "Metric population view",
+            options=[ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
+            key="outcome_population_view",
         )
         max_min_n = int(settings.get("max_min_sample_size", 50))
         default_min_n = min(int(settings.get("default_min_sample_size", 5)), max_min_n)
@@ -373,6 +454,7 @@ def main() -> None:
             ("families", "family", "Organization families"),
             ("join_terms", "join_term", "Join terms"),
             ("statuses", "status_group", "Latest statuses"),
+            ("resolved_outcome_groups", "outcome_resolution_group", "Outcome resolution"),
             ("majors", "major_group", "Majors"),
             ("pell_groups", "pell_group", "Pell groups"),
             ("transfer_groups", "transfer_group", "Transfer groups"),
@@ -395,9 +477,23 @@ def main() -> None:
     filtered_summary = apply_summary_filters(bundle.summary, filters)
     filtered_longitudinal = apply_longitudinal_filters(bundle.longitudinal, filtered_summary, filters)
 
-    metric_result = compute_metric(filtered_summary, metric)
-    group_summary = summarize_metric_by_group(filtered_summary, metric, group_field, st.session_state["min_n"])
-    comparison_table = build_comparison_table(filtered_summary, metric, compare_field, compare_values, st.session_state["min_n"])
+    outcome_population_view = st.session_state["outcome_population_view"]
+    metric_views = compute_metric_views(filtered_summary, metric)
+    group_summary = summarize_metric_by_group(
+        filtered_summary,
+        metric,
+        group_field,
+        st.session_state["min_n"],
+        population_label=outcome_population_view,
+    )
+    comparison_table = build_comparison_table(
+        filtered_summary,
+        metric,
+        compare_field,
+        compare_values,
+        st.session_state["min_n"],
+        population_label=outcome_population_view,
+    )
     controlled_table = build_controlled_comparison(
         filtered_summary,
         metric,
@@ -405,6 +501,7 @@ def main() -> None:
         compare_values,
         st.session_state["control_field"],
         st.session_state["min_n"],
+        population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
 
     st.title("Fraternity / Sorority Life Academic Outcomes Analytics")
@@ -417,29 +514,11 @@ def main() -> None:
     _render_data_status_panel(bundle, source_statuses)
 
     st.info(metric_caption(metric))
-
-    kpi_headcount_metric = next((item for item in metrics if item.key == "headcount"), None)
-    kpi_grad_metric = next((item for item in metrics if item.key == "graduation_rate_6yr"), None)
-    kpi_gpa_metric = next((item for item in metrics if item.key == "average_cumulative_gpa"), None)
-    kpi_completeness_metric = next((item for item in metrics if item.key == "data_completeness_rate"), None)
-
-    kpi_columns = st.columns(4)
-    with kpi_columns[0]:
-        headcount_result = compute_metric(filtered_summary, kpi_headcount_metric) if kpi_headcount_metric else {"value": filtered_summary["student_id"].nunique(), "format": "integer"}
-        st.metric("Filtered students", format_metric_value(headcount_result["value"], "integer"))
-    with kpi_columns[1]:
-        st.metric(metric.display_name, format_metric_value(metric_result["value"], metric.format))
-    with kpi_columns[2]:
-        if kpi_grad_metric:
-            grad_result = compute_metric(filtered_summary, kpi_grad_metric)
-            st.metric(kpi_grad_metric.display_name, format_metric_value(grad_result["value"], kpi_grad_metric.format))
-    with kpi_columns[3]:
-        if kpi_gpa_metric:
-            gpa_result = compute_metric(filtered_summary, kpi_gpa_metric)
-            st.metric(kpi_gpa_metric.display_name, format_metric_value(gpa_result["value"], kpi_gpa_metric.format))
-        elif kpi_completeness_metric:
-            completeness_result = compute_metric(filtered_summary, kpi_completeness_metric)
-            st.metric(kpi_completeness_metric.display_name, format_metric_value(completeness_result["value"], kpi_completeness_metric.format))
+    st.caption(
+        f"Charts and rank ordering currently use: {outcome_population_view}. "
+        "Tables and exports include both All Students and Resolved Outcomes Only where practical."
+    )
+    population_transparency = _render_population_summary(metric, metric_views, filtered_summary)
 
     overview_tab, comparison_tab, ranking_tab, trend_tab, distribution_tab, export_tab, definition_tab = st.tabs(
         ["Overview", "Comparisons", "Rankings", "Trends", "Distributions", "Data & Export", "Metric Definitions"]
@@ -453,7 +532,7 @@ def main() -> None:
                 x="Group",
                 y="Metric Value",
                 color=None,
-                title=f"{metric.display_name} by {dimension_map[group_field]}",
+                title=f"{metric.display_name} by {dimension_map[group_field]} ({outcome_population_view})",
                 y_format=metric.format,
             )
             st.plotly_chart(chart, use_container_width=True)
@@ -463,7 +542,7 @@ def main() -> None:
             st.warning("No groups met the current minimum-N rule for this metric.")
 
         st.subheader("Stakeholder notes")
-        for note in stakeholder_summary(group_summary, metric):
+        for note in stakeholder_summary(group_summary, metric, population_label=outcome_population_view):
             st.write(f"- {note}")
 
     with comparison_tab:
@@ -476,7 +555,7 @@ def main() -> None:
                 x="Comparison Group",
                 y="Metric Value",
                 color=None,
-                title=f"{metric.display_name} comparison",
+                title=f"{metric.display_name} comparison ({outcome_population_view})",
                 y_format=metric.format,
             )
             st.plotly_chart(comparison_chart, use_container_width=True)
@@ -490,7 +569,7 @@ def main() -> None:
                 x="Control Group",
                 y="Metric Value",
                 color="Comparison Group",
-                title=f"{metric.display_name} within {dimension_map[st.session_state['control_field']]}",
+                title=f"{metric.display_name} within {dimension_map[st.session_state['control_field']]} ({outcome_population_view})",
                 y_format=metric.format,
             )
             st.plotly_chart(controlled_chart, use_container_width=True)
@@ -503,15 +582,21 @@ def main() -> None:
         ranked = group_summary.sort_values("Metric Value", ascending=(ranking_direction == "Lowest first")).reset_index(drop=True)
         st.dataframe(ranked, use_container_width=True, hide_index=True)
 
-        scatter_source = build_scatter_frame(filtered_summary, metric, group_field, st.session_state["min_n"])
+        scatter_source = build_scatter_frame(
+            filtered_summary,
+            metric,
+            group_field,
+            st.session_state["min_n"],
+            population_label=outcome_population_view,
+        )
         if not scatter_source.empty:
             scatter = scatter_chart(
                 scatter_source,
-                x="Chapter Size",
+                x="Population Students",
                 y="Metric Value",
                 size="Students",
                 color=None,
-                title="Group size versus performance",
+                title=f"Group size versus performance ({outcome_population_view})",
                 y_format=metric.format,
             )
             st.plotly_chart(scatter, use_container_width=True)
@@ -526,6 +611,7 @@ def main() -> None:
             time_field=summary_time_field,
             segment_field=group_field,
             min_n=st.session_state["min_n"],
+            population_label=outcome_population_view,
         )
         if not summary_trend.empty:
             join_trend_chart = line_chart(
@@ -533,7 +619,7 @@ def main() -> None:
                 x="Time",
                 y="Metric Value",
                 color="Segment",
-                title=f"{metric.display_name} over join cohorts",
+                title=f"{metric.display_name} over join cohorts ({outcome_population_view})",
                 y_format=metric.format,
             )
             st.plotly_chart(join_trend_chart, use_container_width=True)
@@ -546,14 +632,20 @@ def main() -> None:
             "Observed term measure",
             options=["Headcount", "Average Term GPA", "Average Cumulative GPA", "Average Passed Hours", "Average Cumulative Hours"],
         )
-        observed_trend = build_observed_term_series(filtered_longitudinal, observed_measure, group_field)
+        observed_trend = build_observed_term_series(
+            filtered_longitudinal,
+            observed_measure,
+            group_field,
+            summary=filtered_summary,
+            population_label=outcome_population_view,
+        )
         if not observed_trend.empty:
             observed_chart = line_chart(
                 observed_trend,
                 x="Observed Term",
                 y="Metric Value",
                 color="Segment",
-                title=f"{observed_measure} over observed terms",
+                title=f"{observed_measure} over observed terms ({outcome_population_view})",
             )
             st.plotly_chart(observed_chart, use_container_width=True)
             _save_chart_downloads(observed_chart, "observed_term_trend")
@@ -566,6 +658,7 @@ def main() -> None:
             column
             for column in [
                 "status_group",
+                "outcome_resolution_group",
                 "first_academic_standing_bucket",
                 "active_membership_group",
                 "pell_group",
@@ -581,14 +674,20 @@ def main() -> None:
                 options=distribution_options,
                 format_func=lambda key: key.replace("_", " ").title(),
             )
-            distribution_table = build_distribution_table(filtered_summary, group_field, distribution_field, st.session_state["min_n"])
+            distribution_table = build_distribution_table(
+                filtered_summary,
+                group_field,
+                distribution_field,
+                st.session_state["min_n"],
+                population_label=outcome_population_view,
+            )
             if not distribution_table.empty:
                 distribution_chart = stacked_bar_chart(
                     distribution_table,
                     x="Group",
                     y="Share",
                     color="Category",
-                    title=f"{distribution_field.replace('_', ' ').title()} by {dimension_map[group_field]}",
+                    title=f"{distribution_field.replace('_', ' ').title()} by {dimension_map[group_field]} ({outcome_population_view})",
                 )
                 st.plotly_chart(distribution_chart, use_container_width=True)
                 _save_chart_downloads(distribution_chart, "distribution_chart")
@@ -616,12 +715,29 @@ def main() -> None:
                 options=numeric_options,
                 format_func=lambda key: key.replace("_", " ").title(),
             )
-            hist_chart = histogram(filtered_summary, x=numeric_field, color=None, title=f"Distribution of {numeric_field.replace('_', ' ').title()}")
-            box_chart = box_plot(filtered_summary, x=group_field, y=numeric_field, color=None, title=f"{numeric_field.replace('_', ' ').title()} by {dimension_map[group_field]}")
-            st.plotly_chart(hist_chart, use_container_width=True)
-            _save_chart_downloads(hist_chart, "numeric_histogram")
-            st.plotly_chart(box_chart, use_container_width=True)
-            _save_chart_downloads(box_chart, "numeric_boxplot")
+            numeric_frame = filtered_summary if outcome_population_view == ALL_STUDENTS_LABEL else filtered_summary.loc[
+                filtered_summary["resolved_outcomes_only_flag"].fillna(False)
+            ].copy()
+            if numeric_frame.empty:
+                st.caption("No numeric distribution data is available for the selected outcome population view.")
+            else:
+                hist_chart = histogram(
+                    numeric_frame,
+                    x=numeric_field,
+                    color=None,
+                    title=f"Distribution of {numeric_field.replace('_', ' ').title()} ({outcome_population_view})",
+                )
+                box_chart = box_plot(
+                    numeric_frame,
+                    x=group_field,
+                    y=numeric_field,
+                    color=None,
+                    title=f"{numeric_field.replace('_', ' ').title()} by {dimension_map[group_field]} ({outcome_population_view})",
+                )
+                st.plotly_chart(hist_chart, use_container_width=True)
+                _save_chart_downloads(hist_chart, "numeric_histogram")
+                st.plotly_chart(box_chart, use_container_width=True)
+                _save_chart_downloads(box_chart, "numeric_boxplot")
         else:
             st.caption("No numeric distribution fields are available in the current filtered dataset.")
 
@@ -639,6 +755,10 @@ def main() -> None:
                 "join_term",
                 "join_year",
                 "status_group",
+                "outcome_resolution_group",
+                "resolved_outcomes_only_flag",
+                "resolved_outcome_excluded_flag",
+                "resolved_outcome_exclusion_reason",
                 "major",
                 "pell_group",
                 "transfer_group",
@@ -655,8 +775,10 @@ def main() -> None:
 
         export_frames = {
             "Filtered Students": summary_export,
+            "Population Summary": population_transparency,
             "Group Summary": group_summary,
             "Comparison Table": comparison_table,
+            "Controlled Comparison": controlled_table,
             "Filtered Longitudinal": filtered_longitudinal,
         }
         csv_col, xlsx_col = st.columns(2)
@@ -686,6 +808,14 @@ def main() -> None:
         st.write(f"**Minimum sample-size guidance:** {metric.min_sample_size}")
         st.write(f"**Notes:** {metric.notes or 'None'}")
         st.write(f"**Limitations:** {metric.limitations or 'None'}")
+        excluded_groups = ", ".join(settings.get("outcome_resolution", {}).get("resolved_only_excluded_groups", []))
+        st.write("**All Students view:** Preserves the existing current/full calculation logic.")
+        st.write(
+            "**Resolved Outcomes Only view:** Uses the same formula after excluding students classified as "
+            "Still Active, Unknown, or other unresolved/unmapped outcomes by the configured status framework."
+        )
+        st.write("**Interpretation note:** Resolved-only results are often the better view for final-outcome metrics such as graduation rates.")
+        st.write(f"**Resolved-only excluded groups:** {excluded_groups or 'Configured in app settings'}")
 
         st.subheader("Available metrics")
         metric_table = pd.DataFrame(
@@ -697,6 +827,7 @@ def main() -> None:
                     "Source Table": item.source_table,
                     "Logic Source": item.logic_source,
                     "Minimum N": item.min_sample_size,
+                    "Population Views": f"{ALL_STUDENTS_LABEL} + {RESOLVED_OUTCOMES_ONLY_LABEL}",
                 }
                 for item in metrics
             ]

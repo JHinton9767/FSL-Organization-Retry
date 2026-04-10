@@ -7,6 +7,12 @@ import pandas as pd
 
 from app.io_utils import normalize_text
 from app.models import MetricDefinition
+from app.status_framework import (
+    ALL_STUDENTS_LABEL,
+    RESOLVED_OUTCOMES_ONLY_LABEL,
+    outcome_population_summary,
+    resolved_outcomes_only_frame,
+)
 
 
 def metric_available(definition: MetricDefinition, summary: pd.DataFrame, longitudinal: pd.DataFrame) -> bool:
@@ -106,6 +112,33 @@ def compute_metric(frame: pd.DataFrame, definition: MetricDefinition) -> dict[st
         }
 
     raise ValueError(f"Unsupported metric kind: {definition.kind}")
+
+
+def metric_population_column(base_label: str, population_label: str) -> str:
+    return f"{base_label} ({population_label})"
+
+
+def compute_metric_views(frame: pd.DataFrame, definition: MetricDefinition) -> dict[str, object]:
+    population_summary = outcome_population_summary(frame)
+    all_result = compute_metric(frame, definition)
+    resolved_frame = resolved_outcomes_only_frame(frame)
+    resolved_result = compute_metric(resolved_frame, definition)
+
+    all_result["population_label"] = ALL_STUDENTS_LABEL
+    resolved_result["population_label"] = RESOLVED_OUTCOMES_ONLY_LABEL
+
+    return {
+        "all": all_result,
+        "resolved_only": resolved_result,
+        "excluded_active_unknown_n": population_summary["excluded_students"],
+        "excluded_active_unknown_share": population_summary["excluded_share"],
+    }
+
+
+def select_metric_view(metric_views: dict[str, object], population_label: str) -> dict[str, object]:
+    if population_label == RESOLVED_OUTCOMES_ONLY_LABEL:
+        return metric_views["resolved_only"]
+    return metric_views["all"]
 
 
 def format_metric_value(value: object, format_code: str) -> str:

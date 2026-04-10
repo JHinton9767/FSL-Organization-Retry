@@ -57,7 +57,22 @@ Metric metadata lives in `config/metric_catalog.json` and includes:
 
 The actual aggregation engine is in `app/metrics_engine.py`, so formulas are not scattered through the UI.
 
-### 5. Validate and surface data status
+### 5. Add parallel outcome-population views
+
+The app now carries two parallel statistical views through the same metric formulas:
+
+- `All Students`
+- `Resolved Outcomes Only`
+
+`Resolved Outcomes Only` excludes unresolved outcome groups such as `Still Active`, `Unknown`, and other configured unmapped categories.
+
+The resolved-outcome status framework is assigned during summary standardization and is configurable in:
+
+- `config/app_settings.json`
+
+This makes the distinction explicit without replacing the existing full/current calculations.
+
+### 6. Validate and surface data status
 
 Startup validation is handled before the dashboard renders.
 
@@ -76,7 +91,7 @@ The UI exposes a `Data Status` panel showing:
 - validation warnings
 - discovered local sources and expected files
 
-### 6. Backward compatibility
+### 7. Backward compatibility
 
 - Existing `src/` files and run scripts remain intact
 - The app reads legacy outputs but does not rewrite them
@@ -85,8 +100,9 @@ The UI exposes a `Data Status` panel showing:
 ## Main modules
 
 - `app/legacy_bridge.py`: dataset discovery, manifest-based validation, and legacy bundle loading
-- `app/standardize.py`: canonical student/term model
-- `app/metrics_engine.py`: metric registry execution
+- `app/standardize.py`: canonical student/term model plus outcome-resolution assignment
+- `app/status_framework.py`: outcome-resolution classification and resolved-only population rules
+- `app/metrics_engine.py`: metric registry execution plus parallel population views
 - `app/analysis.py`: filters, grouping, ranking, comparisons, trends
 - `app/charts.py`: Plotly chart builders
 - `app/exports.py`: CSV/XLSX/HTML/PNG exports
@@ -97,3 +113,4 @@ The UI exposes a `Data Status` panel showing:
 - Snapshot augmentation inside the app currently expects enhanced-style summary + longitudinal tables
 - Campus baseline comparisons only appear when non-FSL students exist in the selected bundle
 - Some controls such as Pell and transfer are only available when the source data actually contains them
+- Resolved-only views depend on the quality of the loaded outcome/status fields and the configured outcome-resolution mapping

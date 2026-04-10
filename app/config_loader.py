@@ -45,6 +45,59 @@ def load_settings() -> Dict[str, Any]:
             "average_cumulative_gpa",
             "total_cumulative_hours",
         ],
+        "outcome_resolution": {
+            "priority_order": [
+                "Graduated",
+                "Known Non-Graduate Exit",
+                "Still Active",
+                "Unknown",
+                "Other / Unmapped",
+            ],
+            "group_patterns": {
+                "Graduated": [
+                    "\\bGRADUAT",
+                    "\\bALUM",
+                    "\\bDEGREE\\b",
+                ],
+                "Known Non-Graduate Exit": [
+                    "\\bINACTIVE\\b",
+                    "\\bLEFT\\b",
+                    "\\bRESIGN",
+                    "\\bREVOK",
+                    "\\bSUSPEND",
+                    "\\bTRANSFER\\b",
+                    "\\bDROP",
+                    "\\bREMOVE",
+                    "\\bWITHDRAW",
+                    "\\bTERMINAT",
+                    "\\bDISMISS",
+                    "\\bEXPEL",
+                ],
+                "Still Active": [
+                    "\\bSTILL ACTIVE\\b",
+                    "\\bACTIVE\\b",
+                    "\\bCURRENT\\b",
+                    "\\bMEMBER\\b",
+                    "\\bNEW MEMBER\\b",
+                    "\\bCOUNCIL\\b",
+                ],
+                "Unknown": [
+                    "\\bUNKNOWN\\b",
+                    "\\bUNRESOLVED\\b",
+                    "\\bPENDING\\b",
+                    "\\bNOT KNOWN\\b",
+                    "\\bMISSING\\b",
+                    "\\bUNMAPPED\\b",
+                    "\\bNO OUTCOME\\b",
+                ],
+                "Other / Unmapped": [],
+            },
+            "resolved_only_excluded_groups": [
+                "Still Active",
+                "Unknown",
+                "Other / Unmapped",
+            ],
+        },
     }
     loaded = load_json(APP_SETTINGS_PATH, {})
     defaults.update(loaded)
