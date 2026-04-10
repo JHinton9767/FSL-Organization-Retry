@@ -24,9 +24,9 @@ from app.charts import bar_chart, box_plot, histogram, line_chart, scatter_chart
 from app.config_loader import load_metric_catalog, load_settings, load_status_code_map
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import safe_slug
-from app.legacy_bridge import APP_SESSIONS_ROOT, discover_dataset_versions, load_analysis_bundle, process_uploaded_session, save_uploaded_files
+from app.legacy_bridge import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import available_metrics, compute_metric, format_metric_value, metric_by_key, metric_caption
-from app.models import DatasetVersion, MetricDefinition
+from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
 
 
@@ -36,10 +36,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-
-def _dataset_lookup(versions: List[DatasetVersion]) -> Dict[str, DatasetVersion]:
-    return {version.key: version for version in versions}
 
 
 def _reset_state_for_dataset(version_key: str, metrics: List[MetricDefinition], dimension_map: Dict[str, str], summary: pd.DataFrame, longitudinal: pd.DataFrame, metadata: Dict[str, object]) -> None:
@@ -154,36 +150,67 @@ def _save_chart_downloads(figure, key_prefix: str) -> None:
         )
 
 
-def _render_upload_section() -> None:
-    with st.sidebar.expander("Create Or Update A Dataset Session", expanded=False):
-        label = st.text_input("Session label", value="Uploaded Analytics Session")
-        academic_uploads = st.file_uploader("Academic files", type=["csv", "xlsx", "xls", "xlsm", "parquet"], accept_multiple_files=True)
-        roster_uploads = st.file_uploader("Roster files", type=["csv", "xlsx", "xls", "xlsm", "parquet"], accept_multiple_files=True)
-        precomputed_uploads = st.file_uploader("Precomputed tables / workbooks", type=["csv", "xlsx", "xls", "xlsm", "parquet"], accept_multiple_files=True)
-        snapshot_uploads = st.file_uploader("Current snapshot files", type=["csv", "xlsx", "xls", "xlsm"], accept_multiple_files=True)
-        chapter_mapping_upload = st.file_uploader("Chapter mapping file", type=["csv", "xlsx", "xls", "xlsm", "parquet"], accept_multiple_files=False)
+def _render_source_scan(statuses: List[DataSourceStatus]) -> None:
+    rows = []
+    for status in statuses:
+        rows.append(
+            {
+                "Source": status.label,
+                "Available": "Yes" if status.available else "No",
+                "Selected Path": str(status.selected_path) if status.selected_path else str(status.root_path),
+                "Warnings": " | ".join(status.warnings) if status.warnings else "",
+            }
+        )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-        if st.button("Process uploaded files", use_container_width=True):
-            if not (academic_uploads or roster_uploads or precomputed_uploads):
-                st.error("Upload academic + roster files or recognized precomputed tables before processing.")
-            else:
-                session_root = APP_SESSIONS_ROOT / f"{safe_slug(label)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                academic_paths = save_uploaded_files(session_root, "academic", academic_uploads or [])
-                roster_paths = save_uploaded_files(session_root, "roster", roster_uploads or [])
-                precomputed_paths = save_uploaded_files(session_root, "precomputed", precomputed_uploads or [])
-                snapshot_paths = save_uploaded_files(session_root, "snapshot", snapshot_uploads or [])
-                mapping_paths = save_uploaded_files(session_root, "mapping", [chapter_mapping_upload] if chapter_mapping_upload else [])
-                version = process_uploaded_session(
-                    label=label,
-                    academic_paths=academic_paths,
-                    roster_paths=roster_paths,
-                    precomputed_paths=precomputed_paths,
-                    snapshot_paths=snapshot_paths,
-                    chapter_mapping_path=mapping_paths[0] if mapping_paths else None,
-                    session_root=session_root,
-                )
-                st.session_state["selected_dataset_key"] = version.key
-                st.rerun()
+
+def _render_source_file_status(statuses: List[DataSourceStatus]) -> None:
+    rows = []
+    for status in statuses:
+        for file_status in status.files:
+            rows.append(
+                {
+                    "Source": status.label,
+                    "File": file_status.label,
+                    "Required": "Yes" if file_status.required else "No",
+                    "Exists": "Yes" if file_status.exists else "No",
+                    "Last Modified": file_status.last_modified,
+                    "Path": str(file_status.path),
+                    "Warning": file_status.warning,
+                }
+            )
+    if rows:
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def _render_data_status_panel(bundle, source_statuses: List[DataSourceStatus]) -> None:
+    with st.expander("Data Status", expanded=False):
+        st.write(f"**Active dataset:** {bundle.version.label}")
+        st.write(f"**Startup behavior:** The app auto-loaded the highest-priority valid dataset it found in the local project folders.")
+        file_rows = [
+            {
+                "File": status.label,
+                "Path": str(status.path),
+                "Required": "Yes" if status.required else "No",
+                "Loaded": "Yes" if status.loaded else "No",
+                "Exists": "Yes" if status.exists else "No",
+                "Rows": status.row_count if status.row_count is not None else "",
+                "Last Modified": status.last_modified,
+                "Warning": status.warning,
+            }
+            for status in bundle.data_status
+        ]
+        if file_rows:
+            st.dataframe(pd.DataFrame(file_rows), use_container_width=True, hide_index=True)
+        if bundle.metadata.get("validation_warnings"):
+            for warning in bundle.metadata["validation_warnings"]:
+                st.warning(warning)
+        st.subheader("Discovered Local Sources")
+        _render_source_scan(source_statuses)
+        if any(status.files for status in source_statuses):
+            st.subheader("Expected Files")
+            _render_source_file_status(source_statuses)
 
 
 def main() -> None:
@@ -191,35 +218,49 @@ def main() -> None:
     metric_catalog = load_metric_catalog()
     status_code_map = load_status_code_map()
 
+    source_statuses = scan_preloaded_sources()
     versions = discover_dataset_versions()
-    version_lookup = _dataset_lookup(versions)
+    version = select_default_dataset(versions)
 
     st.sidebar.title("FSL Analytics")
     st.sidebar.caption("Interactive chapter, cohort, and campus comparison workspace.")
-    _render_upload_section()
+    st.sidebar.caption("The app reads pre-positioned local project files on startup.")
 
-    if not versions:
+    if version is None:
         st.title("FSL Academic Outcomes Analytics")
-        st.info(
-            "No processed, enhanced, snapshot, or uploaded dataset versions were found yet. "
-            "Upload files from the sidebar or run the existing pipeline scripts first."
+        st.error(
+            "No valid prepared dataset was found in the expected local project folders. "
+            "Run the external prep pipeline, place the finished files in their documented folders, and relaunch the app."
         )
+        st.subheader("Detected Local Data Sources")
+        _render_source_scan(source_statuses)
+        if any(status.files for status in source_statuses):
+            st.subheader("Expected Files")
+            _render_source_file_status(source_statuses)
         return
 
-    selected_key = st.sidebar.selectbox(
-        "Dataset version",
-        options=[version.key for version in versions],
-        format_func=lambda key: version_lookup[key].label,
-        key="selected_dataset_key",
-    )
-    version = version_lookup[selected_key]
+    st.sidebar.caption(f"Auto-loaded dataset: {version.label}")
 
-    bundle = load_analysis_bundle(
-        version=version,
-        metric_definitions=metric_catalog,
-        settings=settings,
-        status_code_map=status_code_map,
-    )
+    try:
+        bundle = load_analysis_bundle(
+            version=version,
+            metric_definitions=metric_catalog,
+            settings=settings,
+            status_code_map=status_code_map,
+        )
+    except Exception as exc:
+        st.title("FSL Academic Outcomes Analytics")
+        st.error(
+            "A prepared dataset was found, but it could not be loaded cleanly. "
+            "Check the generated files, rerun the external prep workflow if needed, and relaunch the app."
+        )
+        st.write(f"**Load error:** `{exc}`")
+        st.subheader("Detected Local Data Sources")
+        _render_source_scan(source_statuses)
+        if any(status.files for status in source_statuses):
+            st.subheader("Expected Files")
+            _render_source_file_status(source_statuses)
+        return
 
     metrics = available_metrics(bundle.metric_definitions, bundle.summary, bundle.longitudinal)
     if not metrics:
@@ -368,10 +409,12 @@ def main() -> None:
 
     st.title("Fraternity / Sorority Life Academic Outcomes Analytics")
     st.caption(f"Dataset: {bundle.version.label}")
+    st.caption("Prepared files are loaded automatically from the local project folders at startup.")
     if bundle.notes:
         with st.expander("Dataset notes and caveats", expanded=False):
             for note in bundle.notes:
                 st.write(f"- {note}")
+    _render_data_status_panel(bundle, source_statuses)
 
     st.info(metric_caption(metric))
 

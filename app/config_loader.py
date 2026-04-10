@@ -14,6 +14,7 @@ CONFIG_DIR = ROOT / "config"
 APP_SETTINGS_PATH = CONFIG_DIR / "app_settings.json"
 METRIC_CATALOG_PATH = CONFIG_DIR / "metric_catalog.json"
 STATUS_CODE_MAP_PATH = CONFIG_DIR / "status_code_map.json"
+DATASET_MANIFEST_PATH = CONFIG_DIR / "dataset_manifest.json"
 DEFAULT_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.csv"
 EXAMPLE_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.example.csv"
 
@@ -68,6 +69,63 @@ def load_metric_catalog() -> List[MetricDefinition]:
     for item in load_json(METRIC_CATALOG_PATH, []):
         definitions.append(MetricDefinition(**item))
     return definitions
+
+
+def load_dataset_manifest() -> Dict[str, Any]:
+    defaults: Dict[str, Any] = {
+        "priority": ["current_snapshot", "enhanced", "processed"],
+        "sources": {
+            "current_snapshot": {
+                "label": "Current Snapshot Run",
+                "root": "output/current_snapshot_metrics",
+                "mode": "latest_run",
+                "run_prefix": "run_",
+                "required_files": [
+                    "snapshot_augmented_student_summary.csv",
+                    "snapshot_augmented_cohort_metrics.csv",
+                    "snapshot_augmented_chapter_metrics.csv",
+                    "snapshot_merge_qa.csv",
+                ],
+                "optional_files": [
+                    "methodology.md",
+                    "organization_entry_snapshot_augmented_*.xlsx",
+                ],
+            },
+            "enhanced": {
+                "label": "Enhanced Run",
+                "root": "output/enhanced_metrics",
+                "mode": "latest_run",
+                "run_prefix": "run_",
+                "required_files": [
+                    "student_summary.csv",
+                    "cohort_metrics.csv",
+                ],
+                "optional_files": [
+                    "master_longitudinal.csv",
+                    "metric_definitions.csv",
+                    "qa_checks.csv",
+                    "organization_entry_analytics_enhanced_*.xlsx",
+                    "methodology.md",
+                ],
+            },
+            "processed": {
+                "label": "Processed Pipeline Tables",
+                "mode": "fixed",
+                "files": [
+                    {"label": "Student Summary", "path": "data/processed/student_summary.csv", "required": True},
+                    {"label": "Master Dataset", "path": "data/processed/master_dataset.csv", "required": True},
+                    {"label": "Graduation Rates", "path": "output/metrics/graduation_rates.csv", "required": False},
+                    {"label": "Retention Rates", "path": "output/metrics/retention_rates.csv", "required": False},
+                    {"label": "GPA Trends", "path": "output/metrics/gpa_trends.csv", "required": False},
+                    {"label": "Credit Momentum", "path": "output/metrics/credit_momentum.csv", "required": False},
+                    {"label": "Standing Distribution", "path": "output/metrics/standing_distribution.csv", "required": False},
+                ],
+            },
+        },
+    }
+    loaded = load_json(DATASET_MANIFEST_PATH, {})
+    defaults.update(loaded)
+    return defaults
 
 
 def _standardize_chapter_mapping(frame: pd.DataFrame) -> pd.DataFrame:

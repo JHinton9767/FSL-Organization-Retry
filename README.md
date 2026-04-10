@@ -1,22 +1,35 @@
 # Greek Life Academic Analytics
 
-This repository now supports two complementary workflows:
+This repository supports two connected layers:
 
-1. The existing Python report builders and versioned analytics outputs
-2. A new local Streamlit analytics application for dynamic filtering, controls, rankings, comparisons, charts, and exports
+1. The existing Python data-prep and reporting scripts in `src/` and the repo root
+2. A Streamlit analytics app that reads the prepared local outputs and lets users explore them interactively
 
-The app is built specifically for Fraternity / Sorority Life academic outcomes work, with emphasis on:
+The app is designed for Fraternity / Sorority Life academic outcomes work, with emphasis on:
 
 - graduation rates
 - retention and continuation
 - GPA outcomes
 - chapter comparisons
-- subgroup controls
-- non-technical, presentation-ready outputs
+- fair subgroup controls
+- presentation-ready outputs for non-technical stakeholders
 
-## What was already in the repo
+## Current workflow
 
-The repo already contained working logic for:
+The app is now **preload-only**.
+
+That means:
+
+- you run the Excel/source-file prep workflow outside the app
+- you place the finished files in the project folders the repo expects
+- you launch the app
+- the app automatically scans those folders, validates the prepared files, and loads the best available dataset
+
+The app no longer requires file uploads through the UI.
+
+## Existing logic preserved
+
+The repo already contained logic for:
 
 - column alias mapping and schema normalization
 - term parsing and ordering
@@ -26,94 +39,149 @@ The repo already contained working logic for:
 - current snapshot augmentation
 - executive reporting outputs
 
-Those existing calculations were preserved. The Streamlit app reads those outputs first when available instead of replacing them with new formulas.
+Those existing calculations were preserved. The app reads those outputs first when available instead of replacing them with new formulas.
 
-## What the new app adds
+## Folder structure
 
-The Streamlit app gives you an interactive local workspace where you can:
-
-- load processed, enhanced, snapshot-augmented, or newly uploaded datasets
-- segment by chapter, chapter groups, council, fraternity/sorority, major, Pell, transfer, join term/year, graduation year, size bands, estimated join stage, and other available controls
-- compare selected chapters or groups side by side
-- rank top and bottom performers with minimum-N rules
-- view trends over join cohorts and observed terms
-- inspect stacked distributions, histograms, boxplots, and scatterplots
-- export filtered tables, summary tables, and chart files
-- save and reload analysis presets
-
-## Repo structure
-
-Existing logic remains in `src/`.
-
-New app-specific components:
+The repo uses the existing folder layout below. The app reads from the prepared output folders, not from ad hoc uploads.
 
 ```text
 app/
-  main.py
-  legacy_bridge.py
-  standardize.py
-  metrics_engine.py
-  analysis.py
-  charts.py
-  exports.py
-  presets.py
 config/
-  app_settings.json
-  metric_catalog.json
-  status_code_map.json
-  chapter_groups.example.csv
+data/
+  raw/
+    academic/
+    rosters/
+  inbox/
+    academic/
+    current_snapshot/
+    rosters/
+  processed/
+    master_dataset.csv
+    student_summary.csv
 docs/
-  architecture.md
-  templates/
+output/
+  metrics/
+    *.csv
+  enhanced_metrics/
+    run_*/
+  current_snapshot_metrics/
+    run_*/
+src/
 tests/
 run_local_analytics_app.py
 ```
 
-## Preferred data sources
+### What each folder is for
 
-The app prefers sources in this order:
+- `data/raw/`: original source files you keep as raw inputs
+- `data/inbox/`: optional staging/drop locations for prep workflows
+- `data/processed/`: processed pipeline outputs the app can use as a fallback source
+- `output/enhanced_metrics/run_*/`: enhanced analytics bundles created by the legacy enhanced workflow
+- `output/current_snapshot_metrics/run_*/`: snapshot-augmented bundles created by the current snapshot workflow
+- `output/metrics/`: supporting processed metric tables
+- `config/`: mappings, metric definitions, thresholds, and dataset loader settings
+
+## Source priority
+
+On startup the app scans local folders and uses the first valid source it finds in this order:
 
 1. `output/current_snapshot_metrics/run_*`
 2. `output/enhanced_metrics/run_*`
 3. `data/processed/*.csv` plus `output/metrics/*.csv`
-4. Uploaded files staged into `data/processed/app_sessions/<session>/`
 
-That lets the app preserve existing repo calculations whenever they already exist.
+This priority is defined in:
 
-## Supported inputs
+- `config/dataset_manifest.json`
 
-### Raw / uploaded files
+That manifest controls:
 
-- `.csv`
-- `.xlsx`
-- `.xls`
-- `.xlsm`
-- `.parquet`
+- expected file names
+- required vs optional files
+- source priority
+- which local outputs count as authoritative prepared datasets
 
-### Common file types
+## Expected prepared outputs
 
-- master roster
-- chapter roster files
-- academic records
-- term-level files
-- current snapshot files
-- precomputed `student_summary`, `master_longitudinal`, `cohort_metrics`, or snapshot-augmented exports
+### Current snapshot run
 
-### Mapping / config files
+Expected under the latest folder in `output/current_snapshot_metrics/`:
 
-- chapter group mapping with optional council / org type / family columns
+- `snapshot_augmented_student_summary.csv`
+- `snapshot_augmented_cohort_metrics.csv`
+- `snapshot_augmented_chapter_metrics.csv`
+- `snapshot_merge_qa.csv`
 
-Template files live in:
+Optional:
 
-- `docs/templates/academic_records_template.csv`
-- `docs/templates/chapter_roster_template.csv`
-- `docs/templates/current_snapshot_template.csv`
-- `docs/templates/chapter_groups_template.csv`
+- `methodology.md`
+- `organization_entry_snapshot_augmented_*.xlsx`
+
+### Enhanced run
+
+Expected under the latest folder in `output/enhanced_metrics/`:
+
+- `student_summary.csv`
+- `cohort_metrics.csv`
+
+Optional:
+
+- `master_longitudinal.csv`
+- `metric_definitions.csv`
+- `qa_checks.csv`
+- `organization_entry_analytics_enhanced_*.xlsx`
+- `methodology.md`
+
+### Processed fallback
+
+Expected in fixed project folders:
+
+- `data/processed/student_summary.csv`
+- `data/processed/master_dataset.csv`
+
+Optional supporting metrics:
+
+- `output/metrics/graduation_rates.csv`
+- `output/metrics/retention_rates.csv`
+- `output/metrics/gpa_trends.csv`
+- `output/metrics/credit_momentum.csv`
+- `output/metrics/standing_distribution.csv`
+
+## External prep order
+
+If you are running the full legacy workflow, this is the typical order:
+
+1. `python run_pipeline.py`
+2. `python run_enhanced_org_analytics.py`
+3. `python run_current_snapshot_analytics.py`
+
+The app does not require every layer. It will fall back automatically:
+
+- snapshot run if available
+- otherwise enhanced run
+- otherwise processed pipeline outputs
+
+Other legacy helpers in the repo still work as before, including:
+
+- `python run_master_roster.py`
+- `python run_member_tenure_report.py`
+- `python run_master_roster_grades.py`
+- `python run_executive_report.py`
+- `python run_chapter_history_workbooks.py`
 
 ## Setup
 
+Install dependencies:
+
 ```powershell
-python -m pip install -r requirements.txt
+py -m pip install -r requirements.txt
+```
+
+If `pip` is not available:
+
+```powershell
+py -m ensurepip --upgrade
+py -m pip install -r requirements.txt
 ```
 
 ## Run the app
@@ -121,70 +189,66 @@ python -m pip install -r requirements.txt
 Either run Streamlit directly:
 
 ```powershell
-python -m streamlit run app/main.py
+py -m streamlit run app/main.py
 ```
 
 Or use the helper:
 
 ```powershell
-python run_local_analytics_app.py
+py run_local_analytics_app.py
 ```
 
-## Existing pipeline workflows
+## App startup behavior
 
-The existing scripts still work exactly as before.
+When the app launches, it will:
 
-### Base processed pipeline
+1. scan the configured local folders
+2. identify the highest-priority valid prepared dataset
+3. validate the required tables and columns
+4. build the dashboard automatically
 
-```powershell
-python run_pipeline.py
-```
+If no valid prepared data is present, the app shows:
 
-Writes:
+- which sources were checked
+- which expected files were missing
 
-- `data/processed/master_dataset.csv`
-- `data/processed/student_summary.csv`
-- `output/metrics/*.csv`
-- `output/excel/greek_life_master.xlsx`
+If prepared files are found but fail validation, the app shows the load error and the file/status panel instead of crashing straight into a traceback.
 
-### Master roster helpers
+## Data Status panel
 
-```powershell
-python run_master_roster.py
-python run_member_tenure_report.py
-python run_master_roster_grades.py
-python run_enhanced_org_analytics.py
-python run_current_snapshot_analytics.py
-python run_executive_report.py
-python run_chapter_history_workbooks.py
-```
+The app includes a `Data Status` section that shows:
 
-## Streamlit app workflow
+- the active dataset source
+- which files were loaded
+- file paths
+- last modified timestamps
+- row counts for loaded tables
+- validation warnings
+- discovered local sources and expected files
 
-### Option 1: analyze an existing run
+Use this panel after every refresh to confirm the app is reading the dataset you intended.
 
-1. Run the legacy pipeline / enhanced / snapshot builders
-2. Open the Streamlit app
-3. Choose the dataset version from the sidebar
-4. Pick a metric, aggregation level, filters, and controls
-5. Export the resulting tables and charts
+## Refresh workflow
 
-### Option 2: upload files directly into the app
+When new data arrives:
 
-1. Open the Streamlit app
-2. Expand `Create Or Update A Dataset Session`
-3. Upload:
-   - academic files and roster files, or
-   - recognized precomputed tables / workbooks
-4. Optionally upload:
-   - current snapshot files
-   - chapter mapping file
-5. Click `Process uploaded files`
-6. Analyze the resulting saved session from the dataset selector
+1. rerun your external Excel or Python prep workflow
+2. replace or update the prepared files in the expected project folders
+3. relaunch or refresh the Streamlit app
 
-Uploaded files are copied into `data/processed/app_sessions/<session>/uploads/`.
-Cleaned and intermediate outputs are written to `data/processed/app_sessions/<session>/processed/`.
-Original source files are never modified in place.
+The app does not poll for updates, sync in the background, or require in-app uploads.
+
+## What the app does
+
+The Streamlit app gives you an interactive local workspace where you can:
+
+- segment by chapter, chapter groups, council, fraternity/sorority, major, Pell, transfer, join term/year, graduation year, size bands, estimated join stage, and other available controls
+- compare selected chapters or groups side by side
+- rank top and bottom performers with minimum-N rules
+- view trends over join cohorts and observed terms
+- inspect stacked distributions, histograms, boxplots, and scatterplots
+- export filtered tables, summary tables, and chart files
+- save and reload analysis presets
 
 ## Metrics available in the app
 
@@ -250,6 +314,16 @@ Examples:
 
 These are labeled in the app and should not be treated as exact reconstructed history.
 
+## Configuration files
+
+Key config files:
+
+- `config/dataset_manifest.json`: source discovery and required file definitions
+- `config/app_settings.json`: thresholds and defaults
+- `config/metric_catalog.json`: metric registry
+- `config/status_code_map.json`: status normalization
+- `config/chapter_groups.csv` or `config/chapter_groups.example.csv`: chapter mapping and grouping
+
 ## Backward compatibility
 
 To preserve existing logic:
@@ -257,7 +331,7 @@ To preserve existing logic:
 - existing `src/` builders were not removed or rewritten
 - existing run scripts still point to the same code
 - enhanced / snapshot flags are reused directly when available
-- app-only metrics such as completeness are labeled separately from production metrics
+- app-only derived measures such as completeness are labeled separately from legacy production metrics
 
 If you need the design rationale, see:
 
@@ -278,13 +352,14 @@ Current tests cover:
 - cohort and group standardization
 - metric calculations
 - ranking minimum-N rules
+- loader validation edge cases
 
 ## Example analysis workflow
 
 1. Run `python run_enhanced_org_analytics.py`
 2. Optionally run `python run_current_snapshot_analytics.py`
-3. Open the app with `python -m streamlit run app/main.py`
-4. Choose a snapshot-augmented or enhanced dataset version
+3. Open the app with `py -m streamlit run app/main.py`
+4. Confirm the loaded source in `Data Status`
 5. Select `Observed 6-Year Graduation Rate`
 6. Group by `Chapter`
 7. Compare selected chapters against the FSL-wide average

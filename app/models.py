@@ -18,6 +18,30 @@ class DatasetVersion:
 
 
 @dataclass
+class DataFileStatus:
+    label: str
+    path: Path
+    required: bool
+    exists: bool
+    loaded: bool = False
+    row_count: Optional[int] = None
+    last_modified: str = ""
+    warning: str = ""
+
+
+@dataclass
+class DataSourceStatus:
+    source_key: str
+    label: str
+    priority: int
+    root_path: Path
+    selected_path: Optional[Path]
+    available: bool
+    files: List[DataFileStatus] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class MetricDefinition:
     key: str
     display_name: str
@@ -48,4 +72,4 @@ class AnalysisBundle:
     metric_definitions: List[MetricDefinition]
     notes: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
-
+    data_status: List[DataFileStatus] = field(default_factory=list)

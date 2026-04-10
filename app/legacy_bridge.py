@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import datetime
 from pathlib import Path
@@ -8,9 +7,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 
-from app.config_loader import load_chapter_mapping, stringify_notes
-from app.io_utils import ROOT, read_tabular_file, safe_slug, write_dataframe_cache
-from app.models import AnalysisBundle, DatasetVersion, MetricDefinition
+from app.config_loader import load_chapter_mapping, load_dataset_manifest, stringify_notes
+from app.io_utils import ROOT, read_tabular_file
+from app.models import AnalysisBundle, DataFileStatus, DataSourceStatus, DatasetVersion, MetricDefinition
 from app.standardize import (
     merge_longitudinal_rollups,
     standardize_enhanced_longitudinal,
@@ -18,14 +17,6 @@ from app.standardize import (
     standardize_processed_longitudinal,
     standardize_processed_summary,
     standardize_snapshot_summary,
-)
-from src.build_current_snapshot_analytics import (
-    build_augmented_cohort_metrics,
-    build_chapter_metrics,
-    build_definitions_table as build_snapshot_definitions_table,
-    build_qa_table,
-    load_combined_snapshot_table,
-    merge_augmented_summary,
 )
 from src.build_executive_report import DEFAULT_ENHANCED_ROOT, load_latest_bundle
 from src.greek_life_pipeline import (
@@ -38,71 +29,135 @@ from src.greek_life_pipeline import (
 )
 
 
-ENHANCED_ROOT = ROOT / "output" / "enhanced_metrics"
-SNAPSHOT_ROOT = ROOT / "output" / "current_snapshot_metrics"
-PROCESSED_ROOT = ROOT / "data" / "processed"
 METRICS_ROOT = ROOT / "output" / "metrics"
-APP_SESSIONS_ROOT = PROCESSED_ROOT / "app_sessions"
+
+
+def _iso_mtime(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+
+
+def _latest_run_folder(root: Path, prefix: str) -> Optional[Path]:
+    if not root.exists():
+        return None
+    candidates = [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[0]
+
+
+def _status_from_path(label: str, path: Path, required: bool) -> DataFileStatus:
+    return DataFileStatus(
+        label=label,
+        path=path,
+        required=required,
+        exists=path.exists(),
+        loaded=False,
+        row_count=None,
+        last_modified=_iso_mtime(path),
+        warning="" if path.exists() or not required else "Missing required file",
+    )
+
+
+def _status_from_glob(label: str, base: Path, pattern: str, required: bool) -> DataFileStatus:
+    matches = sorted(base.glob(pattern), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    path = matches[0] if matches else base / pattern
+    return _status_from_path(label, path, required)
+
+
+def scan_preloaded_sources() -> List[DataSourceStatus]:
+    manifest = load_dataset_manifest()
+    statuses: List[DataSourceStatus] = []
+
+    for priority, source_key in enumerate(manifest.get("priority", [])):
+        source_cfg = manifest.get("sources", {}).get(source_key, {})
+        label = source_cfg.get("label", source_key.replace("_", " ").title())
+        mode = source_cfg.get("mode", "fixed")
+        warnings: List[str] = []
+        files: List[DataFileStatus] = []
+
+        if mode == "latest_run":
+            root = ROOT / source_cfg.get("root", "")
+            run_prefix = source_cfg.get("run_prefix", "run_")
+            selected = _latest_run_folder(root, run_prefix)
+            if not root.exists():
+                warnings.append(f"Folder not found: {root}")
+            elif selected is None:
+                warnings.append(f"No run folders were found under {root}")
+
+            if selected is not None:
+                for filename in source_cfg.get("required_files", []):
+                    files.append(_status_from_path(filename, selected / filename, True))
+                for filename in source_cfg.get("optional_files", []):
+                    if "*" in filename or "?" in filename:
+                        files.append(_status_from_glob(filename, selected, filename, False))
+                    else:
+                        files.append(_status_from_path(filename, selected / filename, False))
+            available = selected is not None and all(item.exists for item in files if item.required)
+            if selected is not None and not available:
+                missing = [item.label for item in files if item.required and not item.exists]
+                warnings.append("Missing required files: " + ", ".join(missing))
+            statuses.append(
+                DataSourceStatus(
+                    source_key=source_key,
+                    label=label,
+                    priority=priority,
+                    root_path=root,
+                    selected_path=selected,
+                    available=available,
+                    files=files,
+                    warnings=warnings,
+                )
+            )
+            continue
+
+        root = ROOT
+        selected = ROOT
+        for file_cfg in source_cfg.get("files", []):
+            path = ROOT / file_cfg["path"]
+            files.append(_status_from_path(file_cfg.get("label", Path(file_cfg["path"]).name), path, bool(file_cfg.get("required", False))))
+        available = all(item.exists for item in files if item.required)
+        if not available:
+            missing = [item.label for item in files if item.required and not item.exists]
+            warnings.append("Missing required files: " + ", ".join(missing))
+        statuses.append(
+            DataSourceStatus(
+                source_key=source_key,
+                label=label,
+                priority=priority,
+                root_path=root,
+                selected_path=selected,
+                available=available,
+                files=files,
+                warnings=warnings,
+            )
+        )
+
+    return statuses
 
 
 def discover_dataset_versions() -> List[DatasetVersion]:
     versions: List[DatasetVersion] = []
-
-    if SNAPSHOT_ROOT.exists():
-        for folder in sorted([path for path in SNAPSHOT_ROOT.iterdir() if path.is_dir()], key=lambda item: item.stat().st_mtime, reverse=True):
-            if (folder / "snapshot_augmented_student_summary.csv").exists():
-                versions.append(
-                    DatasetVersion(
-                        key=f"snapshot::{folder}",
-                        label=f"Current Snapshot Run - {folder.name}",
-                        dataset_type="current_snapshot",
-                        root_path=folder,
-                        created_at=datetime.fromtimestamp(folder.stat().st_mtime).isoformat(timespec="seconds"),
-                    )
-                )
-
-    if ENHANCED_ROOT.exists():
-        for folder in sorted([path for path in ENHANCED_ROOT.iterdir() if path.is_dir()], key=lambda item: item.stat().st_mtime, reverse=True):
-            if (folder / "student_summary.csv").exists():
-                versions.append(
-                    DatasetVersion(
-                        key=f"enhanced::{folder}",
-                        label=f"Enhanced Run - {folder.name}",
-                        dataset_type="enhanced",
-                        root_path=folder,
-                        created_at=datetime.fromtimestamp(folder.stat().st_mtime).isoformat(timespec="seconds"),
-                    )
-                )
-
-    if (PROCESSED_ROOT / "student_summary.csv").exists() and (PROCESSED_ROOT / "master_dataset.csv").exists():
-        versions.append(
-            DatasetVersion(
-                key=f"processed::{PROCESSED_ROOT}",
-                label="Processed Pipeline Tables",
-                dataset_type="processed",
-                root_path=PROCESSED_ROOT,
-                created_at=datetime.fromtimestamp((PROCESSED_ROOT / "student_summary.csv").stat().st_mtime).isoformat(timespec="seconds"),
-            )
-        )
-
-    APP_SESSIONS_ROOT.mkdir(parents=True, exist_ok=True)
-    for folder in sorted([path for path in APP_SESSIONS_ROOT.iterdir() if path.is_dir()], key=lambda item: item.stat().st_mtime, reverse=True):
-        manifest_path = folder / "manifest.json"
-        if not manifest_path.exists():
+    for status in scan_preloaded_sources():
+        if not status.available or status.selected_path is None:
             continue
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        label = status.label if status.source_key == "processed" else f"{status.label} - {status.selected_path.name}"
         versions.append(
             DatasetVersion(
-                key=f"session::{folder}",
-                label=manifest.get("label", folder.name),
-                dataset_type="app_session",
-                root_path=folder,
-                created_at=manifest.get("created_at", ""),
-                notes=manifest.get("notes", []),
+                key=f"{status.source_key}::{status.selected_path}",
+                label=label,
+                dataset_type=status.source_key,
+                root_path=status.selected_path,
+                created_at=_iso_mtime(status.selected_path),
+                notes=status.warnings,
             )
         )
-
     return versions
+
+
+def select_default_dataset(versions: List[DatasetVersion]) -> Optional[DatasetVersion]:
+    return versions[0] if versions else None
 
 
 def _parse_enhanced_source_from_methodology(path: Path) -> Optional[Path]:
@@ -127,8 +182,7 @@ def _load_current_snapshot_tables(folder: Path) -> Tuple[Dict[str, pd.DataFrame]
         "snapshot_merge_qa": pd.read_csv(folder / "snapshot_merge_qa.csv"),
     }
     notes: List[str] = ["Using snapshot-augmented student summary and chapter metrics."]
-    methodology_path = folder / "methodology.md"
-    enhanced_source = _parse_enhanced_source_from_methodology(methodology_path)
+    enhanced_source = _parse_enhanced_source_from_methodology(folder / "methodology.md")
     if enhanced_source:
         notes.append(f"Linked enhanced source found at {enhanced_source}.")
         enhanced_bundle = load_latest_bundle(
@@ -143,96 +197,144 @@ def _load_current_snapshot_tables(folder: Path) -> Tuple[Dict[str, pd.DataFrame]
     return tables, notes
 
 
-def _load_bundle_from_workbook(path: Path) -> Tuple[str, Dict[str, pd.DataFrame], List[str]]:
-    if "organization_entry_analytics_enhanced_" in path.name.lower():
-        bundle = load_latest_bundle(
-            enhanced_root=DEFAULT_ENHANCED_ROOT,
-            explicit_folder=None,
-            explicit_workbook=path,
-        )
-        return "enhanced", bundle.tables, bundle.caveats
+def _validate_loaded_tables(bundle_kind: str, tables: Dict[str, pd.DataFrame]) -> List[str]:
+    requirements = {
+        "current_snapshot": {
+            "snapshot_augmented_student_summary": ["Student ID"],
+            "snapshot_augmented_cohort_metrics": ["Metric Group", "Metric Label", "Cohort"],
+            "snapshot_augmented_chapter_metrics": ["Chapter", "Students"],
+        },
+        "enhanced": {
+            "student_summary": ["Student ID"],
+            "cohort_metrics": ["Metric Group", "Metric Label", "Cohort"],
+        },
+        "processed": {
+            "student_summary": ["student_id"],
+            "master_dataset": ["student_id", "term"],
+        },
+    }
+    warnings: List[str] = []
+    missing_messages: List[str] = []
 
-    if "organization_entry_snapshot_augmented_" in path.name.lower():
-        tables = {
-            "snapshot_augmented_student_summary": pd.read_excel(path, sheet_name="Augmented_Summary"),
-            "snapshot_augmented_cohort_metrics": pd.read_excel(path, sheet_name="Cohort_Metrics"),
-            "snapshot_augmented_chapter_metrics": pd.read_excel(path, sheet_name="Chapter_Metrics"),
-            "snapshot_merge_qa": pd.read_excel(path, sheet_name="Snapshot_QA"),
+    for table_name, required_columns in requirements.get(bundle_kind, {}).items():
+        frame = tables.get(table_name)
+        if frame is None:
+            missing_messages.append(f"Required table missing: {table_name}")
+            continue
+        missing_columns = [column for column in required_columns if column not in frame.columns]
+        if missing_columns:
+            missing_messages.append(f"{table_name} is missing required columns: {', '.join(missing_columns)}")
+
+    if missing_messages:
+        raise ValueError("Dataset validation failed. " + " | ".join(missing_messages))
+
+    if bundle_kind in {"current_snapshot", "enhanced"} and "master_longitudinal" not in tables:
+        warnings.append("Master_Longitudinal was not available, so observed-term trend views are limited.")
+
+    return warnings
+
+
+def _loaded_status(label: str, path: Path, required: bool, frame: Optional[pd.DataFrame] = None, warning: str = "") -> DataFileStatus:
+    return DataFileStatus(
+        label=label,
+        path=path,
+        required=required,
+        exists=path.exists(),
+        loaded=frame is not None and path.exists(),
+        row_count=None if frame is None else int(len(frame)),
+        last_modified=_iso_mtime(path),
+        warning=warning,
+    )
+
+
+def _build_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame]) -> List[DataFileStatus]:
+    statuses: List[DataFileStatus] = []
+
+    if version.dataset_type == "current_snapshot":
+        snapshot_map = {
+            "snapshot_augmented_student_summary.csv": "snapshot_augmented_student_summary",
+            "snapshot_augmented_cohort_metrics.csv": "snapshot_augmented_cohort_metrics",
+            "snapshot_augmented_chapter_metrics.csv": "snapshot_augmented_chapter_metrics",
+            "snapshot_merge_qa.csv": "snapshot_merge_qa",
         }
-        return "current_snapshot", tables, ["Snapshot workbook upload did not include a linked enhanced source folder."]
+        for filename, table_key in snapshot_map.items():
+            path = version.root_path / filename
+            statuses.append(_loaded_status(filename, path, True, tables.get(table_key)))
+        methodology_path = version.root_path / "methodology.md"
+        statuses.append(_loaded_status("methodology.md", methodology_path, False, None))
 
-    return "", {}, []
+        enhanced_source = _parse_enhanced_source_from_methodology(methodology_path)
+        if enhanced_source:
+            for filename, table_key in [
+                ("student_summary.csv", "student_summary"),
+                ("cohort_metrics.csv", "cohort_metrics"),
+                ("master_longitudinal.csv", "master_longitudinal"),
+                ("metric_definitions.csv", "metric_definitions"),
+                ("qa_checks.csv", "qa_checks"),
+            ]:
+                statuses.append(_loaded_status(f"linked:{filename}", enhanced_source / filename, False, tables.get(table_key)))
+        return statuses
 
+    if version.dataset_type == "enhanced":
+        for filename, table_key, required in [
+            ("student_summary.csv", "student_summary", True),
+            ("cohort_metrics.csv", "cohort_metrics", True),
+            ("master_longitudinal.csv", "master_longitudinal", False),
+            ("metric_definitions.csv", "metric_definitions", False),
+            ("qa_checks.csv", "qa_checks", False),
+            ("methodology.md", "", False),
+        ]:
+            statuses.append(_loaded_status(filename, version.root_path / filename, required, tables.get(table_key) if table_key else None))
+        return statuses
 
-def _classify_precomputed_table(path: Path, frame: pd.DataFrame) -> str:
-    columns = {str(column).strip() for column in frame.columns}
-    lowered = path.name.lower()
-
-    if "snapshot_augmented_student_summary" in lowered or "Augmented Latest Outcome Bucket" in columns:
-        return "snapshot_augmented_student_summary"
-    if "snapshot_augmented_cohort_metrics" in lowered:
-        return "snapshot_augmented_cohort_metrics"
-    if "snapshot_augmented_chapter_metrics" in lowered:
-        return "snapshot_augmented_chapter_metrics"
-    if "snapshot_merge_qa" in lowered:
-        return "snapshot_merge_qa"
-    if {"Student ID", "Preferred First Name", "Organization Entry Cohort"}.issubset(columns):
-        return "student_summary"
-    if {"Student ID", "Term", "Relative Term Index From Org Entry"}.issubset(columns):
-        return "master_longitudinal"
-    if {"Metric Group", "Metric Label", "Cohort"}.issubset(columns):
-        return "cohort_metrics"
-    if {"Check", "Value"}.issubset(columns):
-        return "qa_checks"
-    if {"student_id", "chapter", "graduated_4yr"}.issubset(columns):
-        return "processed_student_summary"
-    if {"student_id", "term", "chapter"}.issubset(columns):
-        return "processed_master_dataset"
-    return ""
-
-
-def _save_manifest(session_root: Path, manifest: Dict[str, object]) -> None:
-    (session_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-
-def save_uploaded_files(session_root: Path, category: str, uploads: Iterable[object]) -> List[Path]:
-    category_root = session_root / "uploads" / category
-    category_root.mkdir(parents=True, exist_ok=True)
-    saved_paths: List[Path] = []
-    for uploaded in uploads:
-        path = category_root / Path(uploaded.name).name
-        path.write_bytes(bytes(uploaded.getbuffer()))
-        saved_paths.append(path)
-    return saved_paths
+    for filename, table_key, required, path in [
+        ("student_summary.csv", "student_summary", True, ROOT / "data" / "processed" / "student_summary.csv"),
+        ("master_dataset.csv", "master_dataset", True, ROOT / "data" / "processed" / "master_dataset.csv"),
+        ("graduation_rates.csv", "graduation_rates", False, METRICS_ROOT / "graduation_rates.csv"),
+        ("retention_rates.csv", "retention_rates", False, METRICS_ROOT / "retention_rates.csv"),
+        ("gpa_trends.csv", "gpa_trends", False, METRICS_ROOT / "gpa_trends.csv"),
+        ("credit_momentum.csv", "credit_momentum", False, METRICS_ROOT / "credit_momentum.csv"),
+        ("standing_distribution.csv", "standing_distribution", False, METRICS_ROOT / "standing_distribution.csv"),
+    ]:
+        statuses.append(_loaded_status(filename, path, required, tables.get(table_key)))
+    return statuses
 
 
-def _combine_uploaded_sources(paths: Iterable[Path], source_type: str, alias_lookup: Dict[str, str]) -> pd.DataFrame:
-    frames = []
-    for path in paths:
-        frame = read_tabular_file(path)
-        frame = standardize_columns(frame, alias_lookup)
-        frame["source_file"] = path.name
-        frame["source_type"] = source_type
-        frames.append(frame)
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True, sort=False)
-
-
-def _load_app_session_manifest(version: DatasetVersion) -> Dict[str, object]:
-    return json.loads((version.root_path / "manifest.json").read_text(encoding="utf-8"))
-
-
-def _standardized_bundle_from_tables(
+def load_analysis_bundle(
     version: DatasetVersion,
-    bundle_kind: str,
-    tables: Dict[str, pd.DataFrame],
     metric_definitions: List[MetricDefinition],
-    chapter_mapping: pd.DataFrame,
     settings: Dict[str, object],
     status_code_map: Dict[str, Iterable[str]],
-    notes: List[str],
+    chapter_mapping_path: Optional[Path] = None,
 ) -> AnalysisBundle:
+    chapter_mapping = load_chapter_mapping(chapter_mapping_path)
+
+    if version.dataset_type == "current_snapshot":
+        tables, notes = _load_current_snapshot_tables(version.root_path)
+        bundle_kind = "current_snapshot"
+    elif version.dataset_type == "enhanced":
+        bundle = load_latest_bundle(
+            enhanced_root=DEFAULT_ENHANCED_ROOT,
+            explicit_folder=version.root_path,
+            explicit_workbook=None,
+        )
+        tables = bundle.tables
+        notes = bundle.caveats
+        bundle_kind = "enhanced"
+    elif version.dataset_type == "processed":
+        tables = {
+            "student_summary": pd.read_csv(ROOT / "data" / "processed" / "student_summary.csv"),
+            "master_dataset": pd.read_csv(ROOT / "data" / "processed" / "master_dataset.csv"),
+        }
+        for metric_path in sorted(METRICS_ROOT.glob("*.csv")):
+            tables[metric_path.stem] = pd.read_csv(metric_path)
+        notes = ["Loaded processed pipeline tables from the fixed local project folders."]
+        bundle_kind = "processed"
+    else:
+        raise ValueError(f"Unsupported dataset type: {version.dataset_type}")
+
+    validation_warnings = _validate_loaded_tables(bundle_kind, tables)
+
     if bundle_kind == "current_snapshot":
         raw_summary = tables["snapshot_augmented_student_summary"].copy()
         raw_longitudinal = tables.get("master_longitudinal", pd.DataFrame())
@@ -250,11 +352,14 @@ def _standardized_bundle_from_tables(
         longitudinal = standardize_processed_longitudinal(raw_longitudinal, chapter_mapping) if not raw_longitudinal.empty else pd.DataFrame()
 
     summary = merge_longitudinal_rollups(summary, longitudinal)
+    data_status = _build_data_status(version, tables)
+    all_notes = stringify_notes(notes + validation_warnings + version.notes)
 
     metadata = {
         "bundle_kind": bundle_kind,
         "available_campus_baseline": bool("is_fsl_member" in summary.columns and (~summary["is_fsl_member"].fillna(True)).any()),
         "raw_tables": sorted(tables.keys()),
+        "validation_warnings": validation_warnings,
     }
     return AnalysisBundle(
         version=version,
@@ -262,220 +367,31 @@ def _standardized_bundle_from_tables(
         longitudinal=longitudinal,
         tables=tables,
         metric_definitions=_base_metric_definitions(metric_definitions),
-        notes=stringify_notes(notes),
+        notes=all_notes,
         metadata=metadata,
+        data_status=data_status,
     )
 
 
-def load_analysis_bundle(
-    version: DatasetVersion,
-    metric_definitions: List[MetricDefinition],
-    settings: Dict[str, object],
-    status_code_map: Dict[str, Iterable[str]],
-    chapter_mapping_path: Optional[Path] = None,
-) -> AnalysisBundle:
-    chapter_mapping = load_chapter_mapping(chapter_mapping_path)
-
-    if version.dataset_type == "current_snapshot":
-        tables, notes = _load_current_snapshot_tables(version.root_path)
-        return _standardized_bundle_from_tables(version, "current_snapshot", tables, metric_definitions, chapter_mapping, settings, status_code_map, notes)
-
-    if version.dataset_type == "enhanced":
-        bundle = load_latest_bundle(
-            enhanced_root=DEFAULT_ENHANCED_ROOT,
-            explicit_folder=version.root_path,
-            explicit_workbook=None,
-        )
-        return _standardized_bundle_from_tables(version, "enhanced", bundle.tables, metric_definitions, chapter_mapping, settings, status_code_map, bundle.caveats)
-
-    if version.dataset_type == "processed":
-        tables = {
-            "student_summary": pd.read_csv(version.root_path / "student_summary.csv"),
-            "master_dataset": pd.read_csv(version.root_path / "master_dataset.csv"),
-        }
-        for metric_path in sorted(METRICS_ROOT.glob("*.csv")):
-            tables[metric_path.stem] = pd.read_csv(metric_path)
-        notes = ["Loaded base processed pipeline tables from data/processed and output/metrics."]
-        return _standardized_bundle_from_tables(version, "processed", tables, metric_definitions, chapter_mapping, settings, status_code_map, notes)
-
-    manifest = _load_app_session_manifest(version)
-    tables = {
-        table_name: read_tabular_file(version.root_path / relative_path)
-        for table_name, relative_path in manifest.get("tables", {}).items()
-    }
-    notes = manifest.get("notes", [])
-    mapping_override = version.root_path / manifest["chapter_mapping_path"] if manifest.get("chapter_mapping_path") else chapter_mapping_path
-    chapter_mapping = load_chapter_mapping(mapping_override)
-    return _standardized_bundle_from_tables(
-        version,
-        manifest.get("bundle_kind", "processed"),
-        tables,
-        metric_definitions,
-        chapter_mapping,
-        settings,
-        status_code_map,
-        notes,
-    )
+def _combine_uploaded_sources(paths: Iterable[Path], source_type: str, alias_lookup: Dict[str, str]) -> pd.DataFrame:
+    frames = []
+    for path in paths:
+        frame = read_tabular_file(path)
+        frame = standardize_columns(frame, alias_lookup)
+        frame["source_file"] = path.name
+        frame["source_type"] = source_type
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True, sort=False)
 
 
-def _relative_or_absolute(path: Path, root: Path) -> str:
-    try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
-
-
-def process_uploaded_session(
-    label: str,
-    academic_paths: List[Path],
-    roster_paths: List[Path],
-    precomputed_paths: List[Path],
-    snapshot_paths: List[Path],
-    chapter_mapping_path: Optional[Path],
-    session_root: Optional[Path] = None,
-) -> DatasetVersion:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_root = session_root or (APP_SESSIONS_ROOT / f"{safe_slug(label)}_{timestamp}")
-    (session_root / "processed").mkdir(parents=True, exist_ok=True)
-
-    manifest: Dict[str, object] = {
-        "label": label,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "bundle_kind": "processed",
-        "notes": [],
-        "tables": {},
-        "source_files": {
-            "academic": [_relative_or_absolute(path, session_root) for path in academic_paths],
-            "roster": [_relative_or_absolute(path, session_root) for path in roster_paths],
-            "precomputed": [_relative_or_absolute(path, session_root) for path in precomputed_paths],
-            "snapshot": [_relative_or_absolute(path, session_root) for path in snapshot_paths],
-        },
-    }
-    if chapter_mapping_path:
-        manifest["chapter_mapping_path"] = _relative_or_absolute(chapter_mapping_path, session_root)
-
-    workbook_bundle_kind = ""
-    workbook_tables: Dict[str, pd.DataFrame] = {}
-    workbook_notes: List[str] = []
-    for path in precomputed_paths:
-        kind, tables, notes = _load_bundle_from_workbook(path)
-        if kind:
-            workbook_bundle_kind = kind
-            workbook_tables = tables
-            workbook_notes = notes
-            break
-
-    tables: Dict[str, pd.DataFrame] = {}
-    bundle_kind = "processed"
-    notes: List[str] = []
-
-    if workbook_bundle_kind:
-        bundle_kind = workbook_bundle_kind
-        tables = workbook_tables
-        notes.extend(workbook_notes)
-    elif precomputed_paths:
-        recognized: Dict[str, pd.DataFrame] = {}
-        for path in precomputed_paths:
-            frame = read_tabular_file(path)
-            key = _classify_precomputed_table(path, frame)
-            if key:
-                recognized[key] = frame
-        if "snapshot_augmented_student_summary" in recognized:
-            bundle_kind = "current_snapshot"
-            tables = recognized
-            notes.append("Uploaded precomputed snapshot-augmented tables were loaded directly.")
-        elif "student_summary" in recognized:
-            bundle_kind = "enhanced"
-            tables = recognized
-            notes.append("Uploaded precomputed enhanced analytics tables were loaded directly.")
-        elif "processed_student_summary" in recognized:
-            bundle_kind = "processed"
-            tables = {
-                "student_summary": recognized["processed_student_summary"],
-                "master_dataset": recognized.get("processed_master_dataset", pd.DataFrame()),
-            }
-            notes.append("Uploaded precomputed processed pipeline tables were loaded directly.")
-
-    if bundle_kind == "enhanced" and snapshot_paths and "student_summary" in tables and "master_longitudinal" in tables:
-        snapshot = load_combined_snapshot_table(snapshot_paths)
-        augmented_summary = merge_augmented_summary(tables["student_summary"], tables["master_longitudinal"], snapshot)
-        tables["snapshot_augmented_student_summary"] = augmented_summary
-        tables["snapshot_augmented_cohort_metrics"] = build_augmented_cohort_metrics(augmented_summary)
-        tables["snapshot_augmented_chapter_metrics"] = build_chapter_metrics(augmented_summary)
-        tables["snapshot_merge_qa"] = build_qa_table(augmented_summary, snapshot)
-        tables["snapshot_definitions"] = build_snapshot_definitions_table()
-        bundle_kind = "current_snapshot"
-        notes.append("Uploaded snapshot files were additively merged onto the uploaded enhanced tables.")
-
-    if not tables and academic_paths and roster_paths:
-        alias_lookup = build_alias_lookup()
-        academic_raw = _combine_uploaded_sources(academic_paths, "academic", alias_lookup)
-        roster_raw = _combine_uploaded_sources(roster_paths, "roster", alias_lookup)
-        academic_df = normalize_academic_records(academic_raw)
-        roster_df = normalize_roster_records(roster_raw)
-        master_df, student_summary = build_master_dataset(academic_df, roster_df)
-        metrics = build_metrics(master_df, student_summary)
-        tables = {"student_summary": student_summary, "master_dataset": master_df, **metrics}
-        notes.append("A new processed session was built from uploaded academic and roster files.")
-        if snapshot_paths:
-            notes.append(
-                "Snapshot files were staged, but additive snapshot augmentation currently requires enhanced-style summary and longitudinal tables."
-            )
-
-    if not tables:
-        raise FileNotFoundError(
-            "No usable dataset could be built from the uploaded files. Provide academic + roster files or recognized precomputed tables."
-        )
-
-    if bundle_kind == "current_snapshot":
-        persist_map = {
-            "snapshot_augmented_student_summary": "processed/snapshot_augmented_student_summary.csv",
-            "snapshot_augmented_cohort_metrics": "processed/snapshot_augmented_cohort_metrics.csv",
-            "snapshot_augmented_chapter_metrics": "processed/snapshot_augmented_chapter_metrics.csv",
-            "snapshot_merge_qa": "processed/snapshot_merge_qa.csv",
-            "master_longitudinal": "processed/master_longitudinal.csv",
-            "cohort_metrics": "processed/cohort_metrics.csv",
-            "metric_definitions": "processed/metric_definitions.csv",
-            "qa_checks": "processed/qa_checks.csv",
-        }
-    elif bundle_kind == "enhanced":
-        persist_map = {
-            "student_summary": "processed/student_summary.csv",
-            "master_longitudinal": "processed/master_longitudinal.csv",
-            "cohort_metrics": "processed/cohort_metrics.csv",
-            "metric_definitions": "processed/metric_definitions.csv",
-            "qa_checks": "processed/qa_checks.csv",
-        }
-    else:
-        persist_map = {
-            "student_summary": "processed/student_summary.csv",
-            "master_dataset": "processed/master_dataset.csv",
-            "graduation_rates": "processed/graduation_rates.csv",
-            "retention_rates": "processed/retention_rates.csv",
-            "gpa_trends": "processed/gpa_trends.csv",
-            "credit_momentum": "processed/credit_momentum.csv",
-            "standing_distribution": "processed/standing_distribution.csv",
-        }
-
-    persisted: Dict[str, str] = {}
-    for table_name, relative_path in persist_map.items():
-        if table_name not in tables or tables[table_name].empty and table_name not in {"student_summary", "master_dataset", "master_longitudinal"}:
-            continue
-        csv_path = session_root / relative_path
-        parquet_path = csv_path.with_suffix(".parquet")
-        write_dataframe_cache(tables[table_name], csv_path, parquet_path)
-        persisted[table_name] = str(csv_path.relative_to(session_root))
-
-    manifest["bundle_kind"] = bundle_kind
-    manifest["notes"] = notes
-    manifest["tables"] = persisted
-    _save_manifest(session_root, manifest)
-
-    return DatasetVersion(
-        key=f"session::{session_root}",
-        label=label,
-        dataset_type="app_session",
-        root_path=session_root,
-        created_at=manifest["created_at"],
-        notes=notes,
-    )
+def build_processed_tables_from_local_raw(academic_paths: Iterable[Path], roster_paths: Iterable[Path]) -> Dict[str, pd.DataFrame]:
+    alias_lookup = build_alias_lookup()
+    academic_raw = _combine_uploaded_sources(academic_paths, "academic", alias_lookup)
+    roster_raw = _combine_uploaded_sources(roster_paths, "roster", alias_lookup)
+    academic_df = normalize_academic_records(academic_raw)
+    roster_df = normalize_roster_records(roster_raw)
+    master_df, student_summary = build_master_dataset(academic_df, roster_df)
+    metrics = build_metrics(master_df, student_summary)
+    return {"student_summary": student_summary, "master_dataset": master_df, **metrics}
