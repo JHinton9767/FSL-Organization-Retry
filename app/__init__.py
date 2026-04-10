@@ -1,0 +1,2 @@
+"""Streamlit analytics application package."""
+

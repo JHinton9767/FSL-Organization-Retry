@@ -1,194 +1,292 @@
-# Greek Life Academic Analytics Pipeline
+# Greek Life Academic Analytics
 
-This project provides a scalable MVP pipeline for fraternity/sorority academic analytics from 2012-present. It is designed around:
+This repository now supports two complementary workflows:
 
-- Folder-based ingestion for academic and roster files
-- Automatic column standardization across inconsistent schemas
-- Identity resolution with Student ID first and name/email fallback
-- A single long-format master dataset
-- Cohort-based metrics for graduation, retention, GPA, credit momentum, and academic standing
-- Excel/Power Query-friendly outputs
+1. The existing Python report builders and versioned analytics outputs
+2. A new local Streamlit analytics application for dynamic filtering, controls, rankings, comparisons, charts, and exports
 
-## Project layout
+The app is built specifically for Fraternity / Sorority Life academic outcomes work, with emphasis on:
+
+- graduation rates
+- retention and continuation
+- GPA outcomes
+- chapter comparisons
+- subgroup controls
+- non-technical, presentation-ready outputs
+
+## What was already in the repo
+
+The repo already contained working logic for:
+
+- column alias mapping and schema normalization
+- term parsing and ordering
+- raw academic + roster ingestion
+- master dataset creation
+- enhanced longitudinal student / cohort analytics
+- current snapshot augmentation
+- executive reporting outputs
+
+Those existing calculations were preserved. The Streamlit app reads those outputs first when available instead of replacing them with new formulas.
+
+## What the new app adds
+
+The Streamlit app gives you an interactive local workspace where you can:
+
+- load processed, enhanced, snapshot-augmented, or newly uploaded datasets
+- segment by chapter, chapter groups, council, fraternity/sorority, major, Pell, transfer, join term/year, graduation year, size bands, estimated join stage, and other available controls
+- compare selected chapters or groups side by side
+- rank top and bottom performers with minimum-N rules
+- view trends over join cohorts and observed terms
+- inspect stacked distributions, histograms, boxplots, and scatterplots
+- export filtered tables, summary tables, and chart files
+- save and reload analysis presets
+
+## Repo structure
+
+Existing logic remains in `src/`.
+
+New app-specific components:
 
 ```text
+app/
+  main.py
+  legacy_bridge.py
+  standardize.py
+  metrics_engine.py
+  analysis.py
+  charts.py
+  exports.py
+  presets.py
 config/
-  column_aliases.json
-data/
-  inbox/
-    academic/
-    rosters/
-  raw/
-    academic/
-    rosters/
-  processed/
-output/
-  excel/
-  metrics/
-powerquery/
-  AcademicFolderTransform.pq
-  RosterFolderTransform.pq
-  MasterDataset.pq
-src/
-  build_yearly_chapter_rosters.py
-  greek_life_pipeline.py
-run_yearly_chapter_rosters.py
-run_pipeline.py
-requirements.txt
+  app_settings.json
+  metric_catalog.json
+  status_code_map.json
+  chapter_groups.example.csv
+docs/
+  architecture.md
+  templates/
+tests/
+run_local_analytics_app.py
 ```
 
-## What the pipeline does
+## Preferred data sources
 
-1. Reads all `.csv`, `.xlsx`, and `.xls` files from `data/inbox/academic`, `data/inbox/rosters`, `data/raw/academic`, and `data/raw/rosters`
-2. Maps inconsistent source columns to a standard schema
-3. Normalizes terms into sortable term keys
-4. Resolves identities using:
-   - `StudentID`
-   - email
-   - `FirstName + LastName + Email`
-   - `FirstName + LastName`
-5. Builds a master long-format dataset with Greek membership enrichment
-6. Assigns student cohorts using first enrollment term and status text
-7. Produces metrics tables and an Excel workbook with year-separated sheets in ~1000-row blocks
+The app prefers sources in this order:
 
-## Standard output tables
+1. `output/current_snapshot_metrics/run_*`
+2. `output/enhanced_metrics/run_*`
+3. `data/processed/*.csv` plus `output/metrics/*.csv`
+4. Uploaded files staged into `data/processed/app_sessions/<session>/`
 
-- `data/processed/master_dataset.csv`
-- `data/processed/student_summary.csv`
-- `output/metrics/graduation_rates.csv`
-- `output/metrics/retention_rates.csv`
-- `output/metrics/gpa_trends.csv`
-- `output/metrics/credit_momentum.csv`
-- `output/metrics/standing_distribution.csv`
-- `output/excel/greek_life_master.xlsx`
+That lets the app preserve existing repo calculations whenever they already exist.
 
-## Run
+## Supported inputs
 
-For the easiest manual workflow, drag and drop source files into:
+### Raw / uploaded files
 
-- `data/inbox/academic`
-- `data/inbox/rosters`
+- `.csv`
+- `.xlsx`
+- `.xls`
+- `.xlsm`
+- `.parquet`
 
-The pipeline also still supports the original folders:
+### Common file types
 
-- `data/raw/academic`
-- `data/raw/rosters`
+- master roster
+- chapter roster files
+- academic records
+- term-level files
+- current snapshot files
+- precomputed `student_summary`, `master_longitudinal`, `cohort_metrics`, or snapshot-augmented exports
 
-Then run:
+### Mapping / config files
+
+- chapter group mapping with optional council / org type / family columns
+
+Template files live in:
+
+- `docs/templates/academic_records_template.csv`
+- `docs/templates/chapter_roster_template.csv`
+- `docs/templates/current_snapshot_template.csv`
+- `docs/templates/chapter_groups_template.csv`
+
+## Setup
 
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+## Run the app
+
+Either run Streamlit directly:
+
+```powershell
+python -m streamlit run app/main.py
+```
+
+Or use the helper:
+
+```powershell
+python run_local_analytics_app.py
+```
+
+## Existing pipeline workflows
+
+The existing scripts still work exactly as before.
+
+### Base processed pipeline
+
+```powershell
 python run_pipeline.py
 ```
 
-Files in `data/inbox/` and generated outputs are ignored by Git so you can work locally without committing source data.
+Writes:
 
-## Master roster helpers
+- `data/processed/master_dataset.csv`
+- `data/processed/student_summary.csv`
+- `output/metrics/*.csv`
+- `output/excel/greek_life_master.xlsx`
 
-Once `Master_FSL_Roster.xlsx` has been created, you can generate yearly chapter workbooks:
-
-```powershell
-python run_yearly_chapter_rosters.py
-```
-
-This writes a `Yearly/` folder where:
-
-- each workbook is one academic year like `2015.xlsx`
-- each sheet is one chapter present that year
-- each sheet contains `Last Name`, `First Name`, and `Banner ID`
-
-You can also build a tenure and outcome workbook for 2015+ new members:
+### Master roster helpers
 
 ```powershell
+python run_master_roster.py
 python run_member_tenure_report.py
-```
-
-This report now:
-
-- treats `New Member` as valid when it appears in either `Status` or `Position`
-- prefers `Master_Roster_Grades.xlsx` when available and uses cumulative hours to estimate semesters already spent in school
-- tracks each student's semesters from first observed new-member term to last observed term
-- summarizes graduation, drop, suspension, transfer, and still-active-or-unknown rates by estimated semesters at school
-- groups observed new-member cohorts into join-hour buckets like `0-29`, `30-59`, `60-89`, etc. and calculates outcome rates for each bucket
-- adds GPA averages by semester-at-school using the merged roster/grades workbook
-
-You can combine the master roster, semester grade reports, and tenure workbook into one merged file:
-
-```powershell
 python run_master_roster_grades.py
-```
-
-This merged workbook:
-
-- matches semester grade report files named like `Fall 2015 1.xlsx`, `Spring 2016 2.xlsx`, etc.
-- also accepts in-progress filenames with update dates such as `Spring 2026 1 (3.31.26).xlsx`
-- joins grade data onto master roster rows primarily by `Term + Banner ID`, with email/name fallback
-- joins tenure fields by member identity
-- writes semester-based 1000-row chunks plus an `Unmatched Grades` sheet for anything that did not map cleanly
-
-By default, the merge script now reads grade reports from `data/inbox/academic`.
-
-For a fully additive observed-outcomes layer on top of the merged workbook, run:
-
-```powershell
 python run_enhanced_org_analytics.py
+python run_current_snapshot_analytics.py
+python run_executive_report.py
+python run_chapter_history_workbooks.py
 ```
 
-This creates a new timestamped folder under `output/enhanced_metrics/` and does not overwrite any existing workbook, CSV, Power Query file, or prior output. The enhanced run writes:
+## Streamlit app workflow
 
-- a versioned Excel workbook with `Master_Longitudinal`, `Student_Summary`, `Cohort_Metrics`, QA, documentation, and segmentation sheets
-- CSV exports for the longitudinal table, student summary, cohort metrics, graduation metrics, continuation metrics, GPA metrics, credit momentum metrics, academic standing metrics, transitions, QA, and changelog
-- `methodology.md` and `CHANGELOG.md` alongside the generated tables
+### Option 1: analyze an existing run
 
-If you also have one-row-per-student current academic snapshot files with fields such as `Student ID`, `Overall GPA`, `Institutional GPA`, `Total Credit Hours`, `TXST Credit Hours`, and current status columns, place them in:
+1. Run the legacy pipeline / enhanced / snapshot builders
+2. Open the Streamlit app
+3. Choose the dataset version from the sidebar
+4. Pick a metric, aggregation level, filters, and controls
+5. Export the resulting tables and charts
 
-- `data/inbox/academic`
+### Option 2: upload files directly into the app
 
-The snapshot loader now looks for files named like:
+1. Open the Streamlit app
+2. Expand `Create Or Update A Dataset Session`
+3. Upload:
+   - academic files and roster files, or
+   - recognized precomputed tables / workbooks
+4. Optionally upload:
+   - current snapshot files
+   - chapter mapping file
+5. Click `Process uploaded files`
+6. Analyze the resulting saved session from the dataset selector
 
-- `New Member (1).xlsx`
-- `New Member (2).xlsx`
-- `New Member (15).xlsx`
+Uploaded files are copied into `data/processed/app_sessions/<session>/uploads/`.
+Cleaned and intermediate outputs are written to `data/processed/app_sessions/<session>/processed/`.
+Original source files are never modified in place.
 
-Then run:
+## Metrics available in the app
+
+The app exposes metrics through `config/metric_catalog.json`. Examples include:
+
+- headcount
+- active member count
+- observed eventual graduation rate
+- observed 4-year / 6-year graduation rate
+- next-term / next-fall / one-year retention
+- next-fall academic continuation
+- average term GPA
+- average cumulative GPA
+- GPA change
+- average cumulative hours
+- average hours at join
+- average estimated pre-organization hours
+- low-GPA and first-year probation risk rates
+- snapshot match rate
+- data completeness rate
+
+The app shows an `About this metric` section with:
+
+- metric key
+- source table
+- logic source
+- numerator
+- denominator
+- sample-size guidance
+- notes / limitations
+
+## Controls and cohorts
+
+Depending on source availability, the app supports:
+
+- chapter
+- chapter group
+- custom group
+- council / family
+- fraternity vs sorority
+- join term / join year
+- graduation year
+- status bucket
+- major
+- Pell vs non-Pell
+- transfer vs non-transfer
+- estimated join stage
+- current high-hours vs lower-hours
+- active vs inactive
+- chapter size bands
+
+Fields that do not exist in the selected source degrade to `Unknown` rather than breaking the app.
+
+## Estimated fields and caveats
+
+Some metrics are explicitly estimated or inferred, especially in snapshot-augmented bundles.
+
+Examples:
+
+- estimated pre-organization credit hours
+- estimated join stage / hours-at-join bucket
+- probable advanced-entry / high-hours proxy interpretations
+
+These are labeled in the app and should not be treated as exact reconstructed history.
+
+## Backward compatibility
+
+To preserve existing logic:
+
+- existing `src/` builders were not removed or rewritten
+- existing run scripts still point to the same code
+- enhanced / snapshot flags are reused directly when available
+- app-only metrics such as completeness are labeled separately from production metrics
+
+If you need the design rationale, see:
+
+- `docs/architecture.md`
+
+## Testing
+
+Run:
 
 ```powershell
-python run_current_snapshot_analytics.py
+pytest
 ```
 
-This additive step does not overwrite the semester-based analytics. Instead, it creates a new versioned folder under `output/current_snapshot_metrics/` with:
+Current tests cover:
 
-- a workbook that merges the current snapshot onto `Student_Summary`
-- augmented graduation and chapter metrics that can resolve some previously unresolved outcomes
-- estimated pre-organization credit-hour buckets based on current credit totals minus observed passed hours during the organization window
-- QA and methodology files explaining what is estimated versus directly observed
+- import / alias mapping
+- term parsing
+- cohort and group standardization
+- metric calculations
+- ranking minimum-N rules
 
-Only files whose names start with `New Member` are used by this step, so the semester grade-report files in the same folder are ignored.
+## Example analysis workflow
 
-## Excel / Power Query workflow
-
-The `powerquery/` folder contains M queries you can paste into Excel Power Query:
-
-- `AcademicFolderTransform.pq`: folder-based academic file ingestion
-- `RosterFolderTransform.pq`: folder-based roster ingestion
-- `MasterDataset.pq`: joins standardized academic and roster queries into a master model
-
-Recommended Excel setup:
-
-1. Create one workbook for the master model.
-2. Add Power Query connections for academic and roster folders.
-3. Load the final master query to a table.
-4. Build pivots from the master table and/or from the Python-produced metrics tables.
-5. Refresh from folder whenever new files arrive.
-
-## Structural notes
-
-- The Python exporter writes semester-based Excel sheets within each academic year, split into 1000-row blocks for easier downstream upload/reporting.
-- The master dataset is long-format and extension-ready for Pell, major, and Greek vs non-Greek controls when those columns become available.
-- The pipeline is non-interactive by design: configuration lives in `config/column_aliases.json`.
-
-## Assumptions in the MVP
-
-- `Credits_Earned` may not exist in some academic files; when absent, the pipeline preserves nulls unless it can infer a value safely.
-- Graduation can come from explicit graduate/alumni status or a source grad indicator; otherwise the student remains non-graduated in the MVP.
-- Cohorts are assigned from the earliest observed enrollment term and status text.
+1. Run `python run_enhanced_org_analytics.py`
+2. Optionally run `python run_current_snapshot_analytics.py`
+3. Open the app with `python -m streamlit run app/main.py`
+4. Choose a snapshot-augmented or enhanced dataset version
+5. Select `Observed 6-Year Graduation Rate`
+6. Group by `Chapter`
+7. Compare selected chapters against the FSL-wide average
+8. Add controls such as major, Pell, transfer, or estimated join stage when available
+9. Export the filtered tables and charts for reporting
