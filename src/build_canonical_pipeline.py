@@ -20,6 +20,7 @@ from src.build_master_roster import (
     SUPPORTED_EXTENSIONS,
     canonical_header,
     clean_text,
+    detect_inline_chapter_label,
     find_header_row,
     find_status_column,
     get_cell,
@@ -227,8 +228,17 @@ def update_key_from_name(value: str) -> Tuple[int, int, int]:
     return (year, month, day)
 
 
+def path_term_candidates(path: Path) -> List[str]:
+    candidates: List[str] = [clean_text(path.stem), clean_text(path.name)]
+    for part in reversed(path.parts):
+        text = clean_text(part)
+        if text and text not in candidates:
+            candidates.append(text)
+    return candidates
+
+
 def parse_grade_term(path: Path, sheet_name: object) -> str:
-    for candidate in [clean_text(sheet_name), clean_text(path.stem), clean_text(path.name)]:
+    for candidate in [clean_text(sheet_name), *path_term_candidates(path)]:
         term_code, term_label, _, _ = parse_term_code(candidate)
         if term_code:
             return term_label
@@ -532,9 +542,12 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                 if "status" not in header_map and status_col_idx is not None:
                     header_map["status"] = status_col_idx
                 data_start_row = max(header_row_idx, status_row_idx or header_row_idx) + 1
+                default_chapter = normalize_chapter_name(ws.title or path.stem) or "Unknown"
+                current_chapter_raw = ws.title
+                current_chapter = default_chapter
 
                 term_label = ""
-                for candidate in [path.parent.name, path.stem, path.name]:
+                for candidate in path_term_candidates(path):
                     code, label, _, _ = parse_term_code(candidate)
                     if code:
                         term_label = label
@@ -552,6 +565,12 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                     )
 
                 for row in ws.iter_rows(min_row=data_start_row, values_only=True):
+                    inline_chapter_raw = detect_inline_chapter_label(row, header_map)
+                    if inline_chapter_raw:
+                        current_chapter_raw = inline_chapter_raw
+                        current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
+                        continue
+
                     last_name = clean_text(get_cell(row, header_map.get("last_name")))
                     first_name = clean_text(get_cell(row, header_map.get("first_name")))
                     if not last_name and not first_name:
@@ -563,7 +582,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                     status_raw = clean_text(get_cell(row, header_map.get("status")))
                     position_raw = clean_text(get_cell(row, header_map.get("position")))
                     semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
-                    chapter = normalize_chapter_name(chapter_raw or ws.title or path.stem) or "Unknown"
+                    chapter = normalize_chapter_name(chapter_raw or current_chapter_raw or ws.title or path.stem) or current_chapter or "Unknown"
                     status_bucket = roster_status_bucket(status_raw, position_raw)
 
                     rows.append(
@@ -583,7 +602,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                             "term_season": term_season,
                             "term_source_basis": "folder_or_filename",
                             "chapter": chapter,
-                            "chapter_raw": chapter_raw or ws.title,
+                            "chapter_raw": chapter_raw or current_chapter_raw or ws.title,
                             "org_status_raw": status_raw,
                             "org_status_bucket": status_bucket,
                             "org_position_raw": position_raw,
@@ -611,7 +630,13 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         if path.suffix.lower() == ".csv":
             raw = pd.read_csv(path)
             raw.columns = [canonical_header(column) for column in raw.columns]
-            term_code, term_label, term_year, term_season = parse_term_code(path.stem)
+            inferred_term = ""
+            for candidate in path_term_candidates(path):
+                code, label, _, _ = parse_term_code(candidate)
+                if code:
+                    inferred_term = label
+                    break
+            term_code, term_label, term_year, term_season = parse_term_code(inferred_term or path.stem)
             if not term_code:
                 exceptions.append(
                     {
@@ -692,12 +717,24 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 sheet_rows = list(ws.iter_rows(values_only=True))
                 if not sheet_rows:
                     continue
-                header_map = map_grade_headers(sheet_rows[0])
+                header_row_idx = None
+                header_map: Dict[str, int] = {}
+                best_score = 0
+                for idx, candidate_row in enumerate(sheet_rows[:25]):
+                    candidate_map = map_grade_headers(candidate_row)
+                    score = len(candidate_map)
+                    if {"Last Name", "First Name"}.issubset(set(candidate_map)):
+                        score += 2
+                    if "Banner ID" in candidate_map or "Email" in candidate_map:
+                        score += 1
+                    if score > best_score:
+                        best_score = score
+                        header_row_idx = idx
+                        header_map = candidate_map
                 required = {"Last Name", "First Name"}
-                has_identifier = "Banner ID" in header_map or "Email" in header_map
-                if not required.issubset(set(header_map)) or not has_identifier:
+                if header_row_idx is None or not required.issubset(set(header_map)):
                     continue
-                for row in sheet_rows[1:]:
+                for row in sheet_rows[header_row_idx + 1:]:
                     first_name = get_cell(row, header_map.get("First Name"))
                     last_name = get_cell(row, header_map.get("Last Name"))
                     if not first_name and not last_name:
@@ -757,6 +794,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def build_identity_maps(
+    roster: pd.DataFrame,
     academic: pd.DataFrame,
     snapshot: pd.DataFrame,
     graduation: pd.DataFrame,
@@ -765,7 +803,10 @@ def build_identity_maps(
     name_candidates: Dict[Tuple[str, str], set[str]] = defaultdict(set)
     exceptions: List[dict] = []
 
-    source_frames = [academic[["student_id", "email", "first_name", "last_name"]].copy()]
+    source_frames = [
+        roster[["student_id", "email", "first_name", "last_name"]].copy(),
+        academic[["student_id", "email", "first_name", "last_name"]].copy(),
+    ]
     if not snapshot.empty:
         snap = pd.DataFrame(
             {
@@ -856,12 +897,26 @@ def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: 
     if frame.empty:
         return frame, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     ranked = frame.copy()
+    if "student_id" in unique_keys:
+        ranked["_identity_key"] = ranked.apply(
+            lambda row: (
+                f"id:{clean_text(row.get('student_id', '')).lower()}"
+                if clean_text(row.get("student_id", ""))
+                else f"email:{clean_text(row.get('email', '')).lower()}"
+                if clean_text(row.get("email", ""))
+                else f"name:{clean_text(row.get('last_name', '')).lower()}|{clean_text(row.get('first_name', '')).lower()}"
+            ),
+            axis=1,
+        )
+        effective_keys = ["_identity_key" if key == "student_id" else key for key in unique_keys]
+    else:
+        effective_keys = list(unique_keys)
     ranked["_completeness"] = ranked.notna().sum(axis=1)
     ranked["_update_key"] = ranked["source_file"].map(update_key_from_name) if "source_file" in ranked.columns else [(0, 0, 0)] * len(ranked)
-    ranked = ranked.sort_values(by=list(unique_keys) + ["_completeness", "_update_key"], ascending=[True] * len(unique_keys) + [False, False])
-    duplicate_mask = ranked.duplicated(subset=list(unique_keys), keep="first")
+    ranked = ranked.sort_values(by=effective_keys + ["_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False])
+    duplicate_mask = ranked.duplicated(subset=effective_keys, keep="first")
     exceptions = ranked.loc[duplicate_mask].copy()
-    deduped = ranked.drop_duplicates(subset=list(unique_keys), keep="first").drop(columns=["_completeness", "_update_key"])
+    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
     if exceptions.empty:
         return deduped.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exception_rows = []
@@ -883,7 +938,18 @@ def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
         return roster, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exceptions: List[dict] = []
     resolved_rows: List[pd.Series] = []
-    for (_, _), group in roster.groupby(["student_id", "term_code"], dropna=False):
+    roster = roster.copy()
+    roster["_identity_key"] = roster.apply(
+        lambda row: (
+            f"id:{clean_text(row.get('student_id', '')).lower()}"
+            if clean_text(row.get("student_id", ""))
+            else f"email:{clean_text(row.get('email', '')).lower()}"
+            if clean_text(row.get("email", ""))
+            else f"name:{clean_text(row.get('last_name', '')).lower()}|{clean_text(row.get('first_name', '')).lower()}"
+        ),
+        axis=1,
+    )
+    for (_, _), group in roster.groupby(["_identity_key", "term_code"], dropna=False):
         chapter_values = sorted({clean_text(value) for value in group["chapter"] if clean_text(value)})
         status_values = sorted({clean_text(value) for value in group["org_status_bucket"] if clean_text(value)})
         if len(chapter_values) > 1:
@@ -922,7 +988,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
             }
         ).fillna(0)
         ranked = ranked.sort_values(by=["_status_priority", "_new_member", "_known_id"], ascending=[False, False, False])
-        resolved_rows.append(ranked.iloc[0].drop(labels=["_new_member", "_known_id", "_status_priority"]))
+        resolved_rows.append(ranked.iloc[0].drop(labels=["_new_member", "_known_id", "_status_priority", "_identity_key"]))
     resolved = pd.DataFrame(resolved_rows).reset_index(drop=True)
     return resolved, pd.DataFrame(exceptions)
 
@@ -1629,7 +1695,7 @@ def build_canonical_pipeline(
     snapshot = load_snapshot_table(academic_root)
     graduation, graduation_load_issues = load_graduation_table(graduation_root)
 
-    email_map, name_map, identity_map_issues = build_identity_maps(academic_term, snapshot, graduation)
+    email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
 

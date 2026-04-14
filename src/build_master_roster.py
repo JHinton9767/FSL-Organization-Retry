@@ -320,7 +320,37 @@ def normalize_banner_id(value: str) -> str:
     text = clean_text(value)
     if not text:
         return ""
-    return re.sub(r"\.0$", "", text)
+    text = re.sub(r"\.0$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[^A-Za-z0-9]", "", text).upper()
+    if not text:
+        return ""
+    if re.fullmatch(r"A0\d{7}", text):
+        return text
+    if re.fullmatch(r"A\d{8}", text):
+        return text
+    if re.fullmatch(r"A\d{7}", text):
+        return f"A0{text[1:]}"
+    if re.fullmatch(r"\d{8}", text):
+        return f"A{text}"
+    if re.fullmatch(r"\d{7}", text):
+        return f"A0{text}"
+    return text
+
+
+def detect_inline_chapter_label(row: Tuple[object, ...], header_map: Dict[str, int]) -> str:
+    protected_fields = ["last_name", "first_name", "banner_id", "email", "status", "semester_joined", "position"]
+    if any(get_cell(row, header_map.get(field)) for field in protected_fields):
+        return ""
+
+    non_empty = [clean_text(value) for value in row if clean_text(value)]
+    if not non_empty or len(non_empty) > 2:
+        return ""
+
+    for value in non_empty:
+        normalized = normalize_chapter_name(value)
+        if normalized and normalized != "Unknown" and not is_excluded_chapter(normalized):
+            return value
+    return ""
 
 
 def is_new_member_row(row: ExtractedRow) -> bool:
@@ -577,7 +607,17 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
             if "status" not in header_map:
                 issues.append(f"Status column not found after full scan in {path.name} | sheet '{ws.title}'.")
 
+            default_chapter = infer_chapter(path, ws.title)
+            current_chapter_raw = ws.title
+            current_chapter = default_chapter
+
             for row in ws.iter_rows(min_row=data_start_row, values_only=True):
+                inline_chapter_raw = detect_inline_chapter_label(row, header_map)
+                if inline_chapter_raw:
+                    current_chapter_raw = inline_chapter_raw
+                    current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
+                    continue
+
                 last_name = get_cell(row, header_map.get("last_name"))
                 first_name = get_cell(row, header_map.get("first_name"))
                 banner_id = normalize_banner_id(get_cell(row, header_map.get("banner_id")))
@@ -585,7 +625,8 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
                 status = normalize_status(get_cell(row, header_map.get("status")))
                 semester_joined = get_cell(row, header_map.get("semester_joined"))
                 position = get_cell(row, header_map.get("position"))
-                chapter = normalize_chapter_name(get_cell(row, header_map.get("chapter"))) or infer_chapter(path, ws.title)
+                chapter_raw = get_cell(row, header_map.get("chapter")) or current_chapter_raw or ws.title
+                chapter = normalize_chapter_name(chapter_raw) or current_chapter or default_chapter
 
                 core_values = [last_name, first_name, banner_id, email, status, semester_joined, position, chapter]
                 if row_is_empty(core_values):
