@@ -1,4 +1,4 @@
-from src.build_enhanced_org_analytics import main
+from src.build_canonical_pipeline import main
 
 
 if __name__ == "__main__":

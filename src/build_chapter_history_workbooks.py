@@ -1,26 +1,19 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Sequence, Tuple
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from src.build_executive_report import (
-    DEFAULT_ENHANCED_ROOT,
-    adjusted_graduation_rate,
-    clean_text,
-    coerce_numeric,
-    load_latest_bundle,
-    selected_cumulative_gpa,
-    yes_mask,
-)
+from src.build_canonical_pipeline import clean_text, coerce_numeric
 from src.build_master_roster import autosize_columns, is_excluded_chapter
+from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,8 +27,7 @@ SECTION_FONT = Font(bold=True, size=12)
 YEAR_DETAIL_COLUMNS = [
     "Term",
     "Student ID",
-    "Last Name",
-    "First Name",
+    "Student Name",
     "Email",
     "Roster Present",
     "Academic Present",
@@ -47,19 +39,15 @@ YEAR_DETAIL_COLUMNS = [
     "Roster Position",
     "New Member Marker",
     "Latest Known Outcome Bucket",
-    "Academic Student Status Raw",
     "Major",
-    "Semester Hours",
-    "Term Passed Hours",
-    "Cumulative Hours",
-    "Current Academic Standing Raw",
+    "Attempted Hours",
+    "Passed Hours",
+    "Total Cumulative Hours",
+    "Academic Standing Raw",
     "Academic Standing Bucket",
     "Term GPA",
-    "TxState Cumulative GPA",
+    "Institutional Cumulative GPA",
     "Overall Cumulative GPA",
-    "Roster Source File",
-    "Academic Source File",
-    "No Further Observation Flag",
 ]
 PERCENT_HEADERS = {
     "Observed Graduation Rate (Resolved)",
@@ -79,10 +67,7 @@ DECIMAL_HEADERS = {
     "Average Term GPA",
     "Average Cumulative GPA",
     "Average Passed Hours",
-    "Average TxState Cumulative GPA",
-    "Average Overall Cumulative GPA",
 }
-SEASON_ORDER = {"Winter": 0, "Spring": 1, "Summer": 2, "Fall": 3}
 
 
 @dataclass(frozen=True)
@@ -99,13 +84,12 @@ class ChapterBuildResult:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build one workbook per chapter from the enhanced analytics bundle. "
+            "Build one workbook per chapter from the canonical analytics bundle. "
             "Each chapter workbook contains a summary sheet plus year-by-year detail sheets."
         )
     )
-    parser.add_argument("--enhanced-root", default=str(DEFAULT_ENHANCED_ROOT))
-    parser.add_argument("--enhanced-folder", default="")
-    parser.add_argument("--enhanced-workbook", default="")
+    parser.add_argument("--canonical-root", default=str(DEFAULT_CANONICAL_ROOT))
+    parser.add_argument("--canonical-folder", default="")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser.parse_args()
 
@@ -119,7 +103,7 @@ def safe_filename(value: str) -> str:
 
 def safe_sheet_name(value: str) -> str:
     text = clean_text(value) or "Unknown"
-    for char in '[]:*?/\\':
+    for char in "[]:*?/\\":  # Excel-invalid sheet chars
         text = text.replace(char, "")
     return text[:31] or "Unknown"
 
@@ -151,14 +135,7 @@ def format_table_columns(ws, header_row: int, start_data_row: int, end_data_row:
                 ws.cell(row=row_idx, column=col_idx).number_format = "0.00"
 
 
-def append_table(
-    ws,
-    start_row: int,
-    title: str,
-    note: str,
-    headers: Sequence[str],
-    rows: Iterable[Sequence[object]],
-) -> int:
+def append_table(ws, start_row: int, title: str, note: str, headers: Sequence[str], rows: Iterable[Sequence[object]]) -> int:
     row_idx = write_section_title(ws, start_row, title, note)
     header_row = row_idx
     ws.append(list(headers))
@@ -170,36 +147,6 @@ def append_table(
         data_end = ws.max_row
     format_table_columns(ws, header_row, data_start, data_end)
     return ws.max_row + 2
-
-
-def choose_display_names(values: Iterable[str]) -> Dict[str, str]:
-    counts: Dict[str, Counter[str]] = defaultdict(Counter)
-    for value in values:
-        text = clean_text(value)
-        if not text:
-            continue
-        counts[text.lower()][text] += 1
-    return {
-        normalized: counter.most_common(1)[0][0]
-        for normalized, counter in counts.items()
-    }
-
-
-def chapter_sort_key(value: str) -> Tuple[int, str]:
-    text = clean_text(value)
-    return (1 if not text else 0, text.lower())
-
-
-def filter_to_chapter_entry(summary: pd.DataFrame, chapter: str) -> pd.DataFrame:
-    target = clean_text(chapter).lower()
-    return summary.loc[summary["Initial Chapter"].fillna("").astype(str).str.strip().str.lower().eq(target)].copy()
-
-
-def filter_to_chapter_rows(longitudinal: pd.DataFrame, chapter: str) -> pd.DataFrame:
-    target = clean_text(chapter).lower()
-    return longitudinal.loc[
-        longitudinal["Chapter"].fillna("").astype(str).str.strip().str.lower().eq(target)
-    ].copy()
 
 
 def unique_non_blank_count(series: pd.Series) -> int:
@@ -214,48 +161,42 @@ def mean_or_blank(series: pd.Series) -> object:
     return float(numeric.dropna().mean())
 
 
-def percent_display(value: object) -> str:
-    if value == "" or pd.isna(value):
-        return ""
-    return f"{float(value):.1%}"
+def yes_mask(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.lower().eq("yes")
 
 
-def decimal_display(value: object) -> str:
-    if value == "" or pd.isna(value):
-        return ""
-    return f"{float(value):.2f}"
+def adjusted_graduation_rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
+    eligible = frame.copy()
+    if measurable_field and measurable_field in eligible.columns:
+        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
+    eligible = eligible.loc[yes_mask(eligible["resolved_outcome_flag"])]
+    if eligible.empty:
+        return "", 0
+    numerator = int(yes_mask(eligible[numerator_field]).sum())
+    return float(numerator) / float(len(eligible)), int(len(eligible))
 
 
-def yes_rate(frame: pd.DataFrame, value_field: str, measurable_field: Optional[str] = None) -> Tuple[object, int]:
+def rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
     eligible = frame.copy()
     if measurable_field and measurable_field in eligible.columns:
         eligible = eligible.loc[yes_mask(eligible[measurable_field])]
     if eligible.empty:
         return "", 0
-    return float(yes_mask(eligible[value_field]).sum()) / float(len(eligible)), int(len(eligible))
-
-
-def selected_summary_cumulative_gpa(frame: pd.DataFrame) -> pd.Series:
-    return selected_cumulative_gpa(frame)
-
-
-def selected_longitudinal_cumulative_gpa(frame: pd.DataFrame) -> pd.Series:
-    overall = coerce_numeric(frame["Overall Cumulative GPA"]) if "Overall Cumulative GPA" in frame.columns else pd.Series(index=frame.index, dtype=float)
-    txstate = coerce_numeric(frame["TxState Cumulative GPA"]) if "TxState Cumulative GPA" in frame.columns else pd.Series(index=frame.index, dtype=float)
-    return overall.where(overall.notna(), txstate)
+    numerator = int(yes_mask(eligible[numerator_field]).sum())
+    return float(numerator) / float(len(eligible)), int(len(eligible))
 
 
 def prepare_summary(summary: pd.DataFrame) -> pd.DataFrame:
     frame = summary.copy()
     for column in [
-        "Initial Chapter",
-        "Latest Chapter",
-        "Organization Entry Cohort",
-        "Latest Known Outcome Bucket",
-        "Latest Academic Standing",
-        "Preferred Last Name",
-        "Preferred First Name",
-        "Preferred Email",
+        "student_id",
+        "student_name",
+        "chapter",
+        "initial_chapter",
+        "latest_chapter",
+        "org_entry_cohort",
+        "latest_outcome_bucket",
+        "first_academic_standing_bucket",
     ]:
         if column in frame.columns:
             frame[column] = frame[column].fillna("").astype(str).str.strip()
@@ -265,177 +206,70 @@ def prepare_summary(summary: pd.DataFrame) -> pd.DataFrame:
 def prepare_longitudinal(longitudinal: pd.DataFrame) -> pd.DataFrame:
     frame = longitudinal.copy()
     for column in [
-        "Chapter",
-        "Term",
-        "Term Season",
-        "Last Name",
-        "First Name",
-        "Email",
-        "Student ID",
+        "chapter",
+        "term_label",
+        "student_id",
+        "first_name",
+        "last_name",
+        "email",
     ]:
         if column in frame.columns:
             frame[column] = frame[column].fillna("").astype(str).str.strip()
-    frame["_term_year_numeric"] = coerce_numeric(frame["Term Year"]) if "Term Year" in frame.columns else pd.Series(index=frame.index, dtype=float)
-    frame["_relative_term_numeric"] = coerce_numeric(frame["Relative Term Index From Org Entry"]) if "Relative Term Index From Org Entry" in frame.columns else pd.Series(index=frame.index, dtype=float)
-    frame["_selected_cumulative_gpa"] = selected_longitudinal_cumulative_gpa(frame)
+    frame["student_name"] = (
+        frame["first_name"].fillna("").astype(str).str.strip()
+        + " "
+        + frame["last_name"].fillna("").astype(str).str.strip()
+    ).str.strip()
     return frame
 
 
-def build_overview_rows(chapter: str, entry_students: pd.DataFrame, chapter_rows: pd.DataFrame) -> List[List[object]]:
-    cohorts = sorted(
-        {
-            clean_text(value)
-            for value in entry_students["Organization Entry Cohort"].tolist()
-            if clean_text(value)
-        }
-    )
-    grad_rate, grad_n = adjusted_graduation_rate(entry_students, "Eventual Observed Graduation From Org Entry")
-    grad4_rate, grad4_n = adjusted_graduation_rate(
-        entry_students,
-        "Observed Graduation Within 4 Years Of Org Entry",
-        measurable_field="Observed Graduation Within 4 Years Of Org Entry Measurable",
-    )
-    grad6_rate, grad6_n = adjusted_graduation_rate(
-        entry_students,
-        "Observed Graduation Within 6 Years Of Org Entry",
-        measurable_field="Observed Graduation Within 6 Years Of Org Entry Measurable",
-    )
-    org_next_term_rate, org_next_term_n = yes_rate(
-        entry_students,
-        "Retained In Organization To Next Observed Term",
-        measurable_field="Organization Next Observed Term Measurable",
-    )
-    org_next_fall_rate, org_next_fall_n = yes_rate(
-        entry_students,
-        "Retained In Organization To Next Fall",
-        measurable_field="Organization Next Fall Measurable",
-    )
-    acad_next_term_rate, acad_next_term_n = yes_rate(
-        entry_students,
-        "Continued Academically To Next Observed Term",
-        measurable_field="Academic Next Observed Term Measurable",
-    )
-    acad_next_fall_rate, acad_next_fall_n = yes_rate(
-        entry_students,
-        "Continued Academically To Next Fall",
-        measurable_field="Academic Next Fall Measurable",
-    )
-    latest_cumulative = selected_summary_cumulative_gpa(entry_students)
+def filter_to_chapter_entry(summary: pd.DataFrame, chapter: str) -> pd.DataFrame:
+    target = clean_text(chapter).lower()
+    return summary.loc[summary["initial_chapter"].fillna("").astype(str).str.strip().str.lower().eq(target)].copy()
+
+
+def filter_to_chapter_rows(longitudinal: pd.DataFrame, chapter: str) -> pd.DataFrame:
+    target = clean_text(chapter).lower()
+    return longitudinal.loc[longitudinal["chapter"].fillna("").astype(str).str.strip().str.lower().eq(target)].copy()
+
+
+def build_overview_rows(entry_students: pd.DataFrame, chapter_rows: pd.DataFrame) -> List[List[object]]:
+    grad_rate, grad_n = adjusted_graduation_rate(entry_students, "graduated_eventual")
+    grad4_rate, grad4_n = adjusted_graduation_rate(entry_students, "graduated_4yr", measurable_field="graduated_4yr_measurable")
+    grad6_rate, grad6_n = adjusted_graduation_rate(entry_students, "graduated_6yr", measurable_field="graduated_6yr_measurable")
+    org_next_term_rate, org_next_term_n = rate(entry_students, "retained_next_term", measurable_field="retained_next_term_measurable")
+    org_next_fall_rate, org_next_fall_n = rate(entry_students, "retained_next_fall", measurable_field="retained_next_fall_measurable")
+    acad_next_term_rate, acad_next_term_n = rate(entry_students, "continued_next_term", measurable_field="continued_next_term_measurable")
+    acad_next_fall_rate, acad_next_fall_n = rate(entry_students, "continued_next_fall", measurable_field="continued_next_fall_measurable")
     return [
-        [
-            "Distinct students ever observed in this chapter",
-            unique_non_blank_count(chapter_rows["Student ID"]) if not chapter_rows.empty else 0,
-            "Counts anyone observed in this chapter in any term.",
-        ],
-        [
-            "Students with observed entry into this chapter",
-            len(entry_students),
-            "These students start their observed organization history in this chapter.",
-        ],
-        [
-            "Organization-entry cohorts covered",
-            len(cohorts),
-            "Counts distinct entry cohorts tied to this chapter.",
-        ],
-        [
-            "Observed eventual graduation rate from chapter entry (excluding unresolved outcomes)",
-            percent_display(grad_rate),
-            f"Uses {grad_n} resolved students from this chapter's observed entry group.",
-        ],
-        [
-            "Observed 4-year graduation rate from chapter entry (excluding unresolved outcomes)",
-            percent_display(grad4_rate),
-            f"Uses {grad4_n} measurable and resolved students.",
-        ],
-        [
-            "Observed 6-year graduation rate from chapter entry (excluding unresolved outcomes)",
-            percent_display(grad6_rate),
-            f"Uses {grad6_n} measurable and resolved students.",
-        ],
-        [
-            "Retained in chapter to next observed term",
-            percent_display(org_next_term_rate),
-            f"Uses {org_next_term_n} students whose next-term follow-up is observable.",
-        ],
-        [
-            "Retained in chapter to next fall",
-            percent_display(org_next_fall_rate),
-            f"Uses {org_next_fall_n} students whose next-fall follow-up is observable.",
-        ],
-        [
-            "Stayed in school to next observed term",
-            percent_display(acad_next_term_rate),
-            f"Uses {acad_next_term_n} students whose next-term academic follow-up is observable.",
-        ],
-        [
-            "Stayed in school to next fall",
-            percent_display(acad_next_fall_rate),
-            f"Uses {acad_next_fall_n} students whose next-fall academic follow-up is observable.",
-        ],
-        [
-            "Average first-term GPA after chapter entry",
-            decimal_display(mean_or_blank(entry_students["First Post-Entry Term GPA"])) if not entry_students.empty else "",
-            "Averages the first academic term GPA observed after chapter entry.",
-        ],
-        [
-            "Average first-year GPA after chapter entry",
-            decimal_display(mean_or_blank(entry_students["First-Year Average Term GPA After Org Entry"])) if not entry_students.empty else "",
-            "Averages the first-year GPA across observed post-entry terms.",
-        ],
-        [
-            "Average latest cumulative GPA",
-            decimal_display(mean_or_blank(latest_cumulative)) if not entry_students.empty else "",
-            "Uses the latest overall cumulative GPA when available, otherwise the latest TxState cumulative GPA.",
-        ],
+        ["Distinct students ever observed in this chapter", unique_non_blank_count(chapter_rows["student_id"]) if not chapter_rows.empty else 0, "Counts anyone observed in this chapter in any term."],
+        ["Students with observed entry into this chapter", len(entry_students), "These students start their observed organization history in this chapter."],
+        ["Organization-entry cohorts covered", unique_non_blank_count(entry_students["org_entry_cohort"]) if not entry_students.empty else 0, "Counts distinct observed entry cohorts tied to this chapter."],
+        ["Observed eventual graduation rate from chapter entry (excluding unresolved outcomes)", grad_rate, f"Uses {grad_n} resolved students from this chapter's observed entry group."],
+        ["Observed 4-year graduation rate from chapter entry (excluding unresolved outcomes)", grad4_rate, f"Uses {grad4_n} measurable and resolved students."],
+        ["Observed 6-year graduation rate from chapter entry (excluding unresolved outcomes)", grad6_rate, f"Uses {grad6_n} measurable and resolved students."],
+        ["Retained in chapter to next observed term", org_next_term_rate, f"Uses {org_next_term_n} students whose next-term follow-up is measurable."],
+        ["Retained in chapter to next fall", org_next_fall_rate, f"Uses {org_next_fall_n} students whose next-fall follow-up is measurable."],
+        ["Stayed in school to next observed term", acad_next_term_rate, f"Uses {acad_next_term_n} students whose next-term academic follow-up is measurable."],
+        ["Stayed in school to next fall", acad_next_fall_rate, f"Uses {acad_next_fall_n} students whose next-fall academic follow-up is measurable."],
+        ["Average first-term GPA after chapter entry", mean_or_blank(entry_students["first_term_gpa"]) if not entry_students.empty else "", "Averages the first academic term GPA observed after chapter entry."],
+        ["Average first-year GPA after chapter entry", mean_or_blank(entry_students["first_year_avg_term_gpa"]) if not entry_students.empty else "", "Averages the first-year GPA across observed post-entry terms."],
+        ["Average latest cumulative GPA", mean_or_blank(entry_students["average_cumulative_gpa"]) if not entry_students.empty else "", "Uses the latest available cumulative GPA field."],
     ]
 
 
 def build_cohort_rows(entry_students: pd.DataFrame) -> List[List[object]]:
     rows: List[List[object]] = []
-    if entry_students.empty:
-        return rows
-    cohorts = sorted(
-        {
-            clean_text(value)
-            for value in entry_students["Organization Entry Cohort"].tolist()
-            if clean_text(value)
-        }
-    )
+    cohorts = sorted({clean_text(value) for value in entry_students["org_entry_cohort"].tolist() if clean_text(value)})
     for cohort in cohorts:
-        frame = entry_students.loc[
-            entry_students["Organization Entry Cohort"].fillna("").astype(str).str.strip().eq(cohort)
-        ].copy()
-        grad_rate, grad_n = adjusted_graduation_rate(frame, "Eventual Observed Graduation From Org Entry")
-        grad4_rate, _ = adjusted_graduation_rate(
-            frame,
-            "Observed Graduation Within 4 Years Of Org Entry",
-            measurable_field="Observed Graduation Within 4 Years Of Org Entry Measurable",
-        )
-        grad6_rate, _ = adjusted_graduation_rate(
-            frame,
-            "Observed Graduation Within 6 Years Of Org Entry",
-            measurable_field="Observed Graduation Within 6 Years Of Org Entry Measurable",
-        )
-        org_next_term_rate, _ = yes_rate(
-            frame,
-            "Retained In Organization To Next Observed Term",
-            measurable_field="Organization Next Observed Term Measurable",
-        )
-        org_next_fall_rate, _ = yes_rate(
-            frame,
-            "Retained In Organization To Next Fall",
-            measurable_field="Organization Next Fall Measurable",
-        )
-        acad_next_term_rate, _ = yes_rate(
-            frame,
-            "Continued Academically To Next Observed Term",
-            measurable_field="Academic Next Observed Term Measurable",
-        )
-        acad_next_fall_rate, _ = yes_rate(
-            frame,
-            "Continued Academically To Next Fall",
-            measurable_field="Academic Next Fall Measurable",
-        )
+        frame = entry_students.loc[entry_students["org_entry_cohort"].eq(cohort)].copy()
+        grad_rate, grad_n = adjusted_graduation_rate(frame, "graduated_eventual")
+        grad4_rate, _ = adjusted_graduation_rate(frame, "graduated_4yr", measurable_field="graduated_4yr_measurable")
+        grad6_rate, _ = adjusted_graduation_rate(frame, "graduated_6yr", measurable_field="graduated_6yr_measurable")
+        org_next_term_rate, _ = rate(frame, "retained_next_term", measurable_field="retained_next_term_measurable")
+        org_next_fall_rate, _ = rate(frame, "retained_next_fall", measurable_field="retained_next_fall_measurable")
+        acad_next_term_rate, _ = rate(frame, "continued_next_term", measurable_field="continued_next_term_measurable")
+        acad_next_fall_rate, _ = rate(frame, "continued_next_fall", measurable_field="continued_next_fall_measurable")
         rows.append(
             [
                 cohort,
@@ -448,17 +282,15 @@ def build_cohort_rows(entry_students: pd.DataFrame) -> List[List[object]]:
                 org_next_fall_rate,
                 acad_next_term_rate,
                 acad_next_fall_rate,
-                mean_or_blank(frame["First Post-Entry Term GPA"]),
-                mean_or_blank(selected_summary_cumulative_gpa(frame)),
+                mean_or_blank(frame["first_term_gpa"]),
+                mean_or_blank(frame["average_cumulative_gpa"]),
             ]
         )
     return rows
 
 
 def build_outcome_rows(entry_students: pd.DataFrame) -> List[List[object]]:
-    if entry_students.empty:
-        return []
-    counts = Counter(clean_text(value) or "Unknown" for value in entry_students["Latest Known Outcome Bucket"].tolist())
+    counts = Counter(clean_text(value) or "Unknown" for value in entry_students["latest_outcome_bucket"].tolist())
     total = sum(counts.values())
     rows: List[List[object]] = []
     for bucket in [
@@ -471,107 +303,110 @@ def build_outcome_rows(entry_students: pd.DataFrame) -> List[List[object]]:
         "Unknown",
     ]:
         count = counts.get(bucket, 0)
-        if not count:
-            continue
-        rows.append([bucket, count, (float(count) / float(total)) if total else ""])
+        if count:
+            rows.append([bucket, count, float(count) / float(total) if total else ""])
     return rows
 
 
 def build_yearly_trend_rows(chapter_rows: pd.DataFrame) -> List[List[object]]:
-    if chapter_rows.empty:
-        return []
     rows: List[List[object]] = []
-    grouped = chapter_rows.loc[chapter_rows["_term_year_numeric"].notna()].groupby("_term_year_numeric")
+    if chapter_rows.empty:
+        return rows
+    grouped = chapter_rows.loc[coerce_numeric(chapter_rows["observed_year"]).notna()].groupby("observed_year")
     for year_value, frame in sorted(grouped, key=lambda item: int(item[0])):
-        academic_only = frame.loc[yes_mask(frame["Academic Present"])]
-        standing_known = academic_only.loc[
-            academic_only["Academic Standing Bucket"].fillna("").astype(str).str.strip().ne("")
-        ]
+        academic_only = frame.loc[yes_mask(frame["academic_present"])]
+        standing_known = academic_only.loc[academic_only["academic_standing_bucket"].fillna("").astype(str).str.strip().ne("")]
         good_standing_rate = ""
         if not standing_known.empty:
-            good_standing_rate = float(
-                standing_known["Academic Standing Bucket"].fillna("").astype(str).str.strip().eq("Good Standing").sum()
-            ) / float(len(standing_known))
+            good_standing_rate = float(standing_known["academic_standing_bucket"].eq("Good Standing").sum()) / float(len(standing_known))
         rows.append(
             [
                 int(year_value),
-                unique_non_blank_count(frame["Student ID"]),
-                int(yes_mask(frame["Roster Present"]).sum()),
-                int(yes_mask(frame["Academic Present"]).sum()),
-                mean_or_blank(frame["Term GPA"]),
-                mean_or_blank(frame["_selected_cumulative_gpa"]),
+                unique_non_blank_count(frame["student_id"]),
+                int(yes_mask(frame["roster_present"]).sum()),
+                int(yes_mask(frame["academic_present"]).sum()),
+                mean_or_blank(frame["term_gpa"]),
+                mean_or_blank(frame["cumulative_gpa"]),
                 good_standing_rate,
-                mean_or_blank(frame["Term Passed Hours"]),
+                mean_or_blank(frame["earned_hours_term"]),
             ]
         )
     return rows
 
 
 def build_relative_term_gpa_rows(chapter_rows: pd.DataFrame) -> List[List[object]]:
-    if chapter_rows.empty:
-        return []
-    eligible = chapter_rows.loc[
-        yes_mask(chapter_rows["Academic Present"])
-        & chapter_rows["_relative_term_numeric"].notna()
-        & chapter_rows["_relative_term_numeric"].ge(0)
-    ].copy()
-    if eligible.empty:
-        return []
     rows: List[List[object]] = []
-    grouped = eligible.groupby("_relative_term_numeric")
-    for relative_term, frame in sorted(grouped, key=lambda item: int(item[0])):
+    if chapter_rows.empty:
+        return rows
+    eligible = chapter_rows.loc[
+        yes_mask(chapter_rows["academic_present"])
+        & coerce_numeric(chapter_rows["relative_term_index"]).notna()
+        & coerce_numeric(chapter_rows["relative_term_index"]).ge(0)
+    ].copy()
+    grouped = eligible.groupby("relative_term_index")
+    for relative_term, frame in sorted(grouped, key=lambda item: int(float(item[0]))):
         rows.append(
             [
-                int(relative_term),
+                int(float(relative_term)),
                 len(frame),
-                unique_non_blank_count(frame["Student ID"]),
-                mean_or_blank(frame["Term GPA"]),
-                mean_or_blank(frame["TxState Cumulative GPA"]),
-                mean_or_blank(frame["Overall Cumulative GPA"]),
+                unique_non_blank_count(frame["student_id"]),
+                mean_or_blank(frame["term_gpa"]),
+                mean_or_blank(frame["institutional_cumulative_gpa"]),
+                mean_or_blank(frame["overall_cumulative_gpa"]),
             ]
         )
     return rows
 
 
 def build_year_sheet_rows(frame: pd.DataFrame) -> List[List[object]]:
-    if frame.empty:
-        return []
-    sorted_frame = frame.copy()
-    sorted_frame["_season_sort"] = sorted_frame["Term Season"].map(lambda value: SEASON_ORDER.get(clean_text(value), 9))
-    sorted_frame = sorted_frame.sort_values(
-        by=["_term_year_numeric", "_season_sort", "Last Name", "First Name", "Student ID"],
-        ascending=[True, True, True, True, True],
-        na_position="last",
-    )
+    sorted_frame = frame.sort_values(by=["observed_term_sort", "last_name", "first_name", "student_id"], ascending=[True, True, True, True], na_position="last")
     rows: List[List[object]] = []
     for _, row in sorted_frame.iterrows():
-        rows.append([row.get(column, "") for column in YEAR_DETAIL_COLUMNS])
+        rows.append(
+            [
+                row.get("term_label", ""),
+                row.get("student_id", ""),
+                row.get("student_name", ""),
+                row.get("email", ""),
+                row.get("roster_present", ""),
+                row.get("academic_present", ""),
+                row.get("join_term", ""),
+                row.get("join_term", ""),
+                row.get("relative_term_index", ""),
+                row.get("org_status_raw", ""),
+                row.get("org_status_bucket", ""),
+                row.get("org_position_raw", ""),
+                row.get("new_member_flag", ""),
+                row.get("final_outcome_bucket", ""),
+                row.get("major", ""),
+                row.get("attempted_hours_term", ""),
+                row.get("earned_hours_term", ""),
+                row.get("total_cumulative_hours", ""),
+                row.get("academic_standing_raw", ""),
+                row.get("academic_standing_bucket", ""),
+                row.get("term_gpa", ""),
+                row.get("institutional_cumulative_gpa", ""),
+                row.get("overall_cumulative_gpa", ""),
+            ]
+        )
     return rows
 
 
 def create_index_row(chapter: str, entry_students: pd.DataFrame, chapter_rows: pd.DataFrame, workbook_path: Path) -> List[object]:
-    grad_rate, _ = adjusted_graduation_rate(entry_students, "Eventual Observed Graduation From Org Entry")
-    org_next_fall_rate, _ = yes_rate(
-        entry_students,
-        "Retained In Organization To Next Fall",
-        measurable_field="Organization Next Fall Measurable",
-    )
-    acad_next_fall_rate, _ = yes_rate(
-        entry_students,
-        "Continued Academically To Next Fall",
-        measurable_field="Academic Next Fall Measurable",
-    )
+    grad_rate, _ = adjusted_graduation_rate(entry_students, "graduated_eventual")
+    org_next_fall_rate, _ = rate(entry_students, "retained_next_fall", measurable_field="retained_next_fall_measurable")
+    acad_next_fall_rate, _ = rate(entry_students, "continued_next_fall", measurable_field="continued_next_fall_measurable")
     return [
         chapter,
         workbook_path.name,
-        unique_non_blank_count(chapter_rows["Student ID"]) if not chapter_rows.empty else 0,
+        unique_non_blank_count(chapter_rows["student_id"]) if not chapter_rows.empty else 0,
         len(entry_students),
-        unique_non_blank_count(entry_students["Organization Entry Cohort"]) if not entry_students.empty else 0,
+        unique_non_blank_count(entry_students["org_entry_cohort"]) if not entry_students.empty else 0,
         grad_rate,
         org_next_fall_rate,
         acad_next_fall_rate,
-        mean_or_blank(entry_students["First Post-Entry Term GPA"]) if not entry_students.empty else "",
-        mean_or_blank(selected_summary_cumulative_gpa(entry_students)) if not entry_students.empty else "",
+        mean_or_blank(entry_students["first_term_gpa"]) if not entry_students.empty else "",
+        mean_or_blank(entry_students["average_cumulative_gpa"]) if not entry_students.empty else "",
     ]
 
 
@@ -583,7 +418,7 @@ def write_summary_sheet(ws, chapter: str, entry_students: pd.DataFrame, chapter_
         "This workbook flips the yearly roster builder into one workbook per chapter. "
         "Summary rates are based on students whose observed organization entry begins in this chapter."
     )
-    ws["A3"] = f"Enhanced analytics source folder: {source_folder}"
+    ws["A3"] = f"Canonical analytics source folder: {source_folder}"
 
     row_idx = 5
     row_idx = append_table(
@@ -592,7 +427,7 @@ def write_summary_sheet(ws, chapter: str, entry_students: pd.DataFrame, chapter_
         "Overview",
         "What this tells us: these are the headline counts and chapter-level rates built from observed organization entry and follow-up data.",
         ["Metric", "Value", "How To Read This"],
-        build_overview_rows(chapter, entry_students, chapter_rows),
+        build_overview_rows(entry_students, chapter_rows),
     )
     row_idx = append_table(
         ws,
@@ -633,7 +468,7 @@ def write_summary_sheet(ws, chapter: str, entry_students: pd.DataFrame, chapter_
             "Academic Records",
             "Distinct Students",
             "Average Term GPA",
-            "Average TxState Cumulative GPA",
+            "Average Institutional Cumulative GPA",
             "Average Overall Cumulative GPA",
         ],
         build_relative_term_gpa_rows(chapter_rows),
@@ -671,37 +506,18 @@ def write_year_sheet(wb: Workbook, chapter: str, year_label: str, frame: pd.Data
     style_row_as_header(ws, 3)
     for row in build_year_sheet_rows(frame):
         ws.append(row)
-    for header in [
-        "Semester Hours",
-        "Term Passed Hours",
-        "Cumulative Hours",
-        "Term GPA",
-        "TxState Cumulative GPA",
-        "Overall Cumulative GPA",
-    ]:
-        col_idx = YEAR_DETAIL_COLUMNS.index(header) + 1
-        for row_idx in range(4, ws.max_row + 1):
-            ws.cell(row=row_idx, column=col_idx).number_format = "0.00"
     ws.freeze_panes = "A4"
     autosize_columns(ws)
 
 
-def write_chapter_workbook(
-    chapter: str,
-    entry_students: pd.DataFrame,
-    chapter_rows: pd.DataFrame,
-    output_path: Path,
-    source_folder: Path,
-) -> None:
+def write_chapter_workbook(chapter: str, entry_students: pd.DataFrame, chapter_rows: pd.DataFrame, output_path: Path, source_folder: Path) -> None:
     wb = Workbook()
     summary_ws = wb.active
     write_summary_sheet(summary_ws, chapter, entry_students, chapter_rows, source_folder)
-
     if not chapter_rows.empty:
-        grouped = chapter_rows.loc[chapter_rows["_term_year_numeric"].notna()].groupby("_term_year_numeric")
+        grouped = chapter_rows.loc[coerce_numeric(chapter_rows["observed_year"]).notna()].groupby("observed_year")
         for year_value, frame in sorted(grouped, key=lambda item: int(item[0])):
             write_year_sheet(wb, chapter, str(int(year_value)), frame.copy())
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
 
@@ -738,7 +554,7 @@ def write_readme(result: ChapterBuildResult) -> None:
     lines = [
         "# Chapter History Workbooks",
         "",
-        "This folder contains one workbook per chapter, built additively from the enhanced analytics bundle.",
+        "This folder contains one workbook per chapter, built additively from the canonical analytics bundle.",
         "",
         "## Files",
         "",
@@ -762,38 +578,20 @@ def write_readme(result: ChapterBuildResult) -> None:
     result.readme_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def build_chapter_history_workbooks(
-    enhanced_root: Path,
-    explicit_folder: Optional[Path],
-    explicit_workbook: Optional[Path],
-    output_root: Path,
-) -> ChapterBuildResult:
-    bundle = load_latest_bundle(
-        enhanced_root=enhanced_root,
-        explicit_folder=explicit_folder,
-        explicit_workbook=explicit_workbook,
-    )
-    if "master_longitudinal" not in bundle.tables:
-        raise FileNotFoundError(
-            "The enhanced analytics bundle does not include Master_Longitudinal. "
-            "Run py run_enhanced_org_analytics.py first so the chapter workbooks can build year sheets."
-        )
-
+def build_chapter_history_workbooks(canonical_root: Path, explicit_folder: Path | None, output_root: Path) -> ChapterBuildResult:
+    bundle = load_canonical_bundle(canonical_root=canonical_root, explicit_folder=explicit_folder)
     summary = prepare_summary(bundle.tables["student_summary"])
     longitudinal = prepare_longitudinal(bundle.tables["master_longitudinal"])
 
-    chapter_names = choose_display_names(
-        list(summary["Initial Chapter"].tolist())
-        + list(summary["Latest Chapter"].tolist())
-        + list(longitudinal["Chapter"].tolist())
+    chapter_names = sorted(
+        {
+            clean_text(value)
+            for value in list(summary["initial_chapter"].tolist()) + list(summary["latest_chapter"].tolist()) + list(longitudinal["chapter"].tolist())
+            if clean_text(value) and clean_text(value).lower() != "unknown" and not is_excluded_chapter(clean_text(value))
+        }
     )
-    chapters = [
-        display
-        for _, display in sorted(chapter_names.items(), key=lambda item: chapter_sort_key(item[1]))
-        if display and display.lower() != "unknown" and not is_excluded_chapter(display)
-    ]
-    if not chapters:
-        raise FileNotFoundError("No usable chapters were found in the enhanced analytics bundle.")
+    if not chapter_names:
+        raise FileNotFoundError("No usable chapters were found in the canonical analytics bundle.")
 
     timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
     output_folder = output_root / timestamp
@@ -802,26 +600,20 @@ def build_chapter_history_workbooks(
 
     index_rows: List[List[object]] = []
     chapters_written = 0
-    for chapter in chapters:
+    for chapter in chapter_names:
         entry_students = filter_to_chapter_entry(summary, chapter)
         chapter_rows = filter_to_chapter_rows(longitudinal, chapter)
         if entry_students.empty and chapter_rows.empty:
             continue
         workbook_path = workbook_folder / f"{safe_filename(chapter)}.xlsx"
-        write_chapter_workbook(
-            chapter=chapter,
-            entry_students=entry_students,
-            chapter_rows=chapter_rows,
-            output_path=workbook_path,
-            source_folder=bundle.enhanced_folder,
-        )
+        write_chapter_workbook(chapter, entry_students, chapter_rows, workbook_path, bundle.output_folder)
         index_rows.append(create_index_row(chapter, entry_students, chapter_rows, workbook_path))
         chapters_written += 1
 
     if not chapters_written:
         raise FileNotFoundError("No chapter workbooks were written because no chapter rows were available.")
 
-    index_rows.sort(key=lambda row: chapter_sort_key(str(row[0])))
+    index_rows.sort(key=lambda row: clean_text(row[0]).lower())
     index_workbook = output_folder / "Chapter_History_Index.xlsx"
     index_csv = output_folder / "chapter_history_index.csv"
     readme_path = output_folder / "README.md"
@@ -850,7 +642,7 @@ def build_chapter_history_workbooks(
         index_csv=index_csv,
         readme_path=readme_path,
         chapters_written=chapters_written,
-        source_folder=bundle.enhanced_folder,
+        source_folder=bundle.output_folder,
     )
     write_readme(result)
     return result
@@ -859,9 +651,8 @@ def build_chapter_history_workbooks(
 def main() -> None:
     args = parse_args()
     result = build_chapter_history_workbooks(
-        enhanced_root=Path(args.enhanced_root).expanduser().resolve(),
-        explicit_folder=Path(args.enhanced_folder).expanduser().resolve() if args.enhanced_folder else None,
-        explicit_workbook=Path(args.enhanced_workbook).expanduser().resolve() if args.enhanced_workbook else None,
+        canonical_root=Path(args.canonical_root).expanduser().resolve(),
+        explicit_folder=Path(args.canonical_folder).expanduser().resolve() if args.canonical_folder else None,
         output_root=Path(args.output_root).expanduser().resolve(),
     )
     print(f"Chapter history workbooks created in: {result.output_folder}")

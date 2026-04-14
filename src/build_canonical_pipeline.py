@@ -1,0 +1,1756 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import pandas as pd
+from openpyxl import load_workbook
+
+from app.config_loader import load_chapter_mapping, load_settings
+from app.status_framework import build_outcome_resolution_fields
+from src.build_master_roster import (
+    DEFAULT_INPUT_ROOT,
+    SUPPORTED_EXTENSIONS,
+    canonical_header,
+    clean_text,
+    find_header_row,
+    find_status_column,
+    get_cell,
+    normalize_banner_id,
+    normalize_chapter_name,
+    normalize_status,
+)
+
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_ROSTER_ROOT = DEFAULT_INPUT_ROOT
+DEFAULT_ROSTER_INBOX = ROOT / "data" / "inbox" / "rosters"
+DEFAULT_ACADEMIC_ROOT = ROOT / "data" / "inbox" / "academic"
+DEFAULT_GRADUATION_ROOT = ROOT / "data" / "inbox" / "graduation"
+DEFAULT_OUTPUT_ROOT = ROOT / "output" / "canonical"
+SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
+
+TERM_RE = re.compile(r"(Winter|Spring|Summer|Fall)\s+(19\d{2}|20\d{2})", re.IGNORECASE)
+TERM_CODE_RE = re.compile(r"^(19\d{2}|20\d{2})(WI|SP|SU|FA)$", re.IGNORECASE)
+UPDATE_RE = re.compile(r"\((\d{1,2})\.(\d{1,2})\.(\d{2,4})\)")
+SEASON_ORDER = {"WI": 0, "SP": 1, "SU": 2, "FA": 3}
+SEASON_NAME = {"WI": "Winter", "SP": "Spring", "SU": "Summer", "FA": "Fall"}
+UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ""}
+
+SNAPSHOT_ALIAS_GROUPS = {
+    "Student ID": {"student id", "banner id", "banner", "student number"},
+    "First Name": {"first name", "firstname"},
+    "Last Name": {"last name", "lastname"},
+    "NetID": {"netid", "net id"},
+    "High School GPA": {"high school gpa", "hs gpa"},
+    "Overall GPA": {"overall gpa"},
+    "Institutional GPA": {"institutional gpa", "txst gpa", "texas state gpa"},
+    "Transfer GPA": {"transfer gpa"},
+    "Total Credit Hours": {"total credit hours", "total hours", "overall credit hours"},
+    "TXST Credit Hours": {"txst credit hours", "texas state credit hours", "institutional credit hours"},
+    "Previous Semester GPA": {"previous semester gpa", "previous term gpa"},
+    "Student Status": {"student status"},
+    "Student Status (FT/PT)": {"student status ftpt", "student status ft pt", "student status (ft/pt)", "ft/pt"},
+}
+
+SNAPSHOT_COLUMNS = [
+    "Student ID",
+    "First Name",
+    "Last Name",
+    "NetID",
+    "High School GPA",
+    "Overall GPA",
+    "Institutional GPA",
+    "Transfer GPA",
+    "Total Credit Hours",
+    "TXST Credit Hours",
+    "Previous Semester GPA",
+    "Student Status",
+    "Student Status (FT/PT)",
+    "Snapshot Source File",
+]
+
+GRADUATION_ALIAS_GROUPS = {
+    "Student ID": {"student id", "banner id", "banner", "student number"},
+    "First Name": {"first name", "firstname"},
+    "Last Name": {"last name", "lastname"},
+    "Graduation Term": {
+        "graduation term",
+        "graduation semester",
+        "graduation date",
+        "grad term",
+        "grad semester",
+        "graduated term",
+    },
+    "Outcome": {"status", "outcome", "graduation status", "degree status"},
+}
+
+GRADUATION_COLUMNS = [
+    "Student ID",
+    "First Name",
+    "Last Name",
+    "Graduation Term",
+    "Outcome",
+    "Graduation Source File",
+]
+
+QA_COLUMNS = ["Check Group", "Check", "Status", "Value", "Notes"]
+
+GRADE_COLUMN_ALIASES = {
+    "Banner ID": {"banner id", "student id", "banner", "student number"},
+    "Last Name": {"last name", "lastname"},
+    "First Name": {"first name", "firstname"},
+    "Email": {"email", "email address"},
+    "Student Status": {"student status", "status"},
+    "Major": {"major", "primary major"},
+    "Semester Hours": {"semester hours", "credits attempted", "attempted hours", "hours attempted"},
+    "Cumulative Hours": {"cumulative hours", "total credit hours", "total hours"},
+    "Current Academic Standing": {"current academic standing", "academic standing", "standing"},
+    "Texas State GPA": {"texas state gpa", "institutional gpa", "txst gpa"},
+    "Overall GPA": {"overall gpa"},
+    "Transfer GPA": {"transfer gpa"},
+    "Term GPA": {"term gpa", "gpa"},
+    "Term Passed Hours": {"term passed hours", "credits earned", "earned hours", "passed hours"},
+    "TxState Cumulative GPA": {"txstate cumulative gpa", "texas state cumulative gpa", "institutional cumulative gpa"},
+    "Overall Cumulative GPA": {"overall cumulative gpa"},
+    "Graduation Term": {"graduation term", "graduation semester", "graduated term", "grad term"},
+}
+
+
+@dataclass(frozen=True)
+class CanonicalBuildResult:
+    output_folder: Path
+    files: Dict[str, Path]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build the canonical FSL analytics tables and QA outputs. "
+            "Authoritative outputs: roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks."
+        )
+    )
+    parser.add_argument("--roster-root", default=str(DEFAULT_ROSTER_ROOT))
+    parser.add_argument("--roster-inbox", default=str(DEFAULT_ROSTER_INBOX))
+    parser.add_argument("--academic-root", default=str(DEFAULT_ACADEMIC_ROOT))
+    parser.add_argument("--graduation-root", default=str(DEFAULT_GRADUATION_ROOT))
+    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    return parser.parse_args()
+
+
+def load_schema() -> dict:
+    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
+def ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = pd.NA
+    return result.loc[:, list(columns)]
+
+
+def coerce_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def bucket_30_hours(value: object) -> str:
+    number = coerce_numeric(pd.Series([value])).iloc[0]
+    if pd.isna(number):
+        return "Unknown"
+    lower = int(math.floor(float(number) / 30.0) * 30)
+    upper = lower + 29
+    return f"{lower}-{upper}"
+
+
+def sort_term_code(term_code: str) -> int:
+    match = TERM_CODE_RE.fullmatch(clean_text(term_code))
+    if not match:
+        return 999999
+    return int(match.group(1)) * 10 + SEASON_ORDER.get(match.group(2).upper(), 9)
+
+
+def parse_term_code(value: object) -> Tuple[str, str, object, str]:
+    text = clean_text(value)
+    match = TERM_CODE_RE.fullmatch(text)
+    if match:
+        year = int(match.group(1))
+        season_code = match.group(2).upper()
+        return (
+            f"{year}{season_code}",
+            f"{SEASON_NAME[season_code]} {year}",
+            year,
+            SEASON_NAME[season_code],
+        )
+
+    match = TERM_RE.search(text)
+    if match:
+        season_name = match.group(1).title()
+        year = int(match.group(2))
+        season_code = next(code for code, label in SEASON_NAME.items() if label == season_name)
+        return (
+            f"{year}{season_code}",
+            f"{season_name} {year}",
+            year,
+            season_name,
+        )
+
+    year_match = re.search(r"(19\d{2}|20\d{2})", text)
+    if year_match:
+        year = int(year_match.group(1))
+        return (f"{year}UN", str(year), year, "Unknown")
+
+    return ("", clean_text(value), pd.NA, "Unknown")
+
+
+def term_label_from_code(term_code: object) -> str:
+    code, label, _, _ = parse_term_code(term_code)
+    return label if code else clean_text(term_code)
+
+
+def update_key_from_name(value: str) -> Tuple[int, int, int]:
+    match = UPDATE_RE.search(clean_text(value))
+    if not match:
+        return (0, 0, 0)
+    month = int(match.group(1))
+    day = int(match.group(2))
+    year = int(match.group(3))
+    if year < 100:
+        year += 2000
+    return (year, month, day)
+
+
+def parse_grade_term(path: Path, sheet_name: object) -> str:
+    for candidate in [clean_text(sheet_name), clean_text(path.stem), clean_text(path.name)]:
+        term_code, term_label, _, _ = parse_term_code(candidate)
+        if term_code:
+            return term_label
+    return ""
+
+
+def canonical_snapshot_header(value: object) -> str:
+    text = canonical_header(value)
+    match = next(
+        (
+            standard
+            for standard, aliases in SNAPSHOT_ALIAS_GROUPS.items()
+            if text in aliases
+        ),
+        clean_text(value),
+    )
+    return match
+
+
+def canonical_graduation_header(value: object) -> str:
+    text = canonical_header(value)
+    return next(
+        (
+            standard
+            for standard, aliases in GRADUATION_ALIAS_GROUPS.items()
+            if text in aliases
+        ),
+        clean_text(value),
+    )
+
+
+def is_snapshot_filename(path: Path) -> bool:
+    return clean_text(path.stem).lower().startswith("new member")
+
+
+def list_source_files(folder: Path) -> List[Path]:
+    if not folder.exists():
+        return []
+    return sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS.union({".csv"}))
+
+
+def roster_files(roots: Sequence[Path]) -> List[Path]:
+    files: List[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        for path in list_source_files(root):
+            resolved = path.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                files.append(path)
+    return sorted(files)
+
+
+def academic_files(root: Path) -> List[Path]:
+    return [path for path in list_source_files(root) if not is_snapshot_filename(path)]
+
+
+def snapshot_files(root: Path) -> List[Path]:
+    return [path for path in list_source_files(root) if is_snapshot_filename(path)]
+
+
+def graduation_files(root: Path) -> List[Path]:
+    if not root.exists():
+        return []
+    return sorted(path for path in list_source_files(root) if clean_text(path.stem).lower().find("graduat") >= 0)
+
+
+def normalize_email(value: object) -> str:
+    return clean_text(value).lower()
+
+
+def person_name_key(first_name: object, last_name: object) -> Tuple[str, str]:
+    return clean_text(first_name).lower(), clean_text(last_name).lower()
+
+
+def map_grade_headers(headers: Sequence[object]) -> Dict[str, int]:
+    mapped: Dict[str, int] = {}
+    canon_headers = [canonical_header(value) for value in headers]
+    for idx, header in enumerate(canon_headers):
+        for target, aliases in GRADE_COLUMN_ALIASES.items():
+            if header in aliases and target not in mapped:
+                mapped[target] = idx
+    return mapped
+
+
+def roster_status_bucket(raw_status: object, raw_position: object) -> str:
+    status = normalize_status(clean_text(raw_status))
+    combined = f"{status} {clean_text(raw_position)}".upper()
+    if "GRAD" in combined or "ALUM" in combined:
+        return "Graduated"
+    if "SUSPEND" in combined:
+        return "Suspended"
+    if "TRANSFER" in combined:
+        return "Transfer"
+    if "REVOK" in combined:
+        return "Revoked"
+    if "RESIGN" in combined:
+        return "Resigned"
+    if "INACTIVE" in combined or "DROP" in combined or "REMOVE" in combined:
+        return "Inactive"
+    if "NEW MEMBER" in combined:
+        return "New Member"
+    if "ACTIVE" in combined or "MEMBER" in combined or "COUNCIL" in combined:
+        return "Active"
+    return status or "Unknown"
+
+
+def outcome_bucket_from_signals(status_bucket: str, academic_status_raw: str, snapshot_status_raw: str) -> Tuple[str, str]:
+    signals = " ".join([status_bucket, clean_text(academic_status_raw), clean_text(snapshot_status_raw)]).upper()
+    if any(token in signals for token in ["GRADUAT", "ALUMNI", "DEGREE"]):
+        return "Graduated", "Explicit graduation signal"
+    if "SUSPEND" in signals:
+        return "Suspended", "Explicit suspension signal"
+    if "TRANSFER" in signals:
+        return "Transfer", "Explicit transfer signal"
+    if any(token in signals for token in ["INACTIVE", "DROP", "RESIGN", "REVOK", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL"]):
+        return "Dropped/Resigned/Revoked/Inactive", "Explicit non-graduate exit signal"
+    if any(token in signals for token in ["ACTIVE", "CURRENT", "MEMBER", "NEW MEMBER", "COUNCIL", "ENROLLED"]):
+        return "Active/Unknown", "Current or active signal only"
+    return "No Further Observation", "No explicit outcome evidence"
+
+
+def standing_bucket(value: object) -> str:
+    text = clean_text(value).upper()
+    if not text:
+        return "Unknown"
+    if any(token in text for token in ["GOOD", "CLEAR", "SATISFACTORY"]):
+        return "Good Standing"
+    if any(token in text for token in ["PROBATION", "WARNING"]):
+        return "Probation/Warning"
+    if "SUSPEND" in text:
+        return "Suspended"
+    if any(token in text for token in ["DISMISS", "SEPARAT", "EXPEL", "TERMINAT"]):
+        return "Dismissed/Separated"
+    return "Other/Unmapped"
+
+
+def metric_row(metric_group: str, metric_label: str, cohort: str, eligible: int, numerator: Optional[int] = None, rate: Optional[float] = None, average: Optional[float] = None, dimension: str = "", value: str = "", notes: str = "") -> dict:
+    return {
+        "Metric Group": metric_group,
+        "Metric Label": metric_label,
+        "Cohort": cohort,
+        "Dimension": dimension,
+        "Value": value,
+        "Eligible Students": eligible,
+        "Student Count": numerator if numerator is not None else "",
+        "Rate": rate if rate is not None else "",
+        "Average Value": average if average is not None else "",
+        "Notes": notes,
+    }
+
+
+def choose_best_snapshot_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    ranked = frame.copy()
+    ranked["_filled_fields"] = ranked.notna().sum(axis=1)
+    ranked["_status_present"] = ranked["Student Status"].fillna("").astype(str).str.strip().ne("").astype(int)
+    ranked = ranked.sort_values(
+        by=["Student ID", "_filled_fields", "_status_present", "Last Name", "First Name"],
+        ascending=[True, False, False, True, True],
+    )
+    ranked = ranked.drop_duplicates(subset=["Student ID"], keep="first")
+    return ranked.drop(columns=["_filled_fields", "_status_present"])
+
+
+def load_snapshot_table(root: Path) -> pd.DataFrame:
+    frames: List[pd.DataFrame] = []
+    for path in snapshot_files(root):
+        if path.suffix.lower() == ".csv":
+            frame = pd.read_csv(path)
+            frame.columns = [canonical_snapshot_header(column) for column in frame.columns]
+        else:
+            selected: Optional[pd.DataFrame] = None
+            for _, sheet in pd.read_excel(path, sheet_name=None).items():
+                candidate = sheet.copy()
+                candidate.columns = [canonical_snapshot_header(column) for column in candidate.columns]
+                if {"Student ID", "First Name", "Last Name"}.issubset(set(candidate.columns)):
+                    selected = candidate
+                    break
+            if selected is None:
+                continue
+            frame = selected
+
+        for column in SNAPSHOT_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = ""
+        frame = frame[SNAPSHOT_COLUMNS[:-1]].copy()
+        frame["Student ID"] = frame["Student ID"].map(normalize_banner_id)
+        frame["First Name"] = frame["First Name"].map(clean_text)
+        frame["Last Name"] = frame["Last Name"].map(clean_text)
+        frame["NetID"] = frame["NetID"].map(clean_text)
+        frame["Student Status"] = frame["Student Status"].map(clean_text)
+        frame["Student Status (FT/PT)"] = frame["Student Status (FT/PT)"].map(clean_text)
+        frame["Snapshot Source File"] = path.name
+        frame = frame.loc[frame["Student ID"].ne("")]
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = choose_best_snapshot_rows(combined)
+    return combined.reset_index(drop=True)
+
+
+def load_graduation_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    rows: List[dict] = []
+    exceptions: List[dict] = []
+
+    for path in graduation_files(root):
+        try:
+            if path.suffix.lower() == ".csv":
+                frame = pd.read_csv(path)
+                frame.columns = [canonical_graduation_header(column) for column in frame.columns]
+                frames = [frame]
+            else:
+                workbook_frames = []
+                for _, sheet in pd.read_excel(path, sheet_name=None).items():
+                    candidate = sheet.copy()
+                    candidate.columns = [canonical_graduation_header(column) for column in candidate.columns]
+                    workbook_frames.append(candidate)
+                frames = workbook_frames
+        except Exception as exc:
+            exceptions.append(
+                {
+                    "exception_type": "graduation_open_error",
+                    "source_file": path.name,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": str(exc),
+                }
+            )
+            continue
+
+        for frame in frames:
+            if "Student ID" not in frame.columns and not {"First Name", "Last Name"}.issubset(set(frame.columns)):
+                continue
+            for column in GRADUATION_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = ""
+            subset = frame[GRADUATION_COLUMNS[:-1]].copy()
+            subset["Student ID"] = subset["Student ID"].map(normalize_banner_id)
+            subset["First Name"] = subset["First Name"].map(clean_text)
+            subset["Last Name"] = subset["Last Name"].map(clean_text)
+            subset["Graduation Term"] = subset["Graduation Term"].map(clean_text)
+            subset["Outcome"] = subset["Outcome"].map(clean_text)
+            subset["Graduation Source File"] = path.name
+            rows.extend(subset.to_dict("records"))
+
+    if not rows:
+        return pd.DataFrame(columns=GRADUATION_COLUMNS), pd.DataFrame(exceptions)
+
+    graduation = pd.DataFrame(rows)
+    graduation = graduation.loc[
+        graduation["Student ID"].fillna("").astype(str).str.strip().ne("")
+        | (
+            graduation["First Name"].fillna("").astype(str).str.strip().ne("")
+            | graduation["Last Name"].fillna("").astype(str).str.strip().ne("")
+        )
+    ].copy()
+    return graduation.reset_index(drop=True), pd.DataFrame(exceptions)
+
+
+def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    rows: List[dict] = []
+    exceptions: List[dict] = []
+    schema_columns = load_schema()["tables"]["roster_term"]
+
+    for path in roster_files(roots):
+        try:
+            workbook = load_workbook(path, data_only=True, read_only=True)
+        except Exception as exc:
+            exceptions.append(
+                {
+                    "exception_type": "roster_open_error",
+                    "source_file": path.name,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": str(exc),
+                }
+            )
+            continue
+
+        try:
+            for ws in workbook.worksheets:
+                header_row_idx, header_map = find_header_row(ws)
+                if header_row_idx is None:
+                    exceptions.append(
+                        {
+                            "exception_type": "roster_header_missing",
+                            "source_file": path.name,
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"Sheet {ws.title} skipped because no usable header row was found.",
+                        }
+                    )
+                    continue
+
+                status_row_idx, status_col_idx = find_status_column(ws)
+                if "status" not in header_map and status_col_idx is not None:
+                    header_map["status"] = status_col_idx
+                data_start_row = max(header_row_idx, status_row_idx or header_row_idx) + 1
+
+                term_label = ""
+                for candidate in [path.parent.name, path.stem, path.name]:
+                    code, label, _, _ = parse_term_code(candidate)
+                    if code:
+                        term_label = label
+                        break
+                term_code, term_label, term_year, term_season = parse_term_code(term_label)
+                if not term_code:
+                    exceptions.append(
+                        {
+                            "exception_type": "roster_term_unparsed",
+                            "source_file": path.name,
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"Could not infer term for {path.name}::{ws.title}",
+                        }
+                    )
+
+                for row in ws.iter_rows(min_row=data_start_row, values_only=True):
+                    last_name = clean_text(get_cell(row, header_map.get("last_name")))
+                    first_name = clean_text(get_cell(row, header_map.get("first_name")))
+                    if not last_name and not first_name:
+                        continue
+
+                    banner_raw = clean_text(get_cell(row, header_map.get("banner_id")))
+                    email = normalize_email(get_cell(row, header_map.get("email")))
+                    chapter_raw = clean_text(get_cell(row, header_map.get("chapter")))
+                    status_raw = clean_text(get_cell(row, header_map.get("status")))
+                    position_raw = clean_text(get_cell(row, header_map.get("position")))
+                    semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
+                    chapter = normalize_chapter_name(chapter_raw or ws.title or path.stem) or "Unknown"
+                    status_bucket = roster_status_bucket(status_raw, position_raw)
+
+                    rows.append(
+                        {
+                            "student_id": normalize_banner_id(banner_raw),
+                            "student_id_raw": banner_raw,
+                            "identity_resolution_basis": "source_banner_id" if banner_raw else "",
+                            "identity_resolution_notes": "",
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "email": email,
+                            "source_file": path.name,
+                            "source_sheet": ws.title,
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "term_year": term_year,
+                            "term_season": term_season,
+                            "term_source_basis": "folder_or_filename",
+                            "chapter": chapter,
+                            "chapter_raw": chapter_raw or ws.title,
+                            "org_status_raw": status_raw,
+                            "org_status_bucket": status_bucket,
+                            "org_position_raw": position_raw,
+                            "semester_joined_raw": semester_joined_raw,
+                            "new_member_flag": "Yes" if status_bucket == "New Member" else "No",
+                            "org_entry_term_code": "",
+                            "org_entry_term_basis": "",
+                        }
+                    )
+        finally:
+            workbook.close()
+
+    roster = pd.DataFrame(rows)
+    if roster.empty:
+        roster = pd.DataFrame(columns=schema_columns)
+    return ensure_columns(roster, schema_columns), pd.DataFrame(exceptions)
+
+
+def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    rows: List[dict] = []
+    exceptions: List[dict] = []
+    schema_columns = load_schema()["tables"]["academic_term"]
+
+    for path in academic_files(root):
+        if path.suffix.lower() == ".csv":
+            raw = pd.read_csv(path)
+            raw.columns = [canonical_header(column) for column in raw.columns]
+            term_code, term_label, term_year, term_season = parse_term_code(path.stem)
+            if not term_code:
+                exceptions.append(
+                    {
+                        "exception_type": "academic_term_unparsed",
+                        "source_file": path.name,
+                        "student_id": "",
+                        "term_code": "",
+                        "details": f"Could not infer term for {path.name}",
+                    }
+                )
+            rename_map = {
+                "student id": "Banner ID",
+                "banner id": "Banner ID",
+                "last name": "Last Name",
+                "first name": "First Name",
+                "email": "Email",
+                "student status": "Student Status",
+                "major": "Major",
+                "semester hours": "Semester Hours",
+                "credits attempted": "Semester Hours",
+                "cumulative hours": "Cumulative Hours",
+                "current academic standing": "Current Academic Standing",
+                "academic standing": "Current Academic Standing",
+                "texas state gpa": "Texas State GPA",
+                "overall gpa": "Overall GPA",
+                "transfer gpa": "Transfer GPA",
+                "term gpa": "Term GPA",
+                "gpa": "Term GPA",
+                "term passed hours": "Term Passed Hours",
+                "credits earned": "Term Passed Hours",
+                "txstate cumulative gpa": "TxState Cumulative GPA",
+                "overall cumulative gpa": "Overall Cumulative GPA",
+                "graduation term": "Graduation Term",
+            }
+            frame = raw.rename(columns={column: rename_map.get(column, column) for column in raw.columns})
+            for record in frame.to_dict("records"):
+                rows.append(
+                    {
+                        "student_id": normalize_banner_id(record.get("Banner ID", "")),
+                        "student_id_raw": clean_text(record.get("Banner ID", "")),
+                        "identity_resolution_basis": "source_student_id" if clean_text(record.get("Banner ID", "")) else "",
+                        "identity_resolution_notes": "",
+                        "first_name": clean_text(record.get("First Name", "")),
+                        "last_name": clean_text(record.get("Last Name", "")),
+                        "email": normalize_email(record.get("Email", "")),
+                        "source_file": path.name,
+                        "source_sheet": "csv",
+                        "term_code": term_code,
+                        "term_label": term_label,
+                        "term_year": term_year,
+                        "term_season": term_season,
+                        "term_source_basis": "filename",
+                        "academic_status_raw": clean_text(record.get("Student Status", "")),
+                        "major": clean_text(record.get("Major", "")),
+                        "term_gpa": record.get("Term GPA", ""),
+                        "institutional_cumulative_gpa": record.get("TxState Cumulative GPA", record.get("Texas State GPA", "")),
+                        "overall_cumulative_gpa": record.get("Overall Cumulative GPA", record.get("Overall GPA", "")),
+                        "transfer_gpa": record.get("Transfer GPA", ""),
+                        "attempted_hours_term": record.get("Semester Hours", ""),
+                        "earned_hours_term": record.get("Term Passed Hours", ""),
+                        "institutional_cumulative_hours": record.get("Cumulative Hours", ""),
+                        "total_cumulative_hours": record.get("Cumulative Hours", ""),
+                        "academic_standing_raw": clean_text(record.get("Current Academic Standing", "")),
+                        "academic_standing_bucket": standing_bucket(record.get("Current Academic Standing", "")),
+                        "graduation_term_code": parse_term_code(record.get("Graduation Term", ""))[0],
+                        "graduation_term_label": parse_term_code(record.get("Graduation Term", ""))[1],
+                    }
+                )
+            continue
+
+        workbook = load_workbook(path, data_only=True, read_only=True)
+        try:
+            for ws in workbook.worksheets:
+                term_label = parse_grade_term(path, ws.title)
+                if not term_label:
+                    continue
+                term_code, term_label, term_year, term_season = parse_term_code(term_label)
+                sheet_rows = list(ws.iter_rows(values_only=True))
+                if not sheet_rows:
+                    continue
+                header_map = map_grade_headers(sheet_rows[0])
+                required = {"Last Name", "First Name"}
+                has_identifier = "Banner ID" in header_map or "Email" in header_map
+                if not required.issubset(set(header_map)) or not has_identifier:
+                    continue
+                for row in sheet_rows[1:]:
+                    first_name = get_cell(row, header_map.get("First Name"))
+                    last_name = get_cell(row, header_map.get("Last Name"))
+                    if not first_name and not last_name:
+                        continue
+                    banner_raw = get_cell(row, header_map.get("Banner ID"))
+                    rows.append(
+                        {
+                            "student_id": normalize_banner_id(banner_raw),
+                            "student_id_raw": clean_text(banner_raw),
+                            "identity_resolution_basis": "source_student_id" if clean_text(banner_raw) else "",
+                            "identity_resolution_notes": "",
+                            "first_name": clean_text(first_name),
+                            "last_name": clean_text(last_name),
+                            "email": normalize_email(get_cell(row, header_map.get("Email"))),
+                            "source_file": path.name,
+                            "source_sheet": ws.title,
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "term_year": term_year,
+                            "term_season": term_season,
+                            "term_source_basis": "filename_or_sheet",
+                            "academic_status_raw": clean_text(get_cell(row, header_map.get("Student Status"))),
+                            "major": clean_text(get_cell(row, header_map.get("Major"))),
+                            "term_gpa": get_cell(row, header_map.get("Term GPA")),
+                            "institutional_cumulative_gpa": get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")),
+                            "overall_cumulative_gpa": get_cell(row, header_map.get("Overall Cumulative GPA")) or get_cell(row, header_map.get("Overall GPA")),
+                            "transfer_gpa": get_cell(row, header_map.get("Transfer GPA")),
+                            "attempted_hours_term": get_cell(row, header_map.get("Semester Hours")),
+                            "earned_hours_term": get_cell(row, header_map.get("Term Passed Hours")),
+                            "institutional_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
+                            "total_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
+                            "academic_standing_raw": clean_text(get_cell(row, header_map.get("Current Academic Standing"))),
+                            "academic_standing_bucket": standing_bucket(get_cell(row, header_map.get("Current Academic Standing"))),
+                            "graduation_term_code": "",
+                            "graduation_term_label": "",
+                        }
+                    )
+        finally:
+            workbook.close()
+
+    academic = pd.DataFrame(rows)
+    if academic.empty:
+        academic = pd.DataFrame(columns=schema_columns)
+    else:
+        for column in [
+            "term_gpa",
+            "institutional_cumulative_gpa",
+            "overall_cumulative_gpa",
+            "transfer_gpa",
+            "attempted_hours_term",
+            "earned_hours_term",
+            "institutional_cumulative_hours",
+            "total_cumulative_hours",
+        ]:
+            academic[column] = coerce_numeric(academic[column])
+    return ensure_columns(academic, schema_columns), pd.DataFrame(exceptions)
+
+
+def build_identity_maps(
+    academic: pd.DataFrame,
+    snapshot: pd.DataFrame,
+    graduation: pd.DataFrame,
+) -> Tuple[Dict[str, str], Dict[Tuple[str, str], str], pd.DataFrame]:
+    email_candidates: Dict[str, set[str]] = defaultdict(set)
+    name_candidates: Dict[Tuple[str, str], set[str]] = defaultdict(set)
+    exceptions: List[dict] = []
+
+    source_frames = [academic[["student_id", "email", "first_name", "last_name"]].copy()]
+    if not snapshot.empty:
+        snap = pd.DataFrame(
+            {
+                "student_id": snapshot["Student ID"].map(normalize_banner_id),
+                "email": pd.Series("", index=snapshot.index, dtype="object"),
+                "first_name": snapshot["First Name"].map(clean_text),
+                "last_name": snapshot["Last Name"].map(clean_text),
+            }
+        )
+        source_frames.append(snap)
+    if not graduation.empty:
+        grad = pd.DataFrame(
+            {
+                "student_id": graduation["Student ID"].map(normalize_banner_id),
+                "email": pd.Series("", index=graduation.index, dtype="object"),
+                "first_name": graduation["First Name"].map(clean_text),
+                "last_name": graduation["Last Name"].map(clean_text),
+            }
+        )
+        source_frames.append(grad)
+
+    combined = pd.concat(source_frames, ignore_index=True)
+    combined = combined.loc[combined["student_id"].fillna("").astype(str).str.strip().ne("")]
+    for row in combined.itertuples(index=False):
+        if clean_text(row.email):
+            email_candidates[clean_text(row.email).lower()].add(clean_text(row.student_id))
+        if clean_text(row.first_name) or clean_text(row.last_name):
+            name_candidates[person_name_key(row.first_name, row.last_name)].add(clean_text(row.student_id))
+
+    email_map: Dict[str, str] = {}
+    name_map: Dict[Tuple[str, str], str] = {}
+    for email, ids in email_candidates.items():
+        if len(ids) == 1:
+            email_map[email] = next(iter(ids))
+        else:
+            exceptions.append({"exception_type": "ambiguous_email_match", "source_file": "", "student_id": "", "term_code": "", "details": f"Email {email} matched multiple student IDs: {', '.join(sorted(ids))}"})
+    for key, ids in name_candidates.items():
+        if len(ids) == 1:
+            name_map[key] = next(iter(ids))
+        else:
+            exceptions.append({"exception_type": "ambiguous_name_match", "source_file": "", "student_id": "", "term_code": "", "details": f"Name {key[0]} {key[1]} matched multiple student IDs: {', '.join(sorted(ids))}"})
+
+    return email_map, name_map, pd.DataFrame(exceptions)
+
+
+def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map: Dict[Tuple[str, str], str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    result = frame.copy()
+    exceptions: List[dict] = []
+
+    for idx, row in result.iterrows():
+        current_id = clean_text(row.get("student_id", ""))
+        if current_id:
+            continue
+        email = normalize_email(row.get("email", ""))
+        first_name = clean_text(row.get("first_name", ""))
+        last_name = clean_text(row.get("last_name", ""))
+        matched_id = ""
+        basis = ""
+        notes = ""
+        if email and email in email_map:
+            matched_id = email_map[email]
+            basis = "unique_email_match"
+            notes = "Resolved from unique email match."
+        elif (first_name or last_name) and person_name_key(first_name, last_name) in name_map:
+            matched_id = name_map[person_name_key(first_name, last_name)]
+            basis = "unique_name_match"
+            notes = "Resolved from unique exact name match."
+        else:
+            exceptions.append(
+                {
+                    "exception_type": f"{source_label}_missing_student_id",
+                    "source_file": clean_text(row.get("source_file", "")),
+                    "student_id": "",
+                    "term_code": clean_text(row.get("term_code", "")),
+                    "details": f"{first_name} {last_name}".strip() or email or "Unidentified row",
+                }
+            )
+            continue
+
+        result.at[idx, "student_id"] = matched_id
+        result.at[idx, "identity_resolution_basis"] = basis
+        result.at[idx, "identity_resolution_notes"] = notes
+
+    return result, pd.DataFrame(exceptions)
+
+
+def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if frame.empty:
+        return frame, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    ranked = frame.copy()
+    ranked["_completeness"] = ranked.notna().sum(axis=1)
+    ranked["_update_key"] = ranked["source_file"].map(update_key_from_name) if "source_file" in ranked.columns else [(0, 0, 0)] * len(ranked)
+    ranked = ranked.sort_values(by=list(unique_keys) + ["_completeness", "_update_key"], ascending=[True] * len(unique_keys) + [False, False])
+    duplicate_mask = ranked.duplicated(subset=list(unique_keys), keep="first")
+    exceptions = ranked.loc[duplicate_mask].copy()
+    deduped = ranked.drop_duplicates(subset=list(unique_keys), keep="first").drop(columns=["_completeness", "_update_key"])
+    if exceptions.empty:
+        return deduped.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    exception_rows = []
+    for row in exceptions.itertuples(index=False):
+        exception_rows.append(
+            {
+                "exception_type": f"{source_label}_duplicate_removed",
+                "source_file": clean_text(getattr(row, "source_file", "")),
+                "student_id": clean_text(getattr(row, "student_id", "")),
+                "term_code": clean_text(getattr(row, "term_code", "")),
+                "details": f"Duplicate row removed for keys {', '.join(str(getattr(row, key, '')) for key in unique_keys)}",
+            }
+        )
+    return deduped.reset_index(drop=True), pd.DataFrame(exception_rows)
+
+
+def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if roster.empty:
+        return roster, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    exceptions: List[dict] = []
+    resolved_rows: List[pd.Series] = []
+    for (_, _), group in roster.groupby(["student_id", "term_code"], dropna=False):
+        chapter_values = sorted({clean_text(value) for value in group["chapter"] if clean_text(value)})
+        status_values = sorted({clean_text(value) for value in group["org_status_bucket"] if clean_text(value)})
+        if len(chapter_values) > 1:
+            exceptions.append(
+                {
+                    "exception_type": "chapter_conflict_same_term",
+                    "source_file": " | ".join(sorted({clean_text(value) for value in group["source_file"] if clean_text(value)})),
+                    "student_id": clean_text(group["student_id"].iloc[0]),
+                    "term_code": clean_text(group["term_code"].iloc[0]),
+                    "details": "Multiple chapters in same term: " + ", ".join(chapter_values),
+                }
+            )
+        if len(status_values) > 1:
+            exceptions.append(
+                {
+                    "exception_type": "roster_status_conflict_same_term",
+                    "source_file": " | ".join(sorted({clean_text(value) for value in group["source_file"] if clean_text(value)})),
+                    "student_id": clean_text(group["student_id"].iloc[0]),
+                    "term_code": clean_text(group["term_code"].iloc[0]),
+                    "details": "Multiple roster statuses in same term: " + ", ".join(status_values),
+                }
+            )
+        ranked = group.copy()
+        ranked["_new_member"] = ranked["new_member_flag"].eq("Yes").astype(int)
+        ranked["_known_id"] = ranked["student_id"].fillna("").astype(str).str.strip().ne("").astype(int)
+        ranked["_status_priority"] = ranked["org_status_bucket"].map(
+            {
+                "Graduated": 90,
+                "Suspended": 80,
+                "Transfer": 70,
+                "Revoked": 65,
+                "Resigned": 60,
+                "Inactive": 55,
+                "New Member": 54,
+                "Active": 50,
+            }
+        ).fillna(0)
+        ranked = ranked.sort_values(by=["_status_priority", "_new_member", "_known_id"], ascending=[False, False, False])
+        resolved_rows.append(ranked.iloc[0].drop(labels=["_new_member", "_known_id", "_status_priority"]))
+    resolved = pd.DataFrame(resolved_rows).reset_index(drop=True)
+    return resolved, pd.DataFrame(exceptions)
+
+
+def attach_org_entry_terms(roster: pd.DataFrame) -> pd.DataFrame:
+    if roster.empty:
+        return roster
+    result = roster.copy()
+    result["_term_sort"] = result["term_code"].map(sort_term_code)
+    for student_id, group in result.groupby("student_id", dropna=False):
+        if not clean_text(student_id):
+            continue
+        explicit = group.loc[group["new_member_flag"].eq("Yes")].sort_values("_term_sort")
+        if not explicit.empty:
+            entry_code = clean_text(explicit.iloc[0]["term_code"])
+            basis = "Explicit New Member"
+        else:
+            ordered = group.sort_values("_term_sort")
+            entry_code = clean_text(ordered.iloc[0]["term_code"])
+            basis = "First Observed Roster"
+        result.loc[group.index, "org_entry_term_code"] = entry_code
+        result.loc[group.index, "org_entry_term_basis"] = basis
+    return result.drop(columns=["_term_sort"])
+
+
+def build_master_longitudinal(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.DataFrame:
+    keys = sorted(
+        set(
+            list(roster[["student_id", "term_code"]].itertuples(index=False, name=None))
+            + list(academic[["student_id", "term_code"]].itertuples(index=False, name=None))
+        )
+    )
+    rows: List[dict] = []
+    roster_lookup = {(clean_text(row.student_id), clean_text(row.term_code)): row for row in roster.itertuples(index=False)}
+    academic_lookup = {(clean_text(row.student_id), clean_text(row.term_code)): row for row in academic.itertuples(index=False)}
+
+    for student_id, term_code in keys:
+        if not student_id or not term_code:
+            continue
+        roster_row = roster_lookup.get((student_id, term_code))
+        academic_row = academic_lookup.get((student_id, term_code))
+        source_first = roster_row or academic_row
+        join_term_code = clean_text(getattr(roster_row, "org_entry_term_code", "")) if roster_row else ""
+        join_term = term_label_from_code(join_term_code)
+        rows.append(
+            {
+                "student_id": student_id,
+                "first_name": clean_text(getattr(source_first, "first_name", "")),
+                "last_name": clean_text(getattr(source_first, "last_name", "")),
+                "email": normalize_email(getattr(source_first, "email", "")),
+                "term_code": term_code,
+                "term_label": term_label_from_code(term_code),
+                "observed_year": parse_term_code(term_code)[2],
+                "observed_term_sort": sort_term_code(term_code),
+                "join_term_code": join_term_code,
+                "join_term": join_term,
+                "join_year": parse_term_code(join_term_code)[2] if join_term_code else pd.NA,
+                "relative_term_index": pd.NA,
+                "roster_present": "Yes" if roster_row is not None else "No",
+                "academic_present": "Yes" if academic_row is not None else "No",
+                "chapter": clean_text(getattr(roster_row, "chapter", "")),
+                "chapter_raw": clean_text(getattr(roster_row, "chapter_raw", "")),
+                "org_status_raw": clean_text(getattr(roster_row, "org_status_raw", "")),
+                "org_status_bucket": clean_text(getattr(roster_row, "org_status_bucket", "")),
+                "org_position_raw": clean_text(getattr(roster_row, "org_position_raw", "")),
+                "new_member_flag": clean_text(getattr(roster_row, "new_member_flag", "")),
+                "major": clean_text(getattr(academic_row, "major", "")),
+                "term_gpa": getattr(academic_row, "term_gpa", pd.NA),
+                "institutional_cumulative_gpa": getattr(academic_row, "institutional_cumulative_gpa", pd.NA),
+                "overall_cumulative_gpa": getattr(academic_row, "overall_cumulative_gpa", pd.NA),
+                "cumulative_gpa": getattr(academic_row, "overall_cumulative_gpa", pd.NA),
+                "attempted_hours_term": getattr(academic_row, "attempted_hours_term", pd.NA),
+                "earned_hours_term": getattr(academic_row, "earned_hours_term", pd.NA),
+                "institutional_cumulative_hours": getattr(academic_row, "institutional_cumulative_hours", pd.NA),
+                "total_cumulative_hours": getattr(academic_row, "total_cumulative_hours", pd.NA),
+                "academic_status_raw": clean_text(getattr(academic_row, "academic_status_raw", "")),
+                "academic_standing_raw": clean_text(getattr(academic_row, "academic_standing_raw", "")),
+                "academic_standing_bucket": clean_text(getattr(academic_row, "academic_standing_bucket", "")),
+                "final_outcome_bucket": "",
+                "exit_reason_code": "",
+                "graduation_term_code": clean_text(getattr(academic_row, "graduation_term_code", "")),
+                "resolved_outcome_flag": "",
+                "outcome_evidence_source": "",
+                "school_entry_term_code": "",
+                "school_entry_term_basis": "",
+                "org_entry_term_basis": clean_text(getattr(roster_row, "org_entry_term_basis", "")),
+            }
+        )
+
+    master = pd.DataFrame(rows)
+    if master.empty:
+        return pd.DataFrame(columns=load_schema()["tables"]["master_longitudinal"])
+
+    master["cumulative_gpa"] = coerce_numeric(master["cumulative_gpa"]).where(
+        coerce_numeric(master["cumulative_gpa"]).notna(),
+        coerce_numeric(master["institutional_cumulative_gpa"]),
+    )
+
+    for student_id, group in master.groupby("student_id", dropna=False):
+        ordered = group.sort_values("observed_term_sort")
+        join_sort = sort_term_code(clean_text(ordered["join_term_code"].iloc[0])) if clean_text(ordered["join_term_code"].iloc[0]) else None
+        school_entry_code = ""
+        school_entry_basis = ""
+        for index in ordered.index:
+            term_sort = int(ordered.loc[index, "observed_term_sort"])
+            relative = pd.NA
+            if join_sort is not None and join_sort < 999999:
+                relative = len([value for value in ordered["observed_term_sort"] if value <= term_sort and value >= join_sort]) - 1
+            master.at[index, "relative_term_index"] = relative
+            master.at[index, "school_entry_term_code"] = school_entry_code
+            master.at[index, "school_entry_term_basis"] = school_entry_basis
+
+    return ensure_columns(master, load_schema()["tables"]["master_longitudinal"])
+
+
+def attach_snapshot_fields(summary: pd.DataFrame, snapshot: pd.DataFrame, longitudinal: pd.DataFrame) -> pd.DataFrame:
+    result = summary.copy()
+    if snapshot.empty:
+        result["snapshot_matched"] = "No"
+        result["current_total_hours"] = pd.NA
+        result["estimated_pre_org_hours_txst"] = pd.NA
+        result["estimated_pre_org_stage_txst"] = "Unknown"
+        return result
+
+    snap = snapshot.copy()
+    snap["Student ID"] = snap["Student ID"].map(normalize_banner_id)
+    snap = snap.drop_duplicates(subset=["Student ID"], keep="first")
+    snap = snap.rename(
+        columns={
+            "Student ID": "student_id",
+            "Total Credit Hours": "snapshot_total_hours",
+            "TXST Credit Hours": "snapshot_txst_hours",
+            "Overall GPA": "snapshot_overall_gpa",
+            "Institutional GPA": "snapshot_institutional_gpa",
+            "Student Status": "snapshot_student_status",
+            "Student Status (FT/PT)": "snapshot_student_status_ftpt",
+        }
+    )
+    result = result.merge(
+        snap[
+            [
+                "student_id",
+                "snapshot_total_hours",
+                "snapshot_txst_hours",
+                "snapshot_overall_gpa",
+                "snapshot_institutional_gpa",
+                "snapshot_student_status",
+                "snapshot_student_status_ftpt",
+            ]
+        ],
+        on="student_id",
+        how="left",
+    )
+    observed_hours = (
+        longitudinal.groupby("student_id", dropna=False)["earned_hours_term"]
+        .sum(min_count=1)
+        .rename("observed_earned_hours_since_org")
+        .reset_index()
+    )
+    result = result.merge(observed_hours, on="student_id", how="left")
+    result["snapshot_matched"] = result["snapshot_total_hours"].notna().map(lambda flag: "Yes" if flag else "No")
+    result["current_total_hours"] = result["snapshot_total_hours"].where(result["snapshot_total_hours"].notna(), result["total_cumulative_hours"])
+    result["estimated_pre_org_hours_txst"] = (coerce_numeric(result["snapshot_txst_hours"]) - coerce_numeric(result["observed_earned_hours_since_org"])).clip(lower=0)
+    result["estimated_pre_org_stage_txst"] = result["estimated_pre_org_hours_txst"].map(bucket_30_hours)
+    result["average_cumulative_gpa"] = result["average_cumulative_gpa"].where(
+        result["average_cumulative_gpa"].notna(),
+        coerce_numeric(result["snapshot_overall_gpa"]).where(
+            coerce_numeric(result["snapshot_overall_gpa"]).notna(),
+            coerce_numeric(result["snapshot_institutional_gpa"]),
+        ),
+    )
+    result["latest_snapshot_student_status"] = result["snapshot_student_status"].fillna("").astype(str)
+    return result
+
+
+def build_graduation_maps(graduation: pd.DataFrame) -> Tuple[Dict[str, Tuple[str, str]], Dict[Tuple[str, str], Tuple[str, str]]]:
+    id_map: Dict[str, Tuple[str, str]] = {}
+    name_map: Dict[Tuple[str, str], Tuple[str, str]] = {}
+    if graduation.empty:
+        return id_map, name_map
+
+    ranked = graduation.copy()
+    ranked["_term_sort"] = ranked["Graduation Term"].map(lambda value: sort_term_code(parse_term_code(value)[0]))
+    ranked = ranked.sort_values(by=["_term_sort", "Graduation Source File"], ascending=[True, True])
+
+    for row in ranked.itertuples(index=False):
+        student_id = normalize_banner_id(getattr(row, "Student ID", ""))
+        first_name = clean_text(getattr(row, "First Name", ""))
+        last_name = clean_text(getattr(row, "Last Name", ""))
+        grad_term_code = parse_term_code(getattr(row, "Graduation Term", ""))[0]
+        source = clean_text(getattr(row, "Graduation Source File", "")) or "Graduation List"
+        if student_id and student_id not in id_map:
+            id_map[student_id] = (grad_term_code, source)
+        name_key = person_name_key(first_name, last_name)
+        if (first_name or last_name) and name_key not in name_map:
+            name_map[name_key] = (grad_term_code, source)
+
+    return id_map, name_map
+
+
+def explicit_exit_reason(latest_outcome_bucket: str, latest_status_bucket: str) -> str:
+    outcome = clean_text(latest_outcome_bucket)
+    status = clean_text(latest_status_bucket)
+    if outcome == "Dropped/Resigned/Revoked/Inactive":
+        for candidate in ["Revoked", "Resigned", "Inactive"]:
+            if candidate == status:
+                return candidate
+        return "Dropped/Resigned/Revoked/Inactive"
+    if outcome in {"Graduated", "Suspended", "Transfer"}:
+        return outcome
+    return ""
+
+
+def build_student_summary(
+    master: pd.DataFrame,
+    snapshot: pd.DataFrame,
+    graduation: pd.DataFrame,
+    settings: dict[str, object],
+    chapter_mapping: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if master.empty:
+        empty = pd.DataFrame(columns=load_schema()["tables"]["student_summary"])
+        return empty, pd.DataFrame(columns=QA_COLUMNS), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+
+    summary_rows: List[dict] = []
+    qa_rows: List[dict] = []
+    outcome_exceptions: List[dict] = []
+    max_term_sort = int(master["observed_term_sort"].dropna().max()) if master["observed_term_sort"].dropna().shape[0] else 0
+    graduation_by_id, graduation_by_name = build_graduation_maps(graduation)
+
+    for student_id, group in master.groupby("student_id", dropna=False):
+        ordered = group.sort_values("observed_term_sort")
+        roster_rows = ordered.loc[ordered["roster_present"].eq("Yes")]
+        academic_rows = ordered.loc[ordered["academic_present"].eq("Yes")]
+        first_row = ordered.iloc[0]
+        join_term_code = clean_text(first_row["join_term_code"])
+        join_term = term_label_from_code(join_term_code)
+        join_year = parse_term_code(join_term_code)[2] if join_term_code else pd.NA
+
+        explicit_grad_term = ""
+        evidence_source = ""
+        if student_id in graduation_by_id:
+            explicit_grad_term, evidence_source = graduation_by_id[student_id]
+        else:
+            name_key = person_name_key(first_row["first_name"], first_row["last_name"])
+            if name_key in graduation_by_name:
+                explicit_grad_term, evidence_source = graduation_by_name[name_key]
+        if not explicit_grad_term and (academic_rows["graduation_term_code"].fillna("").astype(str).str.strip().ne("")).any():
+            explicit_grad_term = clean_text(
+                academic_rows.loc[
+                    academic_rows["graduation_term_code"].fillna("").astype(str).str.strip().ne(""),
+                    "graduation_term_code",
+                ].iloc[0]
+            )
+            evidence_source = evidence_source or "Academic graduation term"
+        if not explicit_grad_term and (academic_rows["academic_status_raw"].fillna("").str.contains("graduat", case=False, na=False)).any():
+            explicit_grad_term = clean_text(academic_rows.loc[academic_rows["academic_status_raw"].fillna("").str.contains("graduat", case=False, na=False), "term_code"].iloc[0])
+            evidence_source = evidence_source or "Academic status"
+        elif not explicit_grad_term and (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
+            explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
+            evidence_source = evidence_source or "Roster status"
+
+        latest_status_bucket = clean_text(roster_rows["org_status_bucket"].iloc[-1]) if not roster_rows.empty else "Unknown"
+        latest_outcome_bucket, derived_evidence_source = outcome_bucket_from_signals(
+            " ".join(roster_rows["org_status_bucket"].fillna("").astype(str).tolist()),
+            " ".join(academic_rows["academic_status_raw"].fillna("").astype(str).tolist()),
+            " ".join(snapshot.loc[snapshot["Student ID"].map(normalize_banner_id).eq(student_id), "Student Status"].fillna("").astype(str).tolist()) if not snapshot.empty else "",
+        )
+        evidence_source = evidence_source or derived_evidence_source
+        if explicit_grad_term:
+            latest_outcome_bucket = "Graduated"
+            evidence_source = evidence_source or "Graduation List"
+        if latest_outcome_bucket == "No Further Observation":
+            outcome_exceptions.append(
+                {
+                    "exception_type": "unresolved_outcome",
+                    "source_file": "",
+                    "student_id": student_id,
+                    "term_code": clean_text(ordered["term_code"].iloc[-1]),
+                    "details": "No explicit outcome evidence; student remains unresolved.",
+                }
+            )
+
+        entry_row = None
+        if join_term_code and not academic_rows.empty:
+            entry_candidates = academic_rows.loc[academic_rows["term_code"].eq(join_term_code)]
+            if not entry_candidates.empty:
+                entry_row = entry_candidates.iloc[0]
+
+        first_ac_term = clean_text(academic_rows["term_code"].iloc[0]) if not academic_rows.empty else ""
+        last_ac_term = clean_text(academic_rows["term_code"].iloc[-1]) if not academic_rows.empty else ""
+        first_org_term = clean_text(roster_rows["term_code"].iloc[0]) if not roster_rows.empty else ""
+        last_org_term = clean_text(roster_rows["term_code"].iloc[-1]) if not roster_rows.empty else ""
+        gpa_values = coerce_numeric(academic_rows["term_gpa"]).dropna()
+        first_term_gpa = gpa_values.iloc[0] if gpa_values.shape[0] else pd.NA
+        second_term_gpa = gpa_values.iloc[1] if gpa_values.shape[0] > 1 else pd.NA
+        first_year_window = academic_rows.loc[academic_rows["relative_term_index"].fillna(-1).astype(float).between(0, 2, inclusive="both")]
+        first_year_avg_gpa = coerce_numeric(first_year_window["term_gpa"]).mean() if not first_year_window.empty else pd.NA
+        latest_overall_cum = coerce_numeric(academic_rows["overall_cumulative_gpa"]).dropna().iloc[-1] if coerce_numeric(academic_rows["overall_cumulative_gpa"]).dropna().shape[0] else pd.NA
+        latest_txstate_cum = coerce_numeric(academic_rows["institutional_cumulative_gpa"]).dropna().iloc[-1] if coerce_numeric(academic_rows["institutional_cumulative_gpa"]).dropna().shape[0] else pd.NA
+        latest_cumulative_hours = coerce_numeric(academic_rows["total_cumulative_hours"]).dropna().iloc[-1] if coerce_numeric(academic_rows["total_cumulative_hours"]).dropna().shape[0] else pd.NA
+        entry_hours = coerce_numeric(pd.Series([entry_row["institutional_cumulative_hours"] if entry_row is not None else pd.NA])).iloc[0]
+        first_passed = coerce_numeric(first_year_window["earned_hours_term"]).dropna().iloc[0] if coerce_numeric(first_year_window["earned_hours_term"]).dropna().shape[0] else pd.NA
+        first_year_passed = coerce_numeric(first_year_window["earned_hours_term"]).sum(min_count=1) if not first_year_window.empty else pd.NA
+
+        join_sort = sort_term_code(join_term_code) if join_term_code else None
+        next_term_sort = None
+        next_fall_sort = None
+        one_year_sort = None
+        if join_sort is not None and join_sort < 999999:
+            join_year_value = int(join_term_code[:4])
+            join_season_code = join_term_code[-2:]
+            if join_season_code == "FA":
+                next_term_sort = (join_year_value + 1) * 10 + SEASON_ORDER["SP"]
+            elif join_season_code == "SP":
+                next_term_sort = join_year_value * 10 + SEASON_ORDER["SU"]
+            elif join_season_code == "SU":
+                next_term_sort = join_year_value * 10 + SEASON_ORDER["FA"]
+            elif join_season_code == "WI":
+                next_term_sort = join_year_value * 10 + SEASON_ORDER["SP"]
+            next_fall_sort = (join_year_value + (1 if join_season_code == "FA" else 0)) * 10 + SEASON_ORDER["FA"]
+            one_year_sort = (join_year_value + 1) * 10 + SEASON_ORDER.get(join_season_code, 9)
+
+        def has_term(frame: pd.DataFrame, target_sort: Optional[int]) -> str:
+            if target_sort is None or target_sort > max_term_sort:
+                return ""
+            return "Yes" if frame["term_code"].map(sort_term_code).eq(target_sort).any() else "No"
+
+        def measurable_for_years(years: int) -> str:
+            if not join_term_code:
+                return ""
+            target_sort = sort_term_code(f"{int(join_term_code[:4]) + years}{join_term_code[-2:]}")
+            return "Yes" if max_term_sort >= target_sort else "No"
+
+        graduated_eventual = "Yes" if latest_outcome_bucket == "Graduated" else "No"
+        graduated_eventual_measurable = "Yes" if join_term_code else "No"
+        graduated_4yr_measurable = measurable_for_years(4)
+        graduated_6yr_measurable = measurable_for_years(6)
+        grad_4_target = sort_term_code(f"{int(join_term_code[:4]) + 4}{join_term_code[-2:]}") if join_term_code else 999999
+        grad_6_target = sort_term_code(f"{int(join_term_code[:4]) + 6}{join_term_code[-2:]}") if join_term_code else 999999
+        graduated_4yr = "Yes" if latest_outcome_bucket == "Graduated" and graduated_4yr_measurable == "Yes" and explicit_grad_term and sort_term_code(explicit_grad_term) <= grad_4_target else "No" if graduated_4yr_measurable == "Yes" else ""
+        graduated_6yr = "Yes" if latest_outcome_bucket == "Graduated" and graduated_6yr_measurable == "Yes" and explicit_grad_term and sort_term_code(explicit_grad_term) <= grad_6_target else "No" if graduated_6yr_measurable == "Yes" else ""
+
+        first_standing = clean_text(academic_rows["academic_standing_bucket"].iloc[0]) if not academic_rows.empty else "Unknown"
+        latest_standing = clean_text(academic_rows["academic_standing_bucket"].iloc[-1]) if not academic_rows.empty else "Unknown"
+
+        summary_rows.append(
+            {
+                "student_id": student_id,
+                "student_name": f"{clean_text(first_row['first_name'])} {clean_text(first_row['last_name'])}".strip(),
+                "chapter": clean_text(roster_rows["chapter"].iloc[0]) if not roster_rows.empty else "",
+                "initial_chapter": clean_text(roster_rows["chapter"].iloc[0]) if not roster_rows.empty else "",
+                "latest_chapter": clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else "",
+                "join_term_code": join_term_code,
+                "join_term": join_term,
+                "join_year": join_year,
+                "org_entry_cohort": join_term,
+                "org_entry_term_basis": clean_text(roster_rows["org_entry_term_basis"].iloc[0]) if not roster_rows.empty else "",
+                "school_entry_term_code": clean_text(first_row["school_entry_term_code"]),
+                "school_entry_term": term_label_from_code(first_row["school_entry_term_code"]),
+                "school_entry_term_basis": clean_text(first_row["school_entry_term_basis"]),
+                "first_observed_org_term_code": first_org_term,
+                "first_observed_org_term": term_label_from_code(first_org_term),
+                "last_observed_org_term_code": last_org_term,
+                "last_observed_org_term": term_label_from_code(last_org_term),
+                "first_observed_academic_term_code": first_ac_term,
+                "first_observed_academic_term": term_label_from_code(first_ac_term),
+                "last_observed_academic_term_code": last_ac_term,
+                "last_observed_academic_term": term_label_from_code(last_ac_term),
+                "latest_outcome_bucket": latest_outcome_bucket,
+                "exit_reason_code": explicit_exit_reason(latest_outcome_bucket, latest_status_bucket),
+                "graduation_term_code": explicit_grad_term,
+                "resolved_outcome_flag": "Yes" if latest_outcome_bucket not in UNRESOLVED_OUTCOMES else "No",
+                "resolved_outcome_excluded_flag": "Yes" if latest_outcome_bucket in UNRESOLVED_OUTCOMES else "No",
+                "resolved_outcome_exclusion_reason": latest_outcome_bucket if latest_outcome_bucket in UNRESOLVED_OUTCOMES else "",
+                "outcome_evidence_source": evidence_source,
+                "latest_roster_status_bucket": latest_status_bucket or "Unknown",
+                "initial_roster_status_bucket": clean_text(roster_rows["org_status_bucket"].iloc[0]) if not roster_rows.empty else "Unknown",
+                "active_flag": "Yes" if latest_status_bucket in {"Active", "New Member"} else "No",
+                "major": clean_text(academic_rows["major"].iloc[-1]) if not academic_rows.empty else "",
+                "pell_flag": "",
+                "transfer_flag": "Yes" if latest_outcome_bucket == "Transfer" else "No" if latest_outcome_bucket else "",
+                "graduation_term": term_label_from_code(explicit_grad_term),
+                "graduation_year": parse_term_code(explicit_grad_term)[2] if explicit_grad_term else pd.NA,
+                "entry_cumulative_hours": entry_hours,
+                "entry_hours_bucket": bucket_30_hours(entry_hours),
+                "estimated_pre_org_hours_txst": pd.NA,
+                "estimated_pre_org_stage_txst": "Unknown",
+                "current_total_hours": latest_cumulative_hours,
+                "total_cumulative_hours": latest_cumulative_hours,
+                "first_term_gpa": first_term_gpa,
+                "second_term_gpa": second_term_gpa,
+                "first_year_avg_term_gpa": first_year_avg_gpa,
+                "average_term_gpa": first_year_avg_gpa if not pd.isna(first_year_avg_gpa) else coerce_numeric(academic_rows["term_gpa"]).mean(),
+                "gpa_change": (second_term_gpa - first_term_gpa) if not pd.isna(first_term_gpa) and not pd.isna(second_term_gpa) else pd.NA,
+                "latest_overall_cumulative_gpa": latest_overall_cum,
+                "latest_txstate_cumulative_gpa": latest_txstate_cum,
+                "average_cumulative_gpa": latest_overall_cum if not pd.isna(latest_overall_cum) else latest_txstate_cum,
+                "first_term_passed_hours": first_passed,
+                "first_year_passed_hours": first_year_passed,
+                "graduated_eventual": graduated_eventual,
+                "graduated_eventual_measurable": graduated_eventual_measurable,
+                "graduated_4yr": graduated_4yr,
+                "graduated_4yr_measurable": graduated_4yr_measurable,
+                "graduated_6yr": graduated_6yr,
+                "graduated_6yr_measurable": graduated_6yr_measurable,
+                "retained_next_term": has_term(roster_rows, next_term_sort),
+                "retained_next_term_measurable": "Yes" if next_term_sort and next_term_sort <= max_term_sort else "",
+                "retained_next_fall": has_term(roster_rows, next_fall_sort),
+                "retained_next_fall_measurable": "Yes" if next_fall_sort and next_fall_sort <= max_term_sort else "",
+                "retained_one_year": has_term(roster_rows, one_year_sort),
+                "retained_one_year_measurable": "Yes" if one_year_sort and one_year_sort <= max_term_sort else "",
+                "continued_next_term": has_term(academic_rows, next_term_sort),
+                "continued_next_term_measurable": "Yes" if next_term_sort and next_term_sort <= max_term_sort else "",
+                "continued_next_fall": has_term(academic_rows, next_fall_sort),
+                "continued_next_fall_measurable": "Yes" if next_fall_sort and next_fall_sort <= max_term_sort else "",
+                "continued_one_year": has_term(academic_rows, one_year_sort),
+                "continued_one_year_measurable": "Yes" if one_year_sort and one_year_sort <= max_term_sort else "",
+                "low_gpa_2_0_flag": "Yes" if not pd.isna(first_term_gpa) and float(first_term_gpa) < 2.0 else "No" if not pd.isna(first_term_gpa) else "",
+                "low_gpa_2_5_flag": "Yes" if not pd.isna(first_term_gpa) and float(first_term_gpa) < 2.5 else "No" if not pd.isna(first_term_gpa) else "",
+                "first_year_low_gpa_2_0_flag": "Yes" if not pd.isna(first_year_avg_gpa) and float(first_year_avg_gpa) < 2.0 else "No" if not pd.isna(first_year_avg_gpa) else "",
+                "first_year_low_gpa_2_5_flag": "Yes" if not pd.isna(first_year_avg_gpa) and float(first_year_avg_gpa) < 2.5 else "No" if not pd.isna(first_year_avg_gpa) else "",
+                "good_standing_first_term": "Yes" if first_standing == "Good Standing" else "No" if first_standing != "Unknown" else "",
+                "probation_warning_first_year": "Yes" if (first_year_window["academic_standing_bucket"].fillna("").eq("Probation/Warning")).any() else "No" if not first_year_window.empty else "",
+                "academic_standing_suspended_ever": "Yes" if (academic_rows["academic_standing_bucket"].fillna("").eq("Suspended")).any() else "No",
+                "first_academic_standing_bucket": first_standing,
+                "latest_academic_standing_bucket": latest_standing,
+                "snapshot_matched": "No",
+                "source_logic": "canonical_pipeline",
+            }
+        )
+
+    summary = pd.DataFrame(summary_rows)
+    summary = attach_snapshot_fields(summary, snapshot, master)
+    summary["chapter"] = summary["initial_chapter"].where(summary["initial_chapter"].fillna("").astype(str).str.strip().ne(""), summary["latest_chapter"])
+    summary["is_fsl_member"] = summary["chapter"].fillna("").astype(str).str.strip().ne("")
+    summary["chapter_size"] = summary.groupby("chapter", dropna=False)["student_id"].transform("nunique")
+
+    def chapter_band(value: object) -> str:
+        if pd.isna(value):
+            return "Unknown"
+        number = float(value)
+        for band in settings.get("chapter_size_bands", []):
+            lower = float(band.get("min", 0))
+            upper = band.get("max")
+            if number >= lower and (upper is None or number <= float(upper)):
+                return str(band["label"])
+        return "Unknown"
+
+    summary["chapter_size_band"] = summary["chapter_size"].map(chapter_band)
+    summary["high_hours_flag"] = coerce_numeric(summary["total_cumulative_hours"]).ge(settings.get("high_hours_threshold", 60))
+    summary["high_hours_group"] = summary["high_hours_flag"].map(lambda value: "High Hours" if value else "Lower Hours" if value is not pd.NA and not pd.isna(value) else "Unknown")
+    summary["active_membership_group"] = summary["active_flag"].map(lambda value: "Active" if value == "Yes" else "Inactive/Other" if value == "No" else "Unknown")
+    summary["pell_group"] = summary["pell_flag"].map(lambda value: "Pell" if value == "Yes" else "Non-Pell" if value == "No" else "Unknown")
+    summary["transfer_group"] = summary["transfer_flag"].map(lambda value: "Transfer" if value == "Yes" else "Non-Transfer" if value == "No" else "Unknown")
+    summary["snapshot_group"] = summary["snapshot_matched"].map(lambda value: "Snapshot Matched" if value == "Yes" else "No Snapshot Match" if value == "No" else "Unknown")
+    summary["status_group"] = summary["latest_outcome_bucket"].replace("", "Unknown")
+    summary["major_group"] = summary["major"].replace("", "Unknown")
+
+    if not chapter_mapping.empty:
+        mapping = chapter_mapping.copy()
+        mapping["_chapter_key"] = mapping["chapter"].fillna("").astype(str).str.strip().str.lower()
+        summary["_chapter_key"] = summary["chapter"].fillna("").astype(str).str.strip().str.lower()
+        summary = summary.merge(mapping[["_chapter_key", "chapter_group", "council", "org_type", "family", "custom_group"]], on="_chapter_key", how="left")
+        summary = summary.drop(columns=["_chapter_key"])
+    for column, default in {
+        "chapter_group": "Unassigned",
+        "council": "Unknown",
+        "org_type": "Unknown",
+        "family": "Unknown",
+        "custom_group": "Unassigned",
+    }.items():
+        if column not in summary.columns:
+            summary[column] = default
+        summary[column] = summary[column].fillna("").astype(str).replace("", default)
+
+    resolution_fields = build_outcome_resolution_fields(summary, settings.get("outcome_resolution", {}))
+    for column in resolution_fields.columns:
+        summary[column] = resolution_fields[column]
+
+    completeness_fields = [field for field in settings.get("completeness_fields", []) if field in summary.columns]
+    if completeness_fields:
+        present = summary[completeness_fields].notna() & summary[completeness_fields].astype(str).ne("")
+        summary["data_completeness_rate"] = present.sum(axis=1) / len(completeness_fields)
+    else:
+        summary["data_completeness_rate"] = pd.NA
+
+    qa_rows.extend(
+        [
+            {"Check Group": "Coverage", "Check": "Unique students", "Status": "Pass", "Value": int(summary["student_id"].nunique()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcomes_only_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Unresolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcome_excluded_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+        ]
+    )
+
+    summary_columns = load_schema()["tables"]["student_summary"] + [
+        "is_fsl_member",
+        "chapter_size",
+        "chapter_size_band",
+        "high_hours_flag",
+        "high_hours_group",
+        "active_membership_group",
+        "pell_group",
+        "transfer_group",
+        "snapshot_group",
+        "status_group",
+        "major_group",
+        "chapter_group",
+        "council",
+        "org_type",
+        "family",
+        "custom_group",
+        "outcome_resolution_group",
+        "resolved_outcomes_only_flag",
+        "data_completeness_rate",
+        "latest_snapshot_student_status",
+    ]
+    return ensure_columns(summary, summary_columns), pd.DataFrame(qa_rows), pd.DataFrame(outcome_exceptions)
+
+
+def build_cohort_metrics(summary: pd.DataFrame) -> pd.DataFrame:
+    rows: List[dict] = []
+    if summary.empty:
+        return pd.DataFrame(columns=load_schema()["tables"]["cohort_metrics"])
+
+    cohorts = ["Overall"] + sorted(value for value in summary["org_entry_cohort"].fillna("").astype(str).unique().tolist() if value)
+    for cohort in cohorts:
+        frame = summary if cohort == "Overall" else summary.loc[summary["org_entry_cohort"].eq(cohort)].copy()
+        if frame.empty:
+            continue
+
+        def rate_row(label: str, numerator_col: str, denominator_col: str, group: str, notes: str = "") -> None:
+            eligible = int(frame[denominator_col].fillna("").astype(str).eq("Yes").sum())
+            numerator = int((frame[numerator_col].fillna("").astype(str).eq("Yes") & frame[denominator_col].fillna("").astype(str).eq("Yes")).sum())
+            rows.append(metric_row(group, label, cohort, eligible, numerator=numerator, rate=(numerator / eligible) if eligible else None, notes=notes))
+
+        def mean_row(label: str, value_col: str, group: str) -> None:
+            values = coerce_numeric(frame[value_col]).dropna()
+            rows.append(metric_row(group, label, cohort, int(values.shape[0]), average=float(values.mean()) if not values.empty else None))
+
+        rows.append(metric_row("Coverage", "Students", cohort, int(frame["student_id"].nunique()), numerator=int(frame["student_id"].nunique()), rate=1.0))
+        rate_row("Observed Eventual Graduation Rate", "graduated_eventual", "graduated_eventual_measurable", "Graduation")
+        rate_row("Observed 4-Year Graduation Rate", "graduated_4yr", "graduated_4yr_measurable", "Graduation")
+        rate_row("Observed 6-Year Graduation Rate", "graduated_6yr", "graduated_6yr_measurable", "Graduation")
+        rate_row("Organization Retention To Next Term", "retained_next_term", "retained_next_term_measurable", "Retention")
+        rate_row("Organization Retention To Next Fall", "retained_next_fall", "retained_next_fall_measurable", "Retention")
+        rate_row("Academic Continuation To Next Fall", "continued_next_fall", "continued_next_fall_measurable", "Retention")
+        mean_row("Average First-Year Term GPA", "first_year_avg_term_gpa", "GPA")
+        mean_row("Average Cumulative GPA", "average_cumulative_gpa", "GPA")
+
+        first_term_hours = coerce_numeric(frame["first_term_passed_hours"]).dropna()
+        rows.append(metric_row("Credit Momentum", "First-Term 15+ Passed Hours Rate", cohort, int(first_term_hours.shape[0]), numerator=int((first_term_hours >= 15).sum()), rate=((first_term_hours >= 15).sum() / first_term_hours.shape[0]) if first_term_hours.shape[0] else None))
+        first_year_hours = coerce_numeric(frame["first_year_passed_hours"]).dropna()
+        rows.append(metric_row("Credit Momentum", "First-Year 30+ Passed Hours Rate", cohort, int(first_year_hours.shape[0]), numerator=int((first_year_hours >= 30).sum()), rate=((first_year_hours >= 30).sum() / first_year_hours.shape[0]) if first_year_hours.shape[0] else None))
+
+    return ensure_columns(pd.DataFrame(rows), load_schema()["tables"]["cohort_metrics"])
+
+
+def build_status_exceptions(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.DataFrame:
+    rows: List[dict] = []
+    valid_roster_buckets = {
+        "Graduated",
+        "Suspended",
+        "Transfer",
+        "Revoked",
+        "Resigned",
+        "Inactive",
+        "New Member",
+        "Active",
+        "Alumni",
+        "Unknown",
+    }
+    if not roster.empty:
+        unmapped_roster = roster.loc[
+            roster["org_status_raw"].fillna("").astype(str).str.strip().ne("")
+            & ~roster["org_status_bucket"].fillna("").astype(str).isin(valid_roster_buckets)
+        ]
+        for row in unmapped_roster.itertuples(index=False):
+            rows.append(
+                {
+                    "exception_type": "unmapped_roster_status",
+                    "source_file": clean_text(getattr(row, "source_file", "")),
+                    "student_id": clean_text(getattr(row, "student_id", "")),
+                    "term_code": clean_text(getattr(row, "term_code", "")),
+                    "details": clean_text(getattr(row, "org_status_raw", "")),
+                }
+            )
+    if not academic.empty:
+        unmapped_standing = academic.loc[
+            academic["academic_standing_raw"].fillna("").astype(str).str.strip().ne("")
+            & academic["academic_standing_bucket"].fillna("").astype(str).eq("Other/Unmapped")
+        ]
+        for row in unmapped_standing.itertuples(index=False):
+            rows.append(
+                {
+                    "exception_type": "unmapped_academic_standing",
+                    "source_file": clean_text(getattr(row, "source_file", "")),
+                    "student_id": clean_text(getattr(row, "student_id", "")),
+                    "term_code": clean_text(getattr(row, "term_code", "")),
+                    "details": clean_text(getattr(row, "academic_standing_raw", "")),
+                }
+            )
+    return pd.DataFrame(rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+
+
+def build_spring_coverage_checks(frame: pd.DataFrame, label: str) -> List[dict]:
+    rows: List[dict] = []
+    if frame.empty or "term_year" not in frame.columns or "term_season" not in frame.columns:
+        return rows
+    years = sorted({int(value) for value in coerce_numeric(frame["term_year"]).dropna().tolist()})
+    for year in years:
+        year_frame = frame.loc[coerce_numeric(frame["term_year"]).eq(year)]
+        spring_count = int(year_frame["term_season"].fillna("").astype(str).str.strip().eq("Spring").sum())
+        rows.append(
+            {
+                "Check Group": "Coverage",
+                "Check": f"{label} spring coverage {year}",
+                "Status": "Pass" if spring_count > 0 else "Review",
+                "Value": spring_count,
+                "Notes": "" if spring_count > 0 else f"No spring {label.lower()} rows found for {year}.",
+            }
+        )
+    return rows
+
+
+def build_measurable_window_checks(summary: pd.DataFrame) -> List[dict]:
+    rows: List[dict] = []
+    if summary.empty:
+        return rows
+    invalid_4yr = summary.loc[
+        summary["graduated_4yr_measurable"].fillna("").astype(str).ne("Yes")
+        & summary["graduated_4yr"].fillna("").astype(str).str.strip().ne("")
+    ]
+    invalid_6yr = summary.loc[
+        summary["graduated_6yr_measurable"].fillna("").astype(str).ne("Yes")
+        & summary["graduated_6yr"].fillna("").astype(str).str.strip().ne("")
+    ]
+    rows.append(
+        {
+            "Check Group": "Windows",
+            "Check": "4-year graduation window enforcement",
+            "Status": "Pass" if invalid_4yr.empty else "Fail",
+            "Value": int(len(invalid_4yr)),
+            "Notes": "" if invalid_4yr.empty else "Non-measurable students have populated 4-year graduation values.",
+        }
+    )
+    rows.append(
+        {
+            "Check Group": "Windows",
+            "Check": "6-year graduation window enforcement",
+            "Status": "Pass" if invalid_6yr.empty else "Fail",
+            "Value": int(len(invalid_6yr)),
+            "Notes": "" if invalid_6yr.empty else "Non-measurable students have populated 6-year graduation values.",
+        }
+    )
+    return rows
+
+
+def build_qa_checks(roster: pd.DataFrame, academic: pd.DataFrame, master: pd.DataFrame, summary: pd.DataFrame, issue_frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows: List[dict] = [
+        {"Check Group": "Schema", "Check": "Authoritative tables built", "Status": "Pass", "Value": 6, "Notes": "roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks"},
+        {"Check Group": "Duplicates", "Check": "Roster duplicate student-term rows", "Status": "Pass" if roster.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(roster.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
+        {"Check Group": "Duplicates", "Check": "Academic duplicate student-term rows", "Status": "Pass" if academic.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(academic.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
+        {"Check Group": "Duplicates", "Check": "Master duplicate student-term rows", "Status": "Pass" if master.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(master.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Students with roster but no academics", "Status": "Pass", "Value": int(summary.loc[summary["first_observed_org_term_code"].ne("") & summary["first_observed_academic_term_code"].eq("")].shape[0]), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Students with academics but no roster", "Status": "Pass", "Value": int(summary.loc[summary["first_observed_org_term_code"].eq("") & summary["first_observed_academic_term_code"].ne("")].shape[0]), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcomes_only_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Unresolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcome_excluded_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+    ]
+    rows.extend(build_spring_coverage_checks(roster, "Roster"))
+    rows.extend(build_spring_coverage_checks(academic, "Academic"))
+    rows.extend(build_measurable_window_checks(summary))
+    for name, frame in issue_frames.items():
+        rows.append(
+            {
+                "Check Group": "Exceptions",
+                "Check": name,
+                "Status": "Pass" if frame.empty else "Review",
+                "Value": int(len(frame)),
+                "Notes": "Manual review required." if not frame.empty else "",
+            }
+        )
+    return ensure_columns(pd.DataFrame(rows), load_schema()["tables"]["qa_checks"])
+
+
+def write_frame(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(path, index=False)
+
+
+def build_canonical_pipeline(
+    roster_root: Path,
+    roster_inbox: Path,
+    academic_root: Path,
+    graduation_root: Path,
+    output_root: Path,
+) -> CanonicalBuildResult:
+    schema = load_schema()
+    settings = load_settings()
+    chapter_mapping = load_chapter_mapping()
+
+    roster_term, roster_load_issues = load_roster_term_table([roster_root, roster_inbox])
+    academic_term, academic_load_issues = load_academic_term_table(academic_root)
+    snapshot = load_snapshot_table(academic_root)
+    graduation, graduation_load_issues = load_graduation_table(graduation_root)
+
+    email_map, name_map, identity_map_issues = build_identity_maps(academic_term, snapshot, graduation)
+    roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
+    academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
+
+    roster_term, roster_dup_issues = dedupe_table(roster_term, ["student_id", "term_code", "chapter"], "roster")
+    academic_term, academic_dup_issues = dedupe_table(academic_term, ["student_id", "term_code"], "academic")
+    roster_term, roster_conflicts = resolve_roster_conflicts(roster_term)
+    roster_term = attach_org_entry_terms(roster_term)
+
+    master_longitudinal = build_master_longitudinal(roster_term, academic_term)
+    student_summary, summary_qa, outcome_issues = build_student_summary(master_longitudinal, snapshot, graduation, settings, chapter_mapping)
+
+    if not student_summary.empty:
+        summary_lookup = student_summary.set_index("student_id")[
+            [
+                "latest_outcome_bucket",
+                "exit_reason_code",
+                "graduation_term_code",
+                "resolved_outcome_flag",
+                "outcome_evidence_source",
+                "school_entry_term_code",
+                "school_entry_term_basis",
+            ]
+        ]
+        master_longitudinal["final_outcome_bucket"] = master_longitudinal["student_id"].map(summary_lookup["latest_outcome_bucket"].to_dict())
+        master_longitudinal["exit_reason_code"] = master_longitudinal["student_id"].map(summary_lookup["exit_reason_code"].to_dict())
+        master_longitudinal["graduation_term_code"] = master_longitudinal["student_id"].map(summary_lookup["graduation_term_code"].to_dict())
+        master_longitudinal["resolved_outcome_flag"] = master_longitudinal["student_id"].map(summary_lookup["resolved_outcome_flag"].to_dict())
+        master_longitudinal["outcome_evidence_source"] = master_longitudinal["student_id"].map(summary_lookup["outcome_evidence_source"].to_dict())
+        master_longitudinal["school_entry_term_code"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_code"].to_dict())
+        master_longitudinal["school_entry_term_basis"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_basis"].to_dict())
+
+    cohort_metrics = build_cohort_metrics(student_summary)
+    empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    identity_exceptions = pd.concat(
+        [frame for frame in [identity_map_issues, roster_id_issues, academic_id_issues] if not frame.empty],
+        ignore_index=True,
+    ) if any(not frame.empty for frame in [identity_map_issues, roster_id_issues, academic_id_issues]) else empty_exception_frame
+    term_exceptions = pd.concat(
+        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
+        ignore_index=True,
+    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
+    status_exceptions = build_status_exceptions(roster_term, academic_term)
+    missing_evidence_cases = student_summary.loc[
+        student_summary["latest_outcome_bucket"].isin(list(UNRESOLVED_OUTCOMES)),
+        ["student_id", "student_name", "join_term", "latest_outcome_bucket", "outcome_evidence_source"],
+    ].rename(
+        columns={
+            "student_name": "details",
+            "join_term": "term_code",
+            "latest_outcome_bucket": "exception_type",
+            "outcome_evidence_source": "source_file",
+        }
+    ) if not student_summary.empty else pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+
+    issue_frames = {
+        "identity_exceptions": identity_exceptions,
+        "term_exceptions": term_exceptions,
+        "status_exceptions": status_exceptions,
+        "chapter_conflicts": roster_conflicts,
+        "outcome_exceptions": outcome_issues,
+        "missing_evidence_cases": missing_evidence_cases,
+    }
+    qa_checks = build_qa_checks(roster_term, academic_term, master_longitudinal, student_summary, issue_frames)
+    if not summary_qa.empty:
+        qa_checks = pd.concat([qa_checks, ensure_columns(summary_qa, QA_COLUMNS)], ignore_index=True)
+
+    timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    output_folder = output_root / timestamp
+    output_folder.mkdir(parents=True, exist_ok=True)
+
+    files = {
+        "roster_term": output_folder / "roster_term.csv",
+        "academic_term": output_folder / "academic_term.csv",
+        "master_longitudinal": output_folder / "master_longitudinal.csv",
+        "student_summary": output_folder / "student_summary.csv",
+        "cohort_metrics": output_folder / "cohort_metrics.csv",
+        "qa_checks": output_folder / "qa_checks.csv",
+        "schema": output_folder / "canonical_schema.json",
+        "identity_exceptions": output_folder / "identity_exceptions.csv",
+        "term_exceptions": output_folder / "term_exceptions.csv",
+        "status_exceptions": output_folder / "status_exceptions.csv",
+        "chapter_conflicts": output_folder / "chapter_conflicts.csv",
+        "outcome_exceptions": output_folder / "outcome_exceptions.csv",
+        "missing_evidence_cases": output_folder / "missing_evidence_cases.csv",
+    }
+
+    write_frame(files["roster_term"], roster_term)
+    write_frame(files["academic_term"], academic_term)
+    write_frame(files["master_longitudinal"], ensure_columns(master_longitudinal, schema["tables"]["master_longitudinal"]))
+    write_frame(files["student_summary"], student_summary)
+    write_frame(files["cohort_metrics"], cohort_metrics)
+    write_frame(files["qa_checks"], qa_checks)
+    files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
+        write_frame(files[key], issue_frames.get(key, pd.DataFrame()))
+
+    latest_folder = output_root / "latest"
+    latest_folder.mkdir(parents=True, exist_ok=True)
+    for key, path in files.items():
+        target = latest_folder / path.name
+        if path.suffix == ".csv":
+            write_frame(target, pd.read_csv(path))
+        elif path.suffix == ".json":
+            target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    return CanonicalBuildResult(output_folder=output_folder, files=files)
+
+
+def main() -> None:
+    args = parse_args()
+    result = build_canonical_pipeline(
+        roster_root=Path(args.roster_root).expanduser().resolve(),
+        roster_inbox=Path(args.roster_inbox).expanduser().resolve(),
+        academic_root=Path(args.academic_root).expanduser().resolve(),
+        graduation_root=Path(args.graduation_root).expanduser().resolve(),
+        output_root=Path(args.output_root).expanduser().resolve(),
+    )
+    print(f"Canonical outputs written to: {result.output_folder}")
+    for key, path in result.files.items():
+        print(f"{key}: {path}")
+
+
+if __name__ == "__main__":
+    main()

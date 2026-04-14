@@ -199,6 +199,12 @@ def _load_current_snapshot_tables(folder: Path) -> Tuple[Dict[str, pd.DataFrame]
 
 def _validate_loaded_tables(bundle_kind: str, tables: Dict[str, pd.DataFrame]) -> List[str]:
     requirements = {
+        "canonical": {
+            "student_summary": ["student_id"],
+            "master_longitudinal": ["student_id", "term_code"],
+            "cohort_metrics": ["Metric Group", "Metric Label", "Cohort"],
+            "qa_checks": ["Check Group", "Check", "Status"],
+        },
         "current_snapshot": {
             "snapshot_augmented_student_summary": ["Student ID"],
             "snapshot_augmented_cohort_metrics": ["Metric Group", "Metric Label", "Cohort"],
@@ -249,6 +255,29 @@ def _loaded_status(label: str, path: Path, required: bool, frame: Optional[pd.Da
 
 def _build_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame]) -> List[DataFileStatus]:
     statuses: List[DataFileStatus] = []
+
+    if version.dataset_type == "canonical":
+        canonical_map = {
+            "roster_term.csv": "roster_term",
+            "academic_term.csv": "academic_term",
+            "master_longitudinal.csv": "master_longitudinal",
+            "student_summary.csv": "student_summary",
+            "cohort_metrics.csv": "cohort_metrics",
+            "qa_checks.csv": "qa_checks",
+            "canonical_schema.json": "",
+        }
+        for filename, table_key in canonical_map.items():
+            statuses.append(_loaded_status(filename, version.root_path / filename, True, tables.get(table_key) if table_key else None))
+        for filename in [
+            "identity_exceptions.csv",
+            "term_exceptions.csv",
+            "status_exceptions.csv",
+            "chapter_conflicts.csv",
+            "outcome_exceptions.csv",
+            "missing_evidence_cases.csv",
+        ]:
+            statuses.append(_loaded_status(filename, version.root_path / filename, False, tables.get(filename.replace('.csv', ''))))
+        return statuses
 
     if version.dataset_type == "current_snapshot":
         snapshot_map = {
@@ -309,7 +338,29 @@ def load_analysis_bundle(
 ) -> AnalysisBundle:
     chapter_mapping = load_chapter_mapping(chapter_mapping_path)
 
-    if version.dataset_type == "current_snapshot":
+    if version.dataset_type == "canonical":
+        tables = {
+            "roster_term": pd.read_csv(version.root_path / "roster_term.csv"),
+            "academic_term": pd.read_csv(version.root_path / "academic_term.csv"),
+            "master_longitudinal": pd.read_csv(version.root_path / "master_longitudinal.csv"),
+            "student_summary": pd.read_csv(version.root_path / "student_summary.csv"),
+            "cohort_metrics": pd.read_csv(version.root_path / "cohort_metrics.csv"),
+            "qa_checks": pd.read_csv(version.root_path / "qa_checks.csv"),
+        }
+        for optional_name in [
+            "identity_exceptions",
+            "term_exceptions",
+            "status_exceptions",
+            "chapter_conflicts",
+            "outcome_exceptions",
+            "missing_evidence_cases",
+        ]:
+            path = version.root_path / f"{optional_name}.csv"
+            if path.exists():
+                tables[optional_name] = pd.read_csv(path)
+        notes = ["Loaded canonical analytics bundle directly. App-side re-standardization is bypassed."]
+        bundle_kind = "canonical"
+    elif version.dataset_type == "current_snapshot":
         tables, notes = _load_current_snapshot_tables(version.root_path)
         bundle_kind = "current_snapshot"
     elif version.dataset_type == "enhanced":
@@ -335,7 +386,10 @@ def load_analysis_bundle(
 
     validation_warnings = _validate_loaded_tables(bundle_kind, tables)
 
-    if bundle_kind == "current_snapshot":
+    if bundle_kind == "canonical":
+        summary = tables["student_summary"].copy()
+        longitudinal = tables.get("master_longitudinal", pd.DataFrame()).copy()
+    elif bundle_kind == "current_snapshot":
         raw_summary = tables["snapshot_augmented_student_summary"].copy()
         raw_longitudinal = tables.get("master_longitudinal", pd.DataFrame())
         summary = standardize_snapshot_summary(raw_summary, chapter_mapping, settings)
@@ -351,7 +405,8 @@ def load_analysis_bundle(
         summary = standardize_processed_summary(raw_summary, chapter_mapping, settings, status_code_map)
         longitudinal = standardize_processed_longitudinal(raw_longitudinal, chapter_mapping) if not raw_longitudinal.empty else pd.DataFrame()
 
-    summary = merge_longitudinal_rollups(summary, longitudinal)
+    if bundle_kind != "canonical":
+        summary = merge_longitudinal_rollups(summary, longitudinal)
     data_status = _build_data_status(version, tables)
     all_notes = stringify_notes(notes + validation_warnings + version.notes)
 

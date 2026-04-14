@@ -126,52 +126,29 @@ def load_metric_catalog() -> List[MetricDefinition]:
 
 def load_dataset_manifest() -> Dict[str, Any]:
     defaults: Dict[str, Any] = {
-        "priority": ["current_snapshot", "enhanced", "processed"],
+        "priority": ["canonical"],
         "sources": {
-            "current_snapshot": {
-                "label": "Current Snapshot Run",
-                "root": "output/current_snapshot_metrics",
+            "canonical": {
+                "label": "Canonical Analytics Run",
+                "root": "output/canonical",
                 "mode": "latest_run",
                 "run_prefix": "run_",
                 "required_files": [
-                    "snapshot_augmented_student_summary.csv",
-                    "snapshot_augmented_cohort_metrics.csv",
-                    "snapshot_augmented_chapter_metrics.csv",
-                    "snapshot_merge_qa.csv",
-                ],
-                "optional_files": [
-                    "methodology.md",
-                    "organization_entry_snapshot_augmented_*.xlsx",
-                ],
-            },
-            "enhanced": {
-                "label": "Enhanced Run",
-                "root": "output/enhanced_metrics",
-                "mode": "latest_run",
-                "run_prefix": "run_",
-                "required_files": [
+                    "roster_term.csv",
+                    "academic_term.csv",
+                    "master_longitudinal.csv",
                     "student_summary.csv",
                     "cohort_metrics.csv",
+                    "qa_checks.csv",
+                    "canonical_schema.json",
                 ],
                 "optional_files": [
-                    "master_longitudinal.csv",
-                    "metric_definitions.csv",
-                    "qa_checks.csv",
-                    "organization_entry_analytics_enhanced_*.xlsx",
-                    "methodology.md",
-                ],
-            },
-            "processed": {
-                "label": "Processed Pipeline Tables",
-                "mode": "fixed",
-                "files": [
-                    {"label": "Student Summary", "path": "data/processed/student_summary.csv", "required": True},
-                    {"label": "Master Dataset", "path": "data/processed/master_dataset.csv", "required": True},
-                    {"label": "Graduation Rates", "path": "output/metrics/graduation_rates.csv", "required": False},
-                    {"label": "Retention Rates", "path": "output/metrics/retention_rates.csv", "required": False},
-                    {"label": "GPA Trends", "path": "output/metrics/gpa_trends.csv", "required": False},
-                    {"label": "Credit Momentum", "path": "output/metrics/credit_momentum.csv", "required": False},
-                    {"label": "Standing Distribution", "path": "output/metrics/standing_distribution.csv", "required": False},
+                    "identity_exceptions.csv",
+                    "term_exceptions.csv",
+                    "status_exceptions.csv",
+                    "chapter_conflicts.csv",
+                    "outcome_exceptions.csv",
+                    "missing_evidence_cases.csv"
                 ],
             },
         },

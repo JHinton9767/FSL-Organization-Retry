@@ -29,3 +29,22 @@ def test_enhanced_loader_validation_warns_when_longitudinal_missing() -> None:
         },
     )
     assert warnings == ["Master_Longitudinal was not available, so observed-term trend views are limited."]
+
+
+def test_canonical_loader_validation_accepts_required_tables() -> None:
+    warnings = _validate_loaded_tables(
+        "canonical",
+        {
+            "student_summary": pd.DataFrame({"student_id": ["1"]}),
+            "master_longitudinal": pd.DataFrame({"student_id": ["1"], "term_code": ["2024FA"]}),
+            "cohort_metrics": pd.DataFrame(
+                {
+                    "Metric Group": ["Graduation"],
+                    "Metric Label": ["Observed Eventual Graduation Rate"],
+                    "Cohort": ["Overall"],
+                }
+            ),
+            "qa_checks": pd.DataFrame({"Check Group": ["Schema"], "Check": ["Authoritative tables built"], "Status": ["Pass"]}),
+        },
+    )
+    assert warnings == []

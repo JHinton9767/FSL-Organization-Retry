@@ -11,12 +11,8 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from src.build_executive_report import (
-    DEFAULT_ENHANCED_ROOT,
-    clean_text,
-    coerce_numeric,
-    load_latest_bundle,
-)
+from src.build_canonical_pipeline import clean_text, coerce_numeric
+from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,9 +24,8 @@ HEADER_FILL = "DCE6F1"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Rank students whose full pre-organization academic records would have the highest analytic impact.")
-    parser.add_argument("--enhanced-root", default=str(DEFAULT_ENHANCED_ROOT))
-    parser.add_argument("--enhanced-folder", default="")
-    parser.add_argument("--enhanced-workbook", default="")
+    parser.add_argument("--canonical-root", default=str(DEFAULT_CANONICAL_ROOT))
+    parser.add_argument("--canonical-folder", default="")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--top", type=int, default=250, help="Top students to include on the priority-only sheet.")
     return parser.parse_args()
@@ -48,8 +43,8 @@ def estimate_missing_pre_org_terms(entry_hours: object) -> int:
 
 
 def latest_cumulative_gpa(row: pd.Series) -> object:
-    overall = row.get("Latest Overall Cumulative GPA", "")
-    txstate = row.get("Latest TxState Cumulative GPA", "")
+    overall = row.get("latest_overall_cumulative_gpa", "")
+    txstate = row.get("latest_txstate_cumulative_gpa", "")
     if overall not in ("", None) and not (isinstance(overall, float) and math.isnan(overall)):
         return overall
     return txstate
@@ -92,42 +87,64 @@ def standing_score(first_standing: str) -> Tuple[int, str]:
     return 0, ""
 
 
-def build_priority_list(summary: pd.DataFrame) -> pd.DataFrame:
+def add_observation_counts(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty or master.empty:
+        result = summary.copy()
+        for column in ["roster_terms_observed", "academic_terms_observed", "total_terms_observed"]:
+            if column not in result.columns:
+                result[column] = 0
+        return result
+
+    grouped = master.groupby("student_id", dropna=False)
+    counts = pd.DataFrame(
+        {
+            "student_id": list(grouped.groups.keys()),
+            "roster_terms_observed": grouped["roster_present"].apply(lambda values: int(values.fillna("").astype(str).eq("Yes").sum())).tolist(),
+            "academic_terms_observed": grouped["academic_present"].apply(lambda values: int(values.fillna("").astype(str).eq("Yes").sum())).tolist(),
+            "total_terms_observed": grouped["term_code"].nunique().tolist(),
+        }
+    )
+    return summary.merge(counts, on="student_id", how="left")
+
+
+def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
     summary = summary.copy()
+    summary = add_observation_counts(summary, master)
     numeric_fields = [
-        "Entry Cumulative Hours",
-        "Roster Terms Observed",
-        "Academic Terms Observed",
-        "Total Terms Observed Overall",
-        "Latest TxState Cumulative GPA",
-        "Latest Overall Cumulative GPA",
+        "entry_cumulative_hours",
+        "roster_terms_observed",
+        "academic_terms_observed",
+        "total_terms_observed",
+        "latest_txstate_cumulative_gpa",
+        "latest_overall_cumulative_gpa",
     ]
     for field in numeric_fields:
         if field in summary.columns:
             summary[field] = coerce_numeric(summary[field])
 
-    latest_year = max((extract_year(value) or 0) for value in summary["Organization Entry Cohort"].tolist())
+    latest_year = max((extract_year(value) or 0) for value in summary["org_entry_cohort"].tolist())
     if latest_year == 0:
         latest_year = datetime.now().year
 
     rows: List[Dict[str, object]] = []
     for _, row in summary.iterrows():
-        student_id = clean_text(row.get("Student ID"))
-        first_name = clean_text(row.get("Preferred First Name"))
-        last_name = clean_text(row.get("Preferred Last Name"))
+        student_id = clean_text(row.get("student_id"))
+        student_name = clean_text(row.get("student_name"))
+        first_name = student_name.split(" ", 1)[0] if student_name else ""
+        last_name = student_name.split(" ", 1)[1] if " " in student_name else ""
         if not student_id and not (first_name or last_name):
             continue
 
-        entry_hours = row.get("Entry Cumulative Hours", "")
+        entry_hours = row.get("entry_cumulative_hours", "")
         missing_terms = estimate_missing_pre_org_terms(entry_hours)
-        first_org_term = clean_text(row.get("First Observed Organization Term"))
-        first_academic_term = clean_text(row.get("First Observed Academic Term"))
+        first_org_term = clean_text(row.get("join_term"))
+        first_academic_term = clean_text(row.get("first_observed_academic_term"))
         org_year = extract_year(first_org_term)
         cohort_age = max(latest_year - org_year, 0) if org_year is not None else 0
-        latest_outcome = clean_text(row.get("Latest Known Outcome Bucket")) or "Unknown"
-        identity_basis = clean_text(row.get("Identity Resolution Basis Used"))
-        ever_transfer = clean_text(row.get("Ever Transfer Flag")) == "Yes"
-        total_terms = row.get("Total Terms Observed Overall", 0)
+        latest_outcome = clean_text(row.get("latest_outcome_bucket")) or "Unknown"
+        identity_basis = clean_text(row.get("org_entry_term_basis"))
+        ever_transfer = clean_text(row.get("transfer_flag")) == "Yes"
+        total_terms = row.get("total_terms_observed", 0)
         latest_gpa = latest_cumulative_gpa(row)
         same_term_high_hours = (
             first_org_term
@@ -178,14 +195,14 @@ def build_priority_list(summary: pd.DataFrame) -> pd.DataFrame:
             score += 10
             reasons.append((10, "Transfer status appears in the current data, which makes school-start timing more complex."))
 
-        if clean_text(row.get("Observed Graduation Within 4 Years Of Org Entry Measurable")) == "Yes":
+        if clean_text(row.get("graduated_4yr_measurable")) == "Yes":
             score += 4
             reasons.append((4, "Student is already contributing to measurable 4-year graduation calculations."))
-        if clean_text(row.get("Observed Graduation Within 6 Years Of Org Entry Measurable")) == "Yes":
+        if clean_text(row.get("graduated_6yr_measurable")) == "Yes":
             score += 4
             reasons.append((4, "Student is already contributing to measurable 6-year graduation calculations."))
 
-        standing_points, standing_reason = standing_score(clean_text(row.get("First Academic Standing After Org Entry")))
+        standing_points, standing_reason = standing_score(clean_text(row.get("first_academic_standing_bucket")))
         score += standing_points
         if standing_reason:
             reasons.append((standing_points, standing_reason))
@@ -213,7 +230,7 @@ def build_priority_list(summary: pd.DataFrame) -> pd.DataFrame:
                 "Student ID": student_id,
                 "Last Name": last_name,
                 "First Name": first_name,
-                "Chapter": clean_text(row.get("Initial Chapter")),
+                "Chapter": clean_text(row.get("initial_chapter")),
                 "Organization Entry Cohort": first_org_term,
                 "First Observed Academic Term": first_academic_term,
                 "Entry Cumulative Hours": entry_hours,
@@ -222,7 +239,7 @@ def build_priority_list(summary: pd.DataFrame) -> pd.DataFrame:
                 "Ever Transfer": "Yes" if ever_transfer else "No",
                 "Identity Resolution Basis": identity_basis,
                 "Latest Cumulative GPA": latest_gpa,
-                "Academic Terms Observed": row.get("Academic Terms Observed", ""),
+                "Academic Terms Observed": row.get("academic_terms_observed", ""),
                 "Total Terms Observed": total_terms,
                 "Why Pull Full Record Early": top_reasons,
             }
@@ -300,17 +317,17 @@ def write_method_sheet(ws) -> None:
 
 
 def build_full_record_priority_list(
-    enhanced_root: Path,
+    canonical_root: Path,
     output_root: Path,
     explicit_folder: Path | None,
-    explicit_workbook: Path | None,
     top_n: int,
 ) -> Dict[str, object]:
-    bundle = load_latest_bundle(enhanced_root, explicit_folder, explicit_workbook)
+    bundle = load_canonical_bundle(canonical_root=canonical_root, explicit_folder=explicit_folder)
     summary = bundle.tables["student_summary"].copy()
-    priority = build_priority_list(summary)
+    master = bundle.tables["master_longitudinal"].copy()
+    priority = build_priority_list(summary, master)
     if priority.empty:
-        raise ValueError("No students were available to rank from Student_Summary.")
+        raise ValueError("No students were available to rank from canonical student_summary.")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_folder = output_root / f"run_{timestamp}"
@@ -373,7 +390,7 @@ def build_full_record_priority_list(
         "",
         "## Source used",
         "",
-        f"- Enhanced analytics bundle: `{bundle.enhanced_folder}`",
+        f"- Canonical analytics bundle: `{bundle.output_folder}`",
         "",
         "## Ranking idea",
         "",
@@ -393,13 +410,11 @@ def build_full_record_priority_list(
 
 def main() -> None:
     args = parse_args()
-    explicit_folder = Path(args.enhanced_folder).expanduser().resolve() if args.enhanced_folder else None
-    explicit_workbook = Path(args.enhanced_workbook).expanduser().resolve() if args.enhanced_workbook else None
+    explicit_folder = Path(args.canonical_folder).expanduser().resolve() if args.canonical_folder else None
     result = build_full_record_priority_list(
-        enhanced_root=Path(args.enhanced_root).expanduser().resolve(),
+        canonical_root=Path(args.canonical_root).expanduser().resolve(),
         output_root=Path(args.output_root).expanduser().resolve(),
         explicit_folder=explicit_folder,
-        explicit_workbook=explicit_workbook,
         top_n=args.top,
     )
     print(f"Priority list created: {result['workbook_path']}")
