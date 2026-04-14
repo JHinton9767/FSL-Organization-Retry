@@ -100,6 +100,10 @@ def _is_true(value: object) -> bool:
         return False
 
 
+def _bool_like_series(series: pd.Series) -> pd.Series:
+    return pd.Series([_is_true(value) for value in series], index=series.index, dtype="boolean")
+
+
 def classify_outcome_resolution(
     outcome_value: object,
     roster_value: object,
@@ -153,7 +157,7 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
     ]
     if graduation_columns:
         graduated_mask = pd.concat(
-            [frame[column].fillna(False).astype("boolean") for column in graduation_columns],
+            [_bool_like_series(frame[column]) for column in graduation_columns],
             axis=1,
         ).fillna(False).any(axis=1)
         groups = groups.where(~graduated_mask, "Graduated")
