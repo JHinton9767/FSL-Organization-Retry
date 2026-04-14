@@ -17,13 +17,19 @@ from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "record_priority"
+INDIVIDUAL_PULL_START_YEAR = 2018
 
 TITLE_FILL = "1F4E79"
 HEADER_FILL = "DCE6F1"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Rank students whose full pre-organization academic records would have the highest analytic impact.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rank students whose individual academic-history pulls would have the highest analytic impact. "
+            f"The ranking assumes the individual pull window begins in {INDIVIDUAL_PULL_START_YEAR}."
+        )
+    )
     parser.add_argument("--canonical-root", default=str(DEFAULT_CANONICAL_ROOT))
     parser.add_argument("--canonical-folder", default="")
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
@@ -68,12 +74,12 @@ def identity_score(identity_basis: str) -> Tuple[int, str]:
 def outcome_score(outcome_bucket: str) -> Tuple[int, str]:
     bucket = clean_text(outcome_bucket)
     mapping = {
-        "Graduated": (8, "Student has a terminal graduation outcome, so missing early records can materially change time-to-degree calculations."),
-        "Dropped/Resigned/Revoked/Inactive": (8, "Student has a terminal non-graduation outcome, so missing early records can change persistence and GPA interpretation."),
-        "Suspended": (8, "Student has a suspension outcome, which makes full academic history especially useful for interpretation."),
-        "Transfer": (6, "Transfer-related history is more complex and benefits from full academic context."),
+        "Graduated": (8, "Student has a terminal graduation outcome, so missing earlier academic detail can materially change time-to-degree interpretation."),
+        "Dropped/Resigned/Revoked/Inactive": (8, "Student has a terminal non-graduation outcome, so added term history can change persistence and GPA interpretation."),
+        "Suspended": (8, "Student has a suspension outcome, which makes term-level academic history especially useful."),
+        "Transfer": (6, "Transfer-related history is more complex and benefits from fuller academic context."),
         "No Further Observation": (5, "Outcome is unresolved because the student disappears from the observed data."),
-        "Active/Unknown": (3, "Outcome is still active or unresolved, so earlier context may still matter."),
+        "Active/Unknown": (3, "Outcome is still active or unresolved, so additional history may still matter."),
     }
     return mapping.get(bucket, (2, "Outcome is not clearly classified in the current data."))
 
@@ -90,11 +96,20 @@ def standing_score(first_standing: str) -> Tuple[int, str]:
 def add_observation_counts(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
     if summary.empty or master.empty:
         result = summary.copy()
-        for column in ["roster_terms_observed", "academic_terms_observed", "total_terms_observed"]:
+        for column in [
+            "roster_terms_observed",
+            "academic_terms_observed",
+            "total_terms_observed",
+            "roster_terms_observed_2018plus",
+            "academic_terms_observed_2018plus",
+            "total_terms_observed_2018plus",
+        ]:
             if column not in result.columns:
                 result[column] = 0
         return result
 
+    master = master.copy()
+    master["_in_2018plus_window"] = master["term_code"].map(lambda value: (extract_year(value) or 0) >= INDIVIDUAL_PULL_START_YEAR)
     grouped = master.groupby("student_id", dropna=False)
     counts = pd.DataFrame(
         {
@@ -102,6 +117,15 @@ def add_observation_counts(summary: pd.DataFrame, master: pd.DataFrame) -> pd.Da
             "roster_terms_observed": grouped["roster_present"].apply(lambda values: int(values.fillna("").astype(str).eq("Yes").sum())).tolist(),
             "academic_terms_observed": grouped["academic_present"].apply(lambda values: int(values.fillna("").astype(str).eq("Yes").sum())).tolist(),
             "total_terms_observed": grouped["term_code"].nunique().tolist(),
+            "roster_terms_observed_2018plus": grouped.apply(
+                lambda frame: int((frame["_in_2018plus_window"] & frame["roster_present"].fillna("").astype(str).eq("Yes")).sum())
+            ).tolist(),
+            "academic_terms_observed_2018plus": grouped.apply(
+                lambda frame: int((frame["_in_2018plus_window"] & frame["academic_present"].fillna("").astype(str).eq("Yes")).sum())
+            ).tolist(),
+            "total_terms_observed_2018plus": grouped.apply(
+                lambda frame: int(frame.loc[frame["_in_2018plus_window"], "term_code"].nunique())
+            ).tolist(),
         }
     )
     return summary.merge(counts, on="student_id", how="left")
@@ -115,6 +139,9 @@ def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
         "roster_terms_observed",
         "academic_terms_observed",
         "total_terms_observed",
+        "roster_terms_observed_2018plus",
+        "academic_terms_observed_2018plus",
+        "total_terms_observed_2018plus",
         "latest_txstate_cumulative_gpa",
         "latest_overall_cumulative_gpa",
     ]
@@ -140,11 +167,16 @@ def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
         first_org_term = clean_text(row.get("join_term"))
         first_academic_term = clean_text(row.get("first_observed_academic_term"))
         org_year = extract_year(first_org_term)
+        first_academic_year = extract_year(first_academic_term)
         cohort_age = max(latest_year - org_year, 0) if org_year is not None else 0
         latest_outcome = clean_text(row.get("latest_outcome_bucket")) or "Unknown"
         identity_basis = clean_text(row.get("org_entry_term_basis"))
         ever_transfer = clean_text(row.get("transfer_flag")) == "Yes"
         total_terms = row.get("total_terms_observed", 0)
+        total_terms_2018plus = row.get("total_terms_observed_2018plus", 0)
+        academic_terms_2018plus = row.get("academic_terms_observed_2018plus", 0)
+        roster_terms_2018plus = row.get("roster_terms_observed_2018plus", 0)
+        missing_2018plus_terms = max(int(total_terms_2018plus or 0) - int(academic_terms_2018plus or 0), 0)
         latest_gpa = latest_cumulative_gpa(row)
         same_term_high_hours = (
             first_org_term
@@ -159,27 +191,48 @@ def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
         reasons: List[Tuple[int, str]] = []
 
         if not first_academic_term and first_org_term:
-            score += 35
-            reasons.append((35, "No academic term is currently observed, so the student’s full school history is almost entirely missing."))
+            score += 30
+            reasons.append((30, f"No academic term is currently observed, so the {INDIVIDUAL_PULL_START_YEAR}+ individual history pull could add most of the usable term-level record."))
+
+        if missing_2018plus_terms:
+            gap_score = min(missing_2018plus_terms * 7, 28)
+            score += gap_score
+            reasons.append(
+                (
+                    gap_score,
+                    f"Student has about {missing_2018plus_terms} observed term(s) in the {INDIVIDUAL_PULL_START_YEAR}+ window without matching academic detail, so the individual pull could materially improve GPA and credit-hour trends.",
+                )
+            )
+
+        if org_year is not None and org_year >= INDIVIDUAL_PULL_START_YEAR:
+            score += 12
+            reasons.append((12, f"Organization entry begins in or after {INDIVIDUAL_PULL_START_YEAR}, so the individual pull can cover most or all of the organization-era academic timeline."))
+        elif total_terms_2018plus not in ("", None) and not (isinstance(total_terms_2018plus, float) and math.isnan(total_terms_2018plus)) and float(total_terms_2018plus) > 0:
+            score += 4
+            reasons.append((4, f"Student has observed terms in the {INDIVIDUAL_PULL_START_YEAR}+ window, so the individual pull can still improve later longitudinal history even if earlier terms remain unavailable."))
 
         missing_term_score = min(missing_terms * 4, 32)
-        if missing_term_score:
+        if missing_term_score and org_year is not None and org_year >= INDIVIDUAL_PULL_START_YEAR:
             score += missing_term_score
             reasons.append(
                 (
                     missing_term_score,
-                    f"Student appears to join with about {missing_terms} prior term(s) already completed, suggesting substantial pre-organization academic history is missing.",
+                    f"Student appears to join with about {missing_terms} prior term(s) already completed, and because the pull window starts in {INDIVIDUAL_PULL_START_YEAR}, some of that early history may now be recoverable.",
                 )
             )
+        elif missing_terms:
+            limited_score = min(missing_terms, 2)
+            score += limited_score
+            reasons.append((limited_score, f"Student likely has earlier pre-organization history, but because individual records begin in {INDIVIDUAL_PULL_START_YEAR}, only part of that history may be recoverable."))
 
-        if same_term_high_hours:
+        if same_term_high_hours and ((org_year is not None and org_year >= INDIVIDUAL_PULL_START_YEAR) or (first_academic_year is not None and first_academic_year >= INDIVIDUAL_PULL_START_YEAR)):
             score += 12
-            reasons.append((12, "Academic history begins in the same term as organization entry despite high cumulative hours, which strongly suggests missing earlier records."))
+            reasons.append((12, f"Academic history begins in the same term as organization entry despite high cumulative hours, which strongly suggests missing earlier {INDIVIDUAL_PULL_START_YEAR}+ records."))
 
-        age_score = min(cohort_age * 2, 16)
+        age_score = min(cohort_age * 2, 16) if org_year is not None and org_year >= INDIVIDUAL_PULL_START_YEAR else (4 if total_terms_2018plus not in ("", None) and not (isinstance(total_terms_2018plus, float) and math.isnan(total_terms_2018plus)) and float(total_terms_2018plus) > 0 else 0)
         if age_score:
             score += age_score
-            reasons.append((age_score, f"Older cohort ({first_org_term}) affects more long-window metrics and trend calculations."))
+            reasons.append((age_score, f"Observed cohort timing ({first_org_term}) affects more graduation and trend calculations within the recoverable {INDIVIDUAL_PULL_START_YEAR}+ window."))
 
         outcome_points, outcome_reason = outcome_score(latest_outcome)
         score += outcome_points
@@ -233,15 +286,19 @@ def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
                 "Chapter": clean_text(row.get("initial_chapter")),
                 "Organization Entry Cohort": first_org_term,
                 "First Observed Academic Term": first_academic_term,
+                "Individual Pull Starts": str(INDIVIDUAL_PULL_START_YEAR),
                 "Entry Cumulative Hours": entry_hours,
                 "Estimated Missing Pre-Org Terms": missing_terms,
+                "2018+ Roster Terms Observed": roster_terms_2018plus,
+                "2018+ Academic Terms Observed": academic_terms_2018plus,
+                "2018+ Missing Academic Terms": missing_2018plus_terms,
                 "Latest Known Outcome": latest_outcome,
                 "Ever Transfer": "Yes" if ever_transfer else "No",
                 "Identity Resolution Basis": identity_basis,
                 "Latest Cumulative GPA": latest_gpa,
                 "Academic Terms Observed": row.get("academic_terms_observed", ""),
                 "Total Terms Observed": total_terms,
-                "Why Pull Full Record Early": top_reasons,
+                "Why Pull Individual History Early": top_reasons,
             }
         )
 
@@ -253,7 +310,7 @@ def build_priority_list(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataF
     priority = priority.sort_values(
         by=[
             "Priority Score",
-            "Estimated Missing Pre-Org Terms",
+            "2018+ Missing Academic Terms",
             "_cohort_year_sort",
             "Organization Entry Cohort",
             "Last Name",
@@ -305,10 +362,10 @@ def write_method_sheet(ws) -> None:
     ws["A1"] = "Method"
     ws["A1"].font = Font(bold=True, size=16)
     lines = [
-        "This ranking is meant to help decide which students should have their full academic records pulled first.",
-        "Higher ranks go to students whose missing pre-organization academic history is most likely to change graduation timing, GPA interpretation, or cohort calculations.",
-        "The strongest signals are high cumulative hours at organization entry, missing academic history, older cohorts, terminal outcomes, transfer status, and weaker identity resolution.",
-        "This is a prioritization aid, not a claim that lower-ranked students do not matter.",
+        f"This ranking is meant to help decide which students should have their individual academic histories pulled first, with the usable pull window beginning in {INDIVIDUAL_PULL_START_YEAR}.",
+        f"Higher ranks go to students whose missing {INDIVIDUAL_PULL_START_YEAR}+ term-level history is most likely to change semester counts, GPA trends, credit-hour interpretation, or outcome calculations.",
+        f"The strongest signals are missing academic detail in the {INDIVIDUAL_PULL_START_YEAR}+ window, high cumulative hours at organization entry, recoverable organization-era history, terminal outcomes, transfer status, and weaker identity resolution.",
+        f"Because these individual pulls begin in {INDIVIDUAL_PULL_START_YEAR}, the ranking does not assume you are recovering a student’s full school-start history.",
     ]
     for idx, line in enumerate(lines, start=3):
         ws[f"A{idx}"] = f"- {line}"
@@ -352,8 +409,8 @@ def build_full_record_priority_list(
     ws.title = "Priority List"
     write_sheet(
         ws,
-        "Full Academic Record Priority List",
-        "Students ranked from highest to lowest priority for pulling full academic history from school start rather than organization entry.",
+        "Individual Academic History Priority List",
+        f"Students ranked from highest to lowest priority for pulling individual academic history beginning in {INDIVIDUAL_PULL_START_YEAR}.",
         priority,
     )
 
@@ -379,9 +436,9 @@ def build_full_record_priority_list(
     wb.save(workbook_path)
 
     readme = [
-        "# Full Academic Record Priority List",
+        "# Individual Academic History Priority List",
         "",
-        "This folder ranks students from highest to lowest priority for pulling full academic records from school start.",
+        f"This folder ranks students from highest to lowest priority for pulling individual academic history beginning in {INDIVIDUAL_PULL_START_YEAR}.",
         "",
         "## Files",
         "",
@@ -394,8 +451,8 @@ def build_full_record_priority_list(
         "",
         "## Ranking idea",
         "",
-        "- Higher priority means the student is more likely to change important calculations if earlier academic history is added.",
-        "- The list emphasizes high entry cumulative hours, missing early academic history, older cohorts, terminal outcomes, transfer complexity, and weaker identity resolution.",
+        f"- Higher priority means the student is more likely to change important calculations if additional {INDIVIDUAL_PULL_START_YEAR}+ term-level academic history is added.",
+        f"- The list emphasizes missing academic detail in the {INDIVIDUAL_PULL_START_YEAR}+ window, high entry cumulative hours, recoverable organization-era history, terminal outcomes, transfer complexity, and weaker identity resolution.",
     ]
     readme_path.write_text("\n".join(readme) + "\n", encoding="utf-8")
 
@@ -404,7 +461,7 @@ def build_full_record_priority_list(
         "workbook_path": workbook_path,
         "csv_path": csv_path,
         "readme_path": readme_path,
-        "top_students": top_frame[["Priority Rank", "Last Name", "First Name", "Student ID", "Priority Score", "Why Pull Full Record Early"]].head(25),
+        "top_students": top_frame[["Priority Rank", "Last Name", "First Name", "Student ID", "Priority Score", "Why Pull Individual History Early"]].head(25),
     }
 
 
