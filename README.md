@@ -32,7 +32,8 @@ Use this order when rebuilding from source files:
 2. Place term-level academic files in `data/inbox/academic/`
 3. Optionally place graduation lists in `data/inbox/graduation/`
 4. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
-5. Run:
+5. Optionally place chapter-by-term membership reference workbooks in `data/inbox/membership_reference/`
+6. Run:
 
 ```powershell
 py run_canonical_pipeline.py
@@ -74,6 +75,11 @@ The canonical run also writes reviewable exception files when applicable:
 - `chapter_conflicts.csv`
 - `outcome_exceptions.csv`
 - `missing_evidence_cases.csv`
+
+If supplemental membership reference workbooks are provided, the canonical run also writes:
+
+- `membership_reference_counts.csv`
+- `membership_reference_validation.csv`
 
 ## Legacy scripts
 

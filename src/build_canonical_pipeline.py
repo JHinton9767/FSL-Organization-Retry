@@ -35,6 +35,7 @@ DEFAULT_ROSTER_ROOT = DEFAULT_INPUT_ROOT
 DEFAULT_ROSTER_INBOX = ROOT / "data" / "inbox" / "rosters"
 DEFAULT_ACADEMIC_ROOT = ROOT / "data" / "inbox" / "academic"
 DEFAULT_GRADUATION_ROOT = ROOT / "data" / "inbox" / "graduation"
+DEFAULT_MEMBERSHIP_REFERENCE_ROOT = ROOT / "data" / "inbox" / "membership_reference"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "canonical"
 SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
 
@@ -142,6 +143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roster-inbox", default=str(DEFAULT_ROSTER_INBOX))
     parser.add_argument("--academic-root", default=str(DEFAULT_ACADEMIC_ROOT))
     parser.add_argument("--graduation-root", default=str(DEFAULT_GRADUATION_ROOT))
+    parser.add_argument("--membership-reference-root", default=str(DEFAULT_MEMBERSHIP_REFERENCE_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser.parse_args()
 
@@ -256,6 +258,192 @@ def canonical_snapshot_header(value: object) -> str:
         clean_text(value),
     )
     return match
+
+
+def build_person_identity_key(frame: pd.DataFrame) -> pd.Series:
+    student_id = frame.get("student_id", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip()
+    email = frame.get("email", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
+    first_name = frame.get("first_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
+    last_name = frame.get("last_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
+    name_key = (last_name + "|" + first_name).where(last_name.ne("") | first_name.ne(""), "")
+    return student_id.where(student_id.ne(""), email.where(email.ne(""), name_key))
+
+
+def detect_membership_reference_header_row(frame: pd.DataFrame) -> Tuple[Optional[int], Dict[int, Tuple[str, str]], int]:
+    best_row: Optional[int] = None
+    best_terms: Dict[int, Tuple[str, str]] = {}
+    best_chapter_col = 0
+    search_rows = min(len(frame.index), 25)
+    search_cols = min(len(frame.columns), 40)
+    for row_idx in range(search_rows):
+        term_columns: Dict[int, Tuple[str, str]] = {}
+        for col_idx in range(search_cols):
+            term_code, term_label, _, _ = parse_term_code(frame.iat[row_idx, col_idx])
+            if term_code:
+                term_columns[col_idx] = (term_code, term_label)
+        if len(term_columns) < 2:
+            continue
+        first_term_col = min(term_columns)
+        chapter_col = 0
+        for candidate in range(first_term_col):
+            candidate_values = frame.iloc[row_idx + 1 :, candidate].fillna("").astype(str).map(clean_text)
+            has_chapter_text = candidate_values.map(
+                lambda value: bool(value)
+                and not parse_term_code(value)[0]
+                and not re.search(r"(average|total|council)", value, re.IGNORECASE)
+            ).any()
+            if has_chapter_text:
+                chapter_col = candidate
+                break
+        if len(term_columns) > len(best_terms):
+            best_row = row_idx
+            best_terms = term_columns
+            best_chapter_col = chapter_col
+    return best_row, best_terms, best_chapter_col
+
+
+def parse_membership_count_value(value: object) -> Optional[int]:
+    text = clean_text(value)
+    if not text:
+        return None
+    if text.endswith(".0"):
+        text = text[:-2]
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return None
+
+
+def load_membership_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    reference_rows: List[dict] = []
+    issue_rows: List[dict] = []
+    columns = [
+        "chapter",
+        "chapter_raw",
+        "term_code",
+        "term_label",
+        "membership_count_reference",
+        "source_file",
+        "source_sheet",
+    ]
+    empty_reference = pd.DataFrame(columns=columns)
+    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    if not root.exists():
+        return empty_reference, empty_issues
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        try:
+            workbook = pd.read_excel(path, sheet_name=None, header=None)
+        except Exception as exc:
+            issue_rows.append(
+                {
+                    "exception_type": "membership_reference_unreadable",
+                    "source_file": str(path),
+                    "student_id": "",
+                    "term_code": "",
+                    "details": clean_text(exc),
+                }
+            )
+            continue
+
+        for sheet_name, raw_sheet in workbook.items():
+            frame = raw_sheet.fillna("")
+            header_row, term_columns, chapter_col = detect_membership_reference_header_row(frame)
+            if header_row is None or not term_columns:
+                continue
+            for row_idx in range(header_row + 1, len(frame.index)):
+                chapter_raw = clean_text(frame.iat[row_idx, chapter_col]) if chapter_col < len(frame.columns) else ""
+                if not chapter_raw:
+                    continue
+                if re.search(r"(average|total|council)", chapter_raw, re.IGNORECASE):
+                    continue
+                chapter = normalize_chapter_name(chapter_raw)
+                if not chapter:
+                    issue_rows.append(
+                        {
+                            "exception_type": "membership_reference_unmapped_chapter",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {chapter_raw}",
+                        }
+                    )
+                    continue
+                found_numeric_count = False
+                for col_idx, (term_code, term_label) in term_columns.items():
+                    count_value = parse_membership_count_value(frame.iat[row_idx, col_idx])
+                    if count_value is None:
+                        continue
+                    found_numeric_count = True
+                    reference_rows.append(
+                        {
+                            "chapter": chapter,
+                            "chapter_raw": chapter_raw,
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "membership_count_reference": count_value,
+                            "source_file": str(path),
+                            "source_sheet": clean_text(sheet_name),
+                        }
+                    )
+                if not found_numeric_count:
+                    issue_rows.append(
+                        {
+                            "exception_type": "membership_reference_row_without_counts",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {chapter_raw}",
+                        }
+                    )
+
+    reference = pd.DataFrame(reference_rows, columns=columns)
+    if not reference.empty:
+        reference = (
+            reference.sort_values(["chapter", "term_code", "source_file", "source_sheet"])
+            .drop_duplicates(subset=["chapter", "term_code"], keep="first")
+            .reset_index(drop=True)
+        )
+    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    return reference, issues
+
+
+def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "chapter",
+        "term_code",
+        "term_label",
+        "membership_count_reference",
+        "membership_count_pipeline",
+        "difference",
+        "comparison_status",
+        "source_file",
+        "source_sheet",
+    ]
+    if reference.empty:
+        return pd.DataFrame(columns=columns)
+
+    roster_counts = roster.copy()
+    roster_counts["_person_key"] = build_person_identity_key(roster_counts)
+    roster_counts = roster_counts.loc[roster_counts["_person_key"].ne("")]
+    pipeline_counts = (
+        roster_counts.groupby(["chapter", "term_code"], dropna=False)["_person_key"]
+        .nunique()
+        .reset_index(name="membership_count_pipeline")
+    )
+    validation = reference.merge(pipeline_counts, on=["chapter", "term_code"], how="left")
+    validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["difference"] = validation["membership_count_pipeline"] - validation["membership_count_reference"]
+    validation.loc[validation["membership_count_pipeline"].isna(), "difference"] = pd.NA
+    validation["comparison_status"] = "Match"
+    validation.loc[validation["membership_count_pipeline"].isna(), "comparison_status"] = "Reference Only"
+    validation.loc[
+        validation["membership_count_pipeline"].notna()
+        & validation["difference"].fillna(0).ne(0),
+        "comparison_status",
+    ] = "Mismatch"
+    return validation.loc[:, columns].sort_values(["chapter", "term_code"]).reset_index(drop=True)
 
 
 def canonical_graduation_header(value: object) -> str:
@@ -1647,7 +1835,14 @@ def build_measurable_window_checks(summary: pd.DataFrame) -> List[dict]:
     return rows
 
 
-def build_qa_checks(roster: pd.DataFrame, academic: pd.DataFrame, master: pd.DataFrame, summary: pd.DataFrame, issue_frames: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+def build_qa_checks(
+    roster: pd.DataFrame,
+    academic: pd.DataFrame,
+    master: pd.DataFrame,
+    summary: pd.DataFrame,
+    issue_frames: Dict[str, pd.DataFrame],
+    membership_reference_validation: pd.DataFrame,
+) -> pd.DataFrame:
     rows: List[dict] = [
         {"Check Group": "Schema", "Check": "Authoritative tables built", "Status": "Pass", "Value": 6, "Notes": "roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks"},
         {"Check Group": "Duplicates", "Check": "Roster duplicate student-term rows", "Status": "Pass" if roster.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(roster.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
@@ -1661,6 +1856,52 @@ def build_qa_checks(roster: pd.DataFrame, academic: pd.DataFrame, master: pd.Dat
     rows.extend(build_spring_coverage_checks(roster, "Roster"))
     rows.extend(build_spring_coverage_checks(academic, "Academic"))
     rows.extend(build_measurable_window_checks(summary))
+    if membership_reference_validation.empty:
+        rows.append(
+            {
+                "Check Group": "Reference Validation",
+                "Check": "Supplemental membership reference rows loaded",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No supplemental membership reference workbook rows were loaded.",
+            }
+        )
+    else:
+        match_count = int(membership_reference_validation["comparison_status"].eq("Match").sum())
+        mismatch_count = int(membership_reference_validation["comparison_status"].eq("Mismatch").sum())
+        reference_only_count = int(membership_reference_validation["comparison_status"].eq("Reference Only").sum())
+        rows.extend(
+            [
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental membership reference rows loaded",
+                    "Status": "Pass",
+                    "Value": int(len(membership_reference_validation)),
+                    "Notes": "",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental membership count matches",
+                    "Status": "Pass" if mismatch_count == 0 and reference_only_count == 0 else "Review",
+                    "Value": match_count,
+                    "Notes": "" if mismatch_count == 0 and reference_only_count == 0 else "See membership_reference_validation.csv for non-matching rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental membership count mismatches",
+                    "Status": "Pass" if mismatch_count == 0 else "Review",
+                    "Value": mismatch_count,
+                    "Notes": "" if mismatch_count == 0 else "Reference and pipeline counts differ for these chapter-term rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental reference-only chapter-term rows",
+                    "Status": "Pass" if reference_only_count == 0 else "Review",
+                    "Value": reference_only_count,
+                    "Notes": "" if reference_only_count == 0 else "Reference workbook contains chapter-term counts not present in the rebuilt roster data.",
+                },
+            ]
+        )
     for name, frame in issue_frames.items():
         rows.append(
             {
@@ -1684,6 +1925,7 @@ def build_canonical_pipeline(
     roster_inbox: Path,
     academic_root: Path,
     graduation_root: Path,
+    membership_reference_root: Path,
     output_root: Path,
 ) -> CanonicalBuildResult:
     schema = load_schema()
@@ -1694,6 +1936,7 @@ def build_canonical_pipeline(
     academic_term, academic_load_issues = load_academic_term_table(academic_root)
     snapshot = load_snapshot_table(academic_root)
     graduation, graduation_load_issues = load_graduation_table(graduation_root)
+    membership_reference, membership_reference_issues = load_membership_reference_table(membership_reference_root)
 
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
@@ -1728,15 +1971,16 @@ def build_canonical_pipeline(
         master_longitudinal["school_entry_term_basis"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_basis"].to_dict())
 
     cohort_metrics = build_cohort_metrics(student_summary)
+    membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     identity_exceptions = pd.concat(
         [frame for frame in [identity_map_issues, roster_id_issues, academic_id_issues] if not frame.empty],
         ignore_index=True,
     ) if any(not frame.empty for frame in [identity_map_issues, roster_id_issues, academic_id_issues]) else empty_exception_frame
     term_exceptions = pd.concat(
-        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
+        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
         ignore_index=True,
-    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
+    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
     status_exceptions = build_status_exceptions(roster_term, academic_term)
     missing_evidence_cases = student_summary.loc[
         student_summary["latest_outcome_bucket"].isin(list(UNRESOLVED_OUTCOMES)),
@@ -1758,7 +2002,14 @@ def build_canonical_pipeline(
         "outcome_exceptions": outcome_issues,
         "missing_evidence_cases": missing_evidence_cases,
     }
-    qa_checks = build_qa_checks(roster_term, academic_term, master_longitudinal, student_summary, issue_frames)
+    qa_checks = build_qa_checks(
+        roster_term,
+        academic_term,
+        master_longitudinal,
+        student_summary,
+        issue_frames,
+        membership_reference_validation,
+    )
     if not summary_qa.empty:
         qa_checks = pd.concat([qa_checks, ensure_columns(summary_qa, QA_COLUMNS)], ignore_index=True)
 
@@ -1773,6 +2024,8 @@ def build_canonical_pipeline(
         "student_summary": output_folder / "student_summary.csv",
         "cohort_metrics": output_folder / "cohort_metrics.csv",
         "qa_checks": output_folder / "qa_checks.csv",
+        "membership_reference_counts": output_folder / "membership_reference_counts.csv",
+        "membership_reference_validation": output_folder / "membership_reference_validation.csv",
         "schema": output_folder / "canonical_schema.json",
         "identity_exceptions": output_folder / "identity_exceptions.csv",
         "term_exceptions": output_folder / "term_exceptions.csv",
@@ -1788,6 +2041,8 @@ def build_canonical_pipeline(
     write_frame(files["student_summary"], student_summary)
     write_frame(files["cohort_metrics"], cohort_metrics)
     write_frame(files["qa_checks"], qa_checks)
+    write_frame(files["membership_reference_counts"], membership_reference)
+    write_frame(files["membership_reference_validation"], membership_reference_validation)
     files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
         write_frame(files[key], issue_frames.get(key, pd.DataFrame()))
@@ -1811,6 +2066,7 @@ def main() -> None:
         roster_inbox=Path(args.roster_inbox).expanduser().resolve(),
         academic_root=Path(args.academic_root).expanduser().resolve(),
         graduation_root=Path(args.graduation_root).expanduser().resolve(),
+        membership_reference_root=Path(args.membership_reference_root).expanduser().resolve(),
         output_root=Path(args.output_root).expanduser().resolve(),
     )
     print(f"Canonical outputs written to: {result.output_folder}")
