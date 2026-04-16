@@ -50,7 +50,7 @@ SEASON_NAME = {"WI": "Winter", "SP": "Spring", "SU": "Summer", "FA": "Fall"}
 UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ""}
 
 SNAPSHOT_ALIAS_GROUPS = {
-    "Student ID": {"student id", "banner id", "banner", "student number"},
+    "Student ID": {"student id", "banner id", "banner", "student number", "PLID", "plid"},
     "First Name": {"first name", "firstname"},
     "Last Name": {"last name", "lastname"},
     "NetID": {"netid", "net id"},
