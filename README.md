@@ -32,10 +32,11 @@ Use this order when rebuilding from source files:
 2. Place term-level academic files in `data/inbox/academic/`
 3. Optionally place graduation lists in `data/inbox/graduation/`
 4. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
-5. Optionally place chapter-by-term membership reference workbooks in `data/inbox/membership_reference/`
-6. Optionally place chapter-by-term average GPA reference workbooks in `data/inbox/gpa_reference/`
-7. Optionally place benchmark GPA workbooks such as Greek vs TXST undergraduate averages in `data/inbox/gpa_benchmark_reference/`
-8. Run:
+5. Optionally place a single combined workbook such as `Reference Data.xlsx` in `data/inbox/reference_data/`
+   The canonical run will scan mixed reference sheets for chapter counts, new-member counts, chapter GPA trends, benchmark GPA trends, and retention-style reference rows.
+6. Optionally use the specialized folders instead:
+   `data/inbox/membership_reference/`, `data/inbox/gpa_reference/`, and `data/inbox/gpa_benchmark_reference/`
+7. Run:
 
 ```powershell
 py run_canonical_pipeline.py
@@ -82,6 +83,8 @@ If supplemental membership reference workbooks are provided, the canonical run a
 
 - `membership_reference_counts.csv`
 - `membership_reference_validation.csv`
+- `new_member_reference_values.csv`
+- `new_member_reference_validation.csv`
 
 If supplemental GPA reference workbooks are provided, the canonical run also writes:
 
@@ -92,6 +95,20 @@ If supplemental benchmark GPA workbooks are provided, the canonical run also wri
 
 - `gpa_benchmark_reference_values.csv`
 - `gpa_benchmark_validation.csv`
+
+The canonical pipeline now also scans `data/inbox/reference_data/` as a shared reference-workbook location, so a single workbook can contain:
+
+- chapter membership counts
+- chapter new-member counts
+- chapter GPA trends
+- benchmark GPA trends
+- retention reference rows
+
+Additional reference outputs now include:
+
+- `reference_inventory.csv`
+- `reference_unclassified_rows.csv`
+- `retention_reference_values.csv`
 
 ## Legacy scripts
 

@@ -35,6 +35,7 @@ DEFAULT_ROSTER_ROOT = DEFAULT_INPUT_ROOT
 DEFAULT_ROSTER_INBOX = ROOT / "data" / "inbox" / "rosters"
 DEFAULT_ACADEMIC_ROOT = ROOT / "data" / "inbox" / "academic"
 DEFAULT_GRADUATION_ROOT = ROOT / "data" / "inbox" / "graduation"
+DEFAULT_REFERENCE_DATA_ROOT = ROOT / "data" / "inbox" / "reference_data"
 DEFAULT_MEMBERSHIP_REFERENCE_ROOT = ROOT / "data" / "inbox" / "membership_reference"
 DEFAULT_GPA_REFERENCE_ROOT = ROOT / "data" / "inbox" / "gpa_reference"
 DEFAULT_GPA_BENCHMARK_ROOT = ROOT / "data" / "inbox" / "gpa_benchmark_reference"
@@ -145,6 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roster-inbox", default=str(DEFAULT_ROSTER_INBOX))
     parser.add_argument("--academic-root", default=str(DEFAULT_ACADEMIC_ROOT))
     parser.add_argument("--graduation-root", default=str(DEFAULT_GRADUATION_ROOT))
+    parser.add_argument("--reference-data-root", default=str(DEFAULT_REFERENCE_DATA_ROOT))
     parser.add_argument("--membership-reference-root", default=str(DEFAULT_MEMBERSHIP_REFERENCE_ROOT))
     parser.add_argument("--gpa-reference-root", default=str(DEFAULT_GPA_REFERENCE_ROOT))
     parser.add_argument("--gpa-benchmark-root", default=str(DEFAULT_GPA_BENCHMARK_ROOT))
@@ -162,6 +164,20 @@ def ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
         if column not in result.columns:
             result[column] = pd.NA
     return result.loc[:, list(columns)]
+
+
+def combine_reference_frames(
+    frames: Sequence[pd.DataFrame],
+    columns: Sequence[str],
+    dedupe_subset: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    usable = [frame for frame in frames if frame is not None and not frame.empty]
+    if not usable:
+        return pd.DataFrame(columns=list(columns))
+    combined = pd.concat([ensure_columns(frame, columns) for frame in usable], ignore_index=True)
+    if dedupe_subset:
+        combined = combined.drop_duplicates(subset=list(dedupe_subset), keep="first")
+    return ensure_columns(combined, columns)
 
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
@@ -326,6 +342,208 @@ def parse_reference_gpa_value(value: object) -> Optional[float]:
         return float(text)
     except ValueError:
         return None
+
+
+def parse_reference_numeric_entry(value: object) -> Optional[Tuple[float, bool]]:
+    text = clean_text(value)
+    if not text or text in {"-", "--"}:
+        return None
+    had_percent = "%" in text
+    cleaned = text.replace(",", "").replace("%", "").strip()
+    try:
+        return float(cleaned), had_percent
+    except ValueError:
+        return None
+
+
+def is_integer_like(value: float) -> bool:
+    return abs(value - round(value)) < 1e-9
+
+
+def classify_reference_row(
+    label: str,
+    source_file: Path,
+    source_sheet: str,
+    numeric_entries: Sequence[dict],
+) -> Tuple[str, str, str, str]:
+    normalized_chapter = normalize_chapter_name(label)
+    entity_type = "chapter" if normalized_chapter else "benchmark"
+    entity_label_normalized = normalized_chapter if normalized_chapter else clean_text(label)
+    context = " ".join(
+        [
+            clean_text(label),
+            clean_text(source_sheet),
+            clean_text(source_file.stem),
+            clean_text(source_file.name),
+        ]
+    ).lower()
+    values = [float(item["reference_value"]) for item in numeric_entries]
+    has_percent = any(bool(item.get("had_percent")) for item in numeric_entries)
+    all_small = bool(values) and all(0 <= value <= 4.5 for value in values)
+    all_integer = bool(values) and all(is_integer_like(value) for value in values)
+
+    if any(token in context for token in ["new member", "new members", "associate member", "nm count", "new mem"]):
+        return "new_member_count", entity_type, entity_label_normalized, "keyword:new_member"
+    if any(token in context for token in ["gpa", "grade point"]):
+        return "average_gpa", entity_type, entity_label_normalized, "keyword:gpa"
+    if any(token in context for token in ["retention", "retained", "return rate", "returned", "continuation", "continued", "persistence", "persist"]):
+        return "retention_rate", entity_type, entity_label_normalized, "keyword:retention"
+    if all_small:
+        return "average_gpa", entity_type, entity_label_normalized, "value-range:gpa"
+    if has_percent:
+        return "retention_rate", entity_type, entity_label_normalized, "value-format:percent"
+    if any(token in context for token in ["membership", "member count", "members", "chapter size", "roster", "headcount", "count"]):
+        return "membership_count", entity_type, entity_label_normalized, "keyword:membership"
+    if all_integer and values and max(values) > 4:
+        return "membership_count", entity_type, entity_label_normalized, "value-shape:count"
+    return "unknown", entity_type, entity_label_normalized, "unclassified"
+
+
+def list_reference_files(roots: Sequence[Path]) -> List[Path]:
+    seen: set[str] = set()
+    files: List[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            files.append(path)
+    return files
+
+
+def load_reference_inventory_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    inventory_rows: List[dict] = []
+    issue_rows: List[dict] = []
+    inventory_columns = [
+        "reference_type",
+        "entity_type",
+        "entity_label_raw",
+        "entity_label_normalized",
+        "term_code",
+        "term_label",
+        "reference_value",
+        "classification_basis",
+        "source_file",
+        "source_sheet",
+    ]
+    issue_columns = ["exception_type", "source_file", "student_id", "term_code", "details"]
+
+    for path in list_reference_files(roots):
+        try:
+            workbook = pd.read_excel(path, sheet_name=None, header=None)
+        except Exception as exc:
+            issue_rows.append(
+                {
+                    "exception_type": "reference_inventory_unreadable",
+                    "source_file": str(path),
+                    "student_id": "",
+                    "term_code": "",
+                    "details": clean_text(exc),
+                }
+            )
+            continue
+
+        for sheet_name, raw_sheet in workbook.items():
+            frame = raw_sheet.fillna("")
+            header_row, term_columns, label_col = detect_membership_reference_header_row(frame)
+            if header_row is None or not term_columns:
+                continue
+            for row_idx in range(header_row + 1, len(frame.index)):
+                label = clean_text(frame.iat[row_idx, label_col]) if label_col < len(frame.columns) else ""
+                if not label:
+                    continue
+                numeric_entries: List[dict] = []
+                for col_idx, (term_code, term_label) in term_columns.items():
+                    parsed = parse_reference_numeric_entry(frame.iat[row_idx, col_idx])
+                    if parsed is None:
+                        continue
+                    numeric_value, had_percent = parsed
+                    numeric_entries.append(
+                        {
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "reference_value": numeric_value,
+                            "had_percent": had_percent,
+                        }
+                    )
+                if not numeric_entries:
+                    continue
+                reference_type, entity_type, normalized_label, basis = classify_reference_row(
+                    label,
+                    path,
+                    clean_text(sheet_name),
+                    numeric_entries,
+                )
+                for entry in numeric_entries:
+                    inventory_rows.append(
+                        {
+                            "reference_type": reference_type,
+                            "entity_type": entity_type,
+                            "entity_label_raw": label,
+                            "entity_label_normalized": normalized_label,
+                            "term_code": entry["term_code"],
+                            "term_label": entry["term_label"],
+                            "reference_value": entry["reference_value"],
+                            "classification_basis": basis,
+                            "source_file": str(path),
+                            "source_sheet": clean_text(sheet_name),
+                        }
+                    )
+                if reference_type == "unknown":
+                    issue_rows.append(
+                        {
+                            "exception_type": "reference_inventory_unclassified_row",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {label}",
+                        }
+                    )
+
+    inventory = pd.DataFrame(inventory_rows, columns=inventory_columns)
+    if not inventory.empty:
+        inventory = inventory.drop_duplicates(
+            subset=["reference_type", "entity_type", "entity_label_raw", "term_code", "source_file", "source_sheet"],
+            keep="first",
+        ).reset_index(drop=True)
+    issues = pd.DataFrame(issue_rows, columns=issue_columns)
+    return inventory, issues
+
+
+def build_reference_subset(
+    inventory: pd.DataFrame,
+    reference_type: str,
+    entity_type: str,
+    value_column: str,
+    columns: Sequence[str],
+    dedupe_subset: Sequence[str],
+) -> pd.DataFrame:
+    if inventory.empty:
+        return pd.DataFrame(columns=list(columns))
+    frame = inventory.loc[
+        inventory["reference_type"].eq(reference_type)
+        & inventory["entity_type"].eq(entity_type)
+    ].copy()
+    if frame.empty:
+        return pd.DataFrame(columns=list(columns))
+    if entity_type == "chapter":
+        frame = frame.rename(
+            columns={
+                "entity_label_raw": "chapter_raw",
+                "entity_label_normalized": "chapter",
+                "reference_value": value_column,
+            }
+        )
+    else:
+        frame["benchmark_label"] = frame["entity_label_normalized"]
+        frame = frame.rename(columns={"reference_value": value_column})
+    subset = frame.loc[:, list(columns)]
+    return subset.drop_duplicates(subset=list(dedupe_subset), keep="first").reset_index(drop=True)
 
 
 def load_membership_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -631,6 +849,46 @@ def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.Da
     validation.loc[validation["membership_count_pipeline"].isna(), "comparison_status"] = "Reference Only"
     validation.loc[
         validation["membership_count_pipeline"].notna()
+        & validation["difference"].fillna(0).ne(0),
+        "comparison_status",
+    ] = "Mismatch"
+    return validation.loc[:, columns].sort_values(["chapter", "term_code"]).reset_index(drop=True)
+
+
+def build_new_member_reference_validation(roster: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "chapter",
+        "term_code",
+        "term_label",
+        "new_member_count_reference",
+        "new_member_count_pipeline",
+        "difference",
+        "comparison_status",
+        "source_file",
+        "source_sheet",
+    ]
+    if reference.empty:
+        return pd.DataFrame(columns=columns)
+
+    roster_counts = roster.copy()
+    roster_counts["_person_key"] = build_person_identity_key(roster_counts)
+    roster_counts = roster_counts.loc[
+        roster_counts["_person_key"].ne("")
+        & roster_counts["new_member_flag"].fillna("").astype(str).eq("Yes")
+    ]
+    pipeline_counts = (
+        roster_counts.groupby(["chapter", "term_code"], dropna=False)["_person_key"]
+        .nunique()
+        .reset_index(name="new_member_count_pipeline")
+    )
+    validation = reference.merge(pipeline_counts, on=["chapter", "term_code"], how="left")
+    validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["difference"] = validation["new_member_count_pipeline"] - validation["new_member_count_reference"]
+    validation.loc[validation["new_member_count_pipeline"].isna(), "difference"] = pd.NA
+    validation["comparison_status"] = "Match"
+    validation.loc[validation["new_member_count_pipeline"].isna(), "comparison_status"] = "Reference Only"
+    validation.loc[
+        validation["new_member_count_pipeline"].notna()
         & validation["difference"].fillna(0).ne(0),
         "comparison_status",
     ] = "Mismatch"
@@ -2155,8 +2413,12 @@ def build_qa_checks(
     summary: pd.DataFrame,
     issue_frames: Dict[str, pd.DataFrame],
     membership_reference_validation: pd.DataFrame,
+    new_member_reference_validation: pd.DataFrame,
     gpa_reference_validation: pd.DataFrame,
     gpa_benchmark_validation: pd.DataFrame,
+    reference_inventory: pd.DataFrame,
+    reference_unclassified_rows: pd.DataFrame,
+    retention_reference: pd.DataFrame,
 ) -> pd.DataFrame:
     rows: List[dict] = [
         {"Check Group": "Schema", "Check": "Authoritative tables built", "Status": "Pass", "Value": 6, "Notes": "roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks"},
@@ -2171,6 +2433,42 @@ def build_qa_checks(
     rows.extend(build_spring_coverage_checks(roster, "Roster"))
     rows.extend(build_spring_coverage_checks(academic, "Academic"))
     rows.extend(build_measurable_window_checks(summary))
+    if reference_inventory.empty:
+        rows.append(
+            {
+                "Check Group": "Reference Validation",
+                "Check": "Reference inventory rows loaded",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No numeric reference rows were cataloged from the reference workbooks.",
+            }
+        )
+    else:
+        rows.extend(
+            [
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Reference inventory rows loaded",
+                    "Status": "Pass",
+                    "Value": int(len(reference_inventory)),
+                    "Notes": "",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Reference inventory unclassified rows",
+                    "Status": "Pass" if reference_unclassified_rows.empty else "Review",
+                    "Value": int(len(reference_unclassified_rows)),
+                    "Notes": "" if reference_unclassified_rows.empty else "See reference_unclassified_rows.csv for rows that need manual interpretation.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Retention reference rows cataloged",
+                    "Status": "Pass" if not retention_reference.empty else "Review",
+                    "Value": int(len(retention_reference)),
+                    "Notes": "" if not retention_reference.empty else "No retention reference rows were cataloged.",
+                },
+            ]
+        )
     if membership_reference_validation.empty:
         rows.append(
             {
@@ -2214,6 +2512,52 @@ def build_qa_checks(
                     "Status": "Pass" if reference_only_count == 0 else "Review",
                     "Value": reference_only_count,
                     "Notes": "" if reference_only_count == 0 else "Reference workbook contains chapter-term counts not present in the rebuilt roster data.",
+                },
+            ]
+        )
+    if new_member_reference_validation.empty:
+        rows.append(
+            {
+                "Check Group": "Reference Validation",
+                "Check": "Supplemental new-member reference rows loaded",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No supplemental new-member reference rows were loaded.",
+            }
+        )
+    else:
+        new_member_match_count = int(new_member_reference_validation["comparison_status"].eq("Match").sum())
+        new_member_mismatch_count = int(new_member_reference_validation["comparison_status"].eq("Mismatch").sum())
+        new_member_reference_only_count = int(new_member_reference_validation["comparison_status"].eq("Reference Only").sum())
+        rows.extend(
+            [
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental new-member reference rows loaded",
+                    "Status": "Pass",
+                    "Value": int(len(new_member_reference_validation)),
+                    "Notes": "",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental new-member count matches",
+                    "Status": "Pass" if new_member_mismatch_count == 0 and new_member_reference_only_count == 0 else "Review",
+                    "Value": new_member_match_count,
+                    "Notes": "" if new_member_mismatch_count == 0 and new_member_reference_only_count == 0 else "See new_member_reference_validation.csv for non-matching rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental new-member count mismatches",
+                    "Status": "Pass" if new_member_mismatch_count == 0 else "Review",
+                    "Value": new_member_mismatch_count,
+                    "Notes": "" if new_member_mismatch_count == 0 else "Reference and pipeline new-member counts differ for these chapter-term rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental new-member reference-only rows",
+                    "Status": "Pass" if new_member_reference_only_count == 0 else "Review",
+                    "Value": new_member_reference_only_count,
+                    "Notes": "" if new_member_reference_only_count == 0 else "Reference workbook contains chapter-term new-member rows not present in the rebuilt roster data.",
                 },
             ]
         )
@@ -2332,6 +2676,7 @@ def build_canonical_pipeline(
     roster_inbox: Path,
     academic_root: Path,
     graduation_root: Path,
+    reference_data_root: Path,
     membership_reference_root: Path,
     gpa_reference_root: Path,
     gpa_benchmark_root: Path,
@@ -2345,9 +2690,78 @@ def build_canonical_pipeline(
     academic_term, academic_load_issues = load_academic_term_table(academic_root)
     snapshot = load_snapshot_table(academic_root)
     graduation, graduation_load_issues = load_graduation_table(graduation_root)
-    membership_reference, membership_reference_issues = load_membership_reference_table(membership_reference_root)
-    gpa_reference, gpa_reference_issues = load_gpa_reference_table(gpa_reference_root)
-    gpa_benchmark_reference, gpa_benchmark_issues = load_gpa_benchmark_reference_table(gpa_benchmark_root)
+    reference_inventory, reference_inventory_issues = load_reference_inventory_table(
+        [reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root]
+    )
+    membership_reference = build_reference_subset(
+        reference_inventory,
+        "membership_count",
+        "chapter",
+        "membership_count_reference",
+        ["chapter", "chapter_raw", "term_code", "term_label", "membership_count_reference", "source_file", "source_sheet"],
+        dedupe_subset=["chapter", "term_code"],
+    )
+    gpa_reference = build_reference_subset(
+        reference_inventory,
+        "average_gpa",
+        "chapter",
+        "chapter_average_gpa_reference",
+        ["chapter", "chapter_raw", "term_code", "term_label", "chapter_average_gpa_reference", "source_file", "source_sheet"],
+        dedupe_subset=["chapter", "term_code"],
+    )
+    gpa_benchmark_reference = build_reference_subset(
+        reference_inventory,
+        "average_gpa",
+        "benchmark",
+        "benchmark_average_gpa_reference",
+        ["benchmark_label", "term_code", "term_label", "benchmark_average_gpa_reference", "source_file", "source_sheet"],
+        dedupe_subset=["benchmark_label", "term_code"],
+    )
+    new_member_reference = build_reference_subset(
+        reference_inventory,
+        "new_member_count",
+        "chapter",
+        "new_member_count_reference",
+        ["chapter", "chapter_raw", "term_code", "term_label", "new_member_count_reference", "source_file", "source_sheet"],
+        dedupe_subset=["chapter", "term_code"],
+    )
+    retention_reference = ensure_columns(
+        reference_inventory.loc[reference_inventory["reference_type"].eq("retention_rate")].rename(
+            columns={
+                "entity_label_raw": "entity_label_raw",
+                "entity_label_normalized": "entity_label_normalized",
+                "reference_value": "retention_rate_reference",
+            }
+        ),
+        [
+            "entity_type",
+            "entity_label_raw",
+            "entity_label_normalized",
+            "term_code",
+            "term_label",
+            "retention_rate_reference",
+            "source_file",
+            "source_sheet",
+        ],
+    ).drop_duplicates(
+        subset=["entity_type", "entity_label_normalized", "term_code", "source_file", "source_sheet"],
+        keep="first",
+    ).reset_index(drop=True)
+    reference_unclassified_rows = ensure_columns(
+        reference_inventory.loc[reference_inventory["reference_type"].eq("unknown")].copy(),
+        [
+            "reference_type",
+            "entity_type",
+            "entity_label_raw",
+            "entity_label_normalized",
+            "term_code",
+            "term_label",
+            "reference_value",
+            "classification_basis",
+            "source_file",
+            "source_sheet",
+        ],
+    )
 
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
@@ -2383,6 +2797,7 @@ def build_canonical_pipeline(
 
     cohort_metrics = build_cohort_metrics(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
+    new_member_reference_validation = build_new_member_reference_validation(roster_term, new_member_reference)
     gpa_reference_validation = build_gpa_reference_validation(master_longitudinal, gpa_reference)
     gpa_benchmark_validation = build_gpa_benchmark_validation(master_longitudinal, gpa_benchmark_reference, chapter_mapping)
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
@@ -2391,9 +2806,9 @@ def build_canonical_pipeline(
         ignore_index=True,
     ) if any(not frame.empty for frame in [identity_map_issues, roster_id_issues, academic_id_issues]) else empty_exception_frame
     term_exceptions = pd.concat(
-        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, gpa_reference_issues, gpa_benchmark_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
+        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, reference_inventory_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
         ignore_index=True,
-    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, gpa_reference_issues, gpa_benchmark_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
+    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, reference_inventory_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
     status_exceptions = build_status_exceptions(roster_term, academic_term)
     missing_evidence_cases = student_summary.loc[
         student_summary["latest_outcome_bucket"].isin(list(UNRESOLVED_OUTCOMES)),
@@ -2422,8 +2837,12 @@ def build_canonical_pipeline(
         student_summary,
         issue_frames,
         membership_reference_validation,
+        new_member_reference_validation,
         gpa_reference_validation,
         gpa_benchmark_validation,
+        reference_inventory,
+        reference_unclassified_rows,
+        retention_reference,
     )
     if not summary_qa.empty:
         qa_checks = pd.concat([qa_checks, ensure_columns(summary_qa, QA_COLUMNS)], ignore_index=True)
@@ -2439,12 +2858,17 @@ def build_canonical_pipeline(
         "student_summary": output_folder / "student_summary.csv",
         "cohort_metrics": output_folder / "cohort_metrics.csv",
         "qa_checks": output_folder / "qa_checks.csv",
+        "reference_inventory": output_folder / "reference_inventory.csv",
+        "reference_unclassified_rows": output_folder / "reference_unclassified_rows.csv",
         "membership_reference_counts": output_folder / "membership_reference_counts.csv",
         "membership_reference_validation": output_folder / "membership_reference_validation.csv",
+        "new_member_reference_values": output_folder / "new_member_reference_values.csv",
+        "new_member_reference_validation": output_folder / "new_member_reference_validation.csv",
         "gpa_reference_values": output_folder / "gpa_reference_values.csv",
         "gpa_reference_validation": output_folder / "gpa_reference_validation.csv",
         "gpa_benchmark_reference_values": output_folder / "gpa_benchmark_reference_values.csv",
         "gpa_benchmark_validation": output_folder / "gpa_benchmark_validation.csv",
+        "retention_reference_values": output_folder / "retention_reference_values.csv",
         "schema": output_folder / "canonical_schema.json",
         "identity_exceptions": output_folder / "identity_exceptions.csv",
         "term_exceptions": output_folder / "term_exceptions.csv",
@@ -2460,12 +2884,17 @@ def build_canonical_pipeline(
     write_frame(files["student_summary"], student_summary)
     write_frame(files["cohort_metrics"], cohort_metrics)
     write_frame(files["qa_checks"], qa_checks)
+    write_frame(files["reference_inventory"], reference_inventory)
+    write_frame(files["reference_unclassified_rows"], reference_unclassified_rows)
     write_frame(files["membership_reference_counts"], membership_reference)
     write_frame(files["membership_reference_validation"], membership_reference_validation)
+    write_frame(files["new_member_reference_values"], new_member_reference)
+    write_frame(files["new_member_reference_validation"], new_member_reference_validation)
     write_frame(files["gpa_reference_values"], gpa_reference)
     write_frame(files["gpa_reference_validation"], gpa_reference_validation)
     write_frame(files["gpa_benchmark_reference_values"], gpa_benchmark_reference)
     write_frame(files["gpa_benchmark_validation"], gpa_benchmark_validation)
+    write_frame(files["retention_reference_values"], retention_reference)
     files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
         write_frame(files[key], issue_frames.get(key, pd.DataFrame()))
@@ -2489,6 +2918,7 @@ def main() -> None:
         roster_inbox=Path(args.roster_inbox).expanduser().resolve(),
         academic_root=Path(args.academic_root).expanduser().resolve(),
         graduation_root=Path(args.graduation_root).expanduser().resolve(),
+        reference_data_root=Path(args.reference_data_root).expanduser().resolve(),
         membership_reference_root=Path(args.membership_reference_root).expanduser().resolve(),
         gpa_reference_root=Path(args.gpa_reference_root).expanduser().resolve(),
         gpa_benchmark_root=Path(args.gpa_benchmark_root).expanduser().resolve(),
