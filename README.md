@@ -33,7 +33,9 @@ Use this order when rebuilding from source files:
 3. Optionally place graduation lists in `data/inbox/graduation/`
 4. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
 5. Optionally place chapter-by-term membership reference workbooks in `data/inbox/membership_reference/`
-6. Run:
+6. Optionally place chapter-by-term average GPA reference workbooks in `data/inbox/gpa_reference/`
+7. Optionally place benchmark GPA workbooks such as Greek vs TXST undergraduate averages in `data/inbox/gpa_benchmark_reference/`
+8. Run:
 
 ```powershell
 py run_canonical_pipeline.py
@@ -80,6 +82,16 @@ If supplemental membership reference workbooks are provided, the canonical run a
 
 - `membership_reference_counts.csv`
 - `membership_reference_validation.csv`
+
+If supplemental GPA reference workbooks are provided, the canonical run also writes:
+
+- `gpa_reference_values.csv`
+- `gpa_reference_validation.csv`
+
+If supplemental benchmark GPA workbooks are provided, the canonical run also writes:
+
+- `gpa_benchmark_reference_values.csv`
+- `gpa_benchmark_validation.csv`
 
 ## Legacy scripts
 

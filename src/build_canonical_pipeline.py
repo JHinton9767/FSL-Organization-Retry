@@ -36,6 +36,8 @@ DEFAULT_ROSTER_INBOX = ROOT / "data" / "inbox" / "rosters"
 DEFAULT_ACADEMIC_ROOT = ROOT / "data" / "inbox" / "academic"
 DEFAULT_GRADUATION_ROOT = ROOT / "data" / "inbox" / "graduation"
 DEFAULT_MEMBERSHIP_REFERENCE_ROOT = ROOT / "data" / "inbox" / "membership_reference"
+DEFAULT_GPA_REFERENCE_ROOT = ROOT / "data" / "inbox" / "gpa_reference"
+DEFAULT_GPA_BENCHMARK_ROOT = ROOT / "data" / "inbox" / "gpa_benchmark_reference"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "canonical"
 SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
 
@@ -144,6 +146,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--academic-root", default=str(DEFAULT_ACADEMIC_ROOT))
     parser.add_argument("--graduation-root", default=str(DEFAULT_GRADUATION_ROOT))
     parser.add_argument("--membership-reference-root", default=str(DEFAULT_MEMBERSHIP_REFERENCE_ROOT))
+    parser.add_argument("--gpa-reference-root", default=str(DEFAULT_GPA_REFERENCE_ROOT))
+    parser.add_argument("--gpa-benchmark-root", default=str(DEFAULT_GPA_BENCHMARK_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser.parse_args()
 
@@ -313,6 +317,17 @@ def parse_membership_count_value(value: object) -> Optional[int]:
     return None
 
 
+def parse_reference_gpa_value(value: object) -> Optional[float]:
+    text = clean_text(value)
+    if not text:
+        return None
+    text = text.replace("%", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 def load_membership_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     reference_rows: List[dict] = []
     issue_rows: List[dict] = []
@@ -409,6 +424,182 @@ def load_membership_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFr
     return reference, issues
 
 
+def load_gpa_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    reference_rows: List[dict] = []
+    issue_rows: List[dict] = []
+    columns = [
+        "chapter",
+        "chapter_raw",
+        "term_code",
+        "term_label",
+        "chapter_average_gpa_reference",
+        "source_file",
+        "source_sheet",
+    ]
+    empty_reference = pd.DataFrame(columns=columns)
+    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    if not root.exists():
+        return empty_reference, empty_issues
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        try:
+            workbook = pd.read_excel(path, sheet_name=None, header=None)
+        except Exception as exc:
+            issue_rows.append(
+                {
+                    "exception_type": "gpa_reference_unreadable",
+                    "source_file": str(path),
+                    "student_id": "",
+                    "term_code": "",
+                    "details": clean_text(exc),
+                }
+            )
+            continue
+
+        for sheet_name, raw_sheet in workbook.items():
+            frame = raw_sheet.fillna("")
+            header_row, term_columns, chapter_col = detect_membership_reference_header_row(frame)
+            if header_row is None or not term_columns:
+                continue
+            for row_idx in range(header_row + 1, len(frame.index)):
+                chapter_raw = clean_text(frame.iat[row_idx, chapter_col]) if chapter_col < len(frame.columns) else ""
+                if not chapter_raw:
+                    continue
+                if re.search(r"(average|total|council)", chapter_raw, re.IGNORECASE):
+                    continue
+                chapter = normalize_chapter_name(chapter_raw)
+                if not chapter:
+                    issue_rows.append(
+                        {
+                            "exception_type": "gpa_reference_unmapped_chapter",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {chapter_raw}",
+                        }
+                    )
+                    continue
+                found_numeric_gpa = False
+                for col_idx, (term_code, term_label) in term_columns.items():
+                    gpa_value = parse_reference_gpa_value(frame.iat[row_idx, col_idx])
+                    if gpa_value is None:
+                        continue
+                    found_numeric_gpa = True
+                    reference_rows.append(
+                        {
+                            "chapter": chapter,
+                            "chapter_raw": chapter_raw,
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "chapter_average_gpa_reference": gpa_value,
+                            "source_file": str(path),
+                            "source_sheet": clean_text(sheet_name),
+                        }
+                    )
+                if not found_numeric_gpa:
+                    issue_rows.append(
+                        {
+                            "exception_type": "gpa_reference_row_without_values",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {chapter_raw}",
+                        }
+                    )
+
+    reference = pd.DataFrame(reference_rows, columns=columns)
+    if not reference.empty:
+        reference = (
+            reference.sort_values(["chapter", "term_code", "source_file", "source_sheet"])
+            .drop_duplicates(subset=["chapter", "term_code"], keep="first")
+            .reset_index(drop=True)
+        )
+    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    return reference, issues
+
+
+def load_gpa_benchmark_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    reference_rows: List[dict] = []
+    issue_rows: List[dict] = []
+    columns = [
+        "benchmark_label",
+        "term_code",
+        "term_label",
+        "benchmark_average_gpa_reference",
+        "source_file",
+        "source_sheet",
+    ]
+    empty_reference = pd.DataFrame(columns=columns)
+    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    if not root.exists():
+        return empty_reference, empty_issues
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
+            continue
+        try:
+            workbook = pd.read_excel(path, sheet_name=None, header=None)
+        except Exception as exc:
+            issue_rows.append(
+                {
+                    "exception_type": "gpa_benchmark_unreadable",
+                    "source_file": str(path),
+                    "student_id": "",
+                    "term_code": "",
+                    "details": clean_text(exc),
+                }
+            )
+            continue
+
+        for sheet_name, raw_sheet in workbook.items():
+            frame = raw_sheet.fillna("")
+            header_row, term_columns, label_col = detect_membership_reference_header_row(frame)
+            if header_row is None or not term_columns:
+                continue
+            for row_idx in range(header_row + 1, len(frame.index)):
+                benchmark_label = clean_text(frame.iat[row_idx, label_col]) if label_col < len(frame.columns) else ""
+                if not benchmark_label:
+                    continue
+                found_numeric_gpa = False
+                for col_idx, (term_code, term_label) in term_columns.items():
+                    gpa_value = parse_reference_gpa_value(frame.iat[row_idx, col_idx])
+                    if gpa_value is None:
+                        continue
+                    found_numeric_gpa = True
+                    reference_rows.append(
+                        {
+                            "benchmark_label": benchmark_label,
+                            "term_code": term_code,
+                            "term_label": term_label,
+                            "benchmark_average_gpa_reference": gpa_value,
+                            "source_file": str(path),
+                            "source_sheet": clean_text(sheet_name),
+                        }
+                    )
+                if not found_numeric_gpa:
+                    issue_rows.append(
+                        {
+                            "exception_type": "gpa_benchmark_row_without_values",
+                            "source_file": str(path),
+                            "student_id": "",
+                            "term_code": "",
+                            "details": f"{sheet_name}: {benchmark_label}",
+                        }
+                    )
+
+    reference = pd.DataFrame(reference_rows, columns=columns)
+    if not reference.empty:
+        reference = (
+            reference.sort_values(["benchmark_label", "term_code", "source_file", "source_sheet"])
+            .drop_duplicates(subset=["benchmark_label", "term_code"], keep="first")
+            .reset_index(drop=True)
+        )
+    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    return reference, issues
+
+
 def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
     columns = [
         "chapter",
@@ -444,6 +635,128 @@ def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.Da
         "comparison_status",
     ] = "Mismatch"
     return validation.loc[:, columns].sort_values(["chapter", "term_code"]).reset_index(drop=True)
+
+
+def build_gpa_reference_validation(master: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "chapter",
+        "term_code",
+        "term_label",
+        "chapter_average_gpa_reference",
+        "chapter_average_gpa_pipeline",
+        "difference",
+        "comparison_status",
+        "source_file",
+        "source_sheet",
+    ]
+    if reference.empty:
+        return pd.DataFrame(columns=columns)
+
+    pipeline_frame = master.copy()
+    pipeline_frame["term_gpa_numeric"] = coerce_numeric(pipeline_frame["term_gpa"])
+    pipeline_frame = pipeline_frame.loc[
+        pipeline_frame["chapter"].fillna("").astype(str).str.strip().ne("")
+        & pipeline_frame["academic_present"].fillna("").astype(str).eq("Yes")
+        & pipeline_frame["term_gpa_numeric"].notna()
+    ]
+    pipeline_gpa = (
+        pipeline_frame.groupby(["chapter", "term_code"], dropna=False)["term_gpa_numeric"]
+        .mean()
+        .reset_index(name="chapter_average_gpa_pipeline")
+    )
+    validation = reference.merge(pipeline_gpa, on=["chapter", "term_code"], how="left")
+    validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["difference"] = validation["chapter_average_gpa_pipeline"] - validation["chapter_average_gpa_reference"]
+    validation.loc[validation["chapter_average_gpa_pipeline"].isna(), "difference"] = pd.NA
+    validation["comparison_status"] = "Match"
+    validation.loc[validation["chapter_average_gpa_pipeline"].isna(), "comparison_status"] = "Reference Only"
+    validation.loc[
+        validation["chapter_average_gpa_pipeline"].notna()
+        & validation["difference"].abs().fillna(0).gt(0.01),
+        "comparison_status",
+    ] = "Mismatch"
+    return validation.loc[:, columns].sort_values(["chapter", "term_code"]).reset_index(drop=True)
+
+
+def compute_pipeline_gpa_benchmarks(master: pd.DataFrame, chapter_mapping: pd.DataFrame) -> pd.DataFrame:
+    columns = ["benchmark_label", "term_code", "benchmark_average_gpa_pipeline"]
+    if master.empty:
+        return pd.DataFrame(columns=columns)
+
+    base = master.copy()
+    base["term_gpa_numeric"] = coerce_numeric(base["term_gpa"])
+    base = base.loc[
+        base["academic_present"].fillna("").astype(str).eq("Yes")
+        & base["term_gpa_numeric"].notna()
+        & base["chapter"].fillna("").astype(str).str.strip().ne("")
+    ]
+    if base.empty:
+        return pd.DataFrame(columns=columns)
+
+    mapping = chapter_mapping.copy()
+    if not mapping.empty and "chapter" in mapping.columns:
+        mapping["chapter"] = mapping["chapter"].fillna("").astype(str).str.strip()
+        mapping["org_type"] = mapping.get("org_type", "").astype(str) if "org_type" in mapping.columns else ""
+        base = base.merge(mapping[["chapter", "org_type"]].drop_duplicates(subset=["chapter"]), on="chapter", how="left")
+    else:
+        base["org_type"] = ""
+
+    benchmark_frames: List[pd.DataFrame] = []
+
+    all_greek = (
+        base.groupby("term_code", dropna=False)["term_gpa_numeric"]
+        .mean()
+        .reset_index(name="benchmark_average_gpa_pipeline")
+    )
+    all_greek["benchmark_label"] = "All Greek Average"
+    benchmark_frames.append(all_greek)
+
+    org_type_series = base["org_type"].fillna("").astype(str).str.lower()
+    sorority = base.loc[org_type_series.str.contains("soror")]
+    if not sorority.empty:
+        frame = sorority.groupby("term_code", dropna=False)["term_gpa_numeric"].mean().reset_index(name="benchmark_average_gpa_pipeline")
+        frame["benchmark_label"] = "All Sorority Average"
+        benchmark_frames.append(frame)
+
+    fraternity = base.loc[org_type_series.str.contains("fratern")]
+    if not fraternity.empty:
+        frame = fraternity.groupby("term_code", dropna=False)["term_gpa_numeric"].mean().reset_index(name="benchmark_average_gpa_pipeline")
+        frame["benchmark_label"] = "All Fraternity Average"
+        benchmark_frames.append(frame)
+
+    if not benchmark_frames:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(benchmark_frames, ignore_index=True).loc[:, columns]
+
+
+def build_gpa_benchmark_validation(master: pd.DataFrame, reference: pd.DataFrame, chapter_mapping: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "benchmark_label",
+        "term_code",
+        "term_label",
+        "benchmark_average_gpa_reference",
+        "benchmark_average_gpa_pipeline",
+        "difference",
+        "comparison_status",
+        "source_file",
+        "source_sheet",
+    ]
+    if reference.empty:
+        return pd.DataFrame(columns=columns)
+
+    pipeline_benchmarks = compute_pipeline_gpa_benchmarks(master, chapter_mapping)
+    validation = reference.merge(pipeline_benchmarks, on=["benchmark_label", "term_code"], how="left")
+    validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["difference"] = validation["benchmark_average_gpa_pipeline"] - validation["benchmark_average_gpa_reference"]
+    validation.loc[validation["benchmark_average_gpa_pipeline"].isna(), "difference"] = pd.NA
+    validation["comparison_status"] = "Match"
+    validation.loc[validation["benchmark_average_gpa_pipeline"].isna(), "comparison_status"] = "Reference Only"
+    validation.loc[
+        validation["benchmark_average_gpa_pipeline"].notna()
+        & validation["difference"].abs().fillna(0).gt(0.01),
+        "comparison_status",
+    ] = "Mismatch"
+    return validation.loc[:, columns].sort_values(["benchmark_label", "term_code"]).reset_index(drop=True)
 
 
 def canonical_graduation_header(value: object) -> str:
@@ -1842,6 +2155,8 @@ def build_qa_checks(
     summary: pd.DataFrame,
     issue_frames: Dict[str, pd.DataFrame],
     membership_reference_validation: pd.DataFrame,
+    gpa_reference_validation: pd.DataFrame,
+    gpa_benchmark_validation: pd.DataFrame,
 ) -> pd.DataFrame:
     rows: List[dict] = [
         {"Check Group": "Schema", "Check": "Authoritative tables built", "Status": "Pass", "Value": 6, "Notes": "roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks"},
@@ -1902,6 +2217,98 @@ def build_qa_checks(
                 },
             ]
         )
+    if gpa_reference_validation.empty:
+        rows.append(
+            {
+                "Check Group": "Reference Validation",
+                "Check": "Supplemental GPA reference rows loaded",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No supplemental GPA reference workbook rows were loaded.",
+            }
+        )
+    else:
+        gpa_match_count = int(gpa_reference_validation["comparison_status"].eq("Match").sum())
+        gpa_mismatch_count = int(gpa_reference_validation["comparison_status"].eq("Mismatch").sum())
+        gpa_reference_only_count = int(gpa_reference_validation["comparison_status"].eq("Reference Only").sum())
+        rows.extend(
+            [
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA reference rows loaded",
+                    "Status": "Pass",
+                    "Value": int(len(gpa_reference_validation)),
+                    "Notes": "",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental chapter GPA matches",
+                    "Status": "Pass" if gpa_mismatch_count == 0 and gpa_reference_only_count == 0 else "Review",
+                    "Value": gpa_match_count,
+                    "Notes": "" if gpa_mismatch_count == 0 and gpa_reference_only_count == 0 else "See gpa_reference_validation.csv for non-matching rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental chapter GPA mismatches",
+                    "Status": "Pass" if gpa_mismatch_count == 0 else "Review",
+                    "Value": gpa_mismatch_count,
+                    "Notes": "" if gpa_mismatch_count == 0 else "Reference and pipeline chapter GPAs differ for these chapter-term rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA reference-only chapter-term rows",
+                    "Status": "Pass" if gpa_reference_only_count == 0 else "Review",
+                    "Value": gpa_reference_only_count,
+                    "Notes": "" if gpa_reference_only_count == 0 else "Reference workbook contains chapter-term GPA rows not present in the rebuilt pipeline data.",
+                },
+            ]
+        )
+    if gpa_benchmark_validation.empty:
+        rows.append(
+            {
+                "Check Group": "Reference Validation",
+                "Check": "Supplemental GPA benchmark rows loaded",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No supplemental GPA benchmark workbook rows were loaded.",
+            }
+        )
+    else:
+        benchmark_match_count = int(gpa_benchmark_validation["comparison_status"].eq("Match").sum())
+        benchmark_mismatch_count = int(gpa_benchmark_validation["comparison_status"].eq("Mismatch").sum())
+        benchmark_reference_only_count = int(gpa_benchmark_validation["comparison_status"].eq("Reference Only").sum())
+        rows.extend(
+            [
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA benchmark rows loaded",
+                    "Status": "Pass",
+                    "Value": int(len(gpa_benchmark_validation)),
+                    "Notes": "",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA benchmark matches",
+                    "Status": "Pass" if benchmark_mismatch_count == 0 and benchmark_reference_only_count == 0 else "Review",
+                    "Value": benchmark_match_count,
+                    "Notes": "" if benchmark_mismatch_count == 0 and benchmark_reference_only_count == 0 else "See gpa_benchmark_validation.csv for non-matching rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA benchmark mismatches",
+                    "Status": "Pass" if benchmark_mismatch_count == 0 else "Review",
+                    "Value": benchmark_mismatch_count,
+                    "Notes": "" if benchmark_mismatch_count == 0 else "Reference and pipeline benchmark GPAs differ for these term rows.",
+                },
+                {
+                    "Check Group": "Reference Validation",
+                    "Check": "Supplemental GPA benchmark reference-only rows",
+                    "Status": "Pass" if benchmark_reference_only_count == 0 else "Review",
+                    "Value": benchmark_reference_only_count,
+                    "Notes": "" if benchmark_reference_only_count == 0 else "Benchmark workbook contains rows the rebuilt pipeline cannot compute directly, such as TXST-wide averages.",
+                },
+            ]
+        )
     for name, frame in issue_frames.items():
         rows.append(
             {
@@ -1926,6 +2333,8 @@ def build_canonical_pipeline(
     academic_root: Path,
     graduation_root: Path,
     membership_reference_root: Path,
+    gpa_reference_root: Path,
+    gpa_benchmark_root: Path,
     output_root: Path,
 ) -> CanonicalBuildResult:
     schema = load_schema()
@@ -1937,6 +2346,8 @@ def build_canonical_pipeline(
     snapshot = load_snapshot_table(academic_root)
     graduation, graduation_load_issues = load_graduation_table(graduation_root)
     membership_reference, membership_reference_issues = load_membership_reference_table(membership_reference_root)
+    gpa_reference, gpa_reference_issues = load_gpa_reference_table(gpa_reference_root)
+    gpa_benchmark_reference, gpa_benchmark_issues = load_gpa_benchmark_reference_table(gpa_benchmark_root)
 
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
@@ -1972,15 +2383,17 @@ def build_canonical_pipeline(
 
     cohort_metrics = build_cohort_metrics(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
+    gpa_reference_validation = build_gpa_reference_validation(master_longitudinal, gpa_reference)
+    gpa_benchmark_validation = build_gpa_benchmark_validation(master_longitudinal, gpa_benchmark_reference, chapter_mapping)
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     identity_exceptions = pd.concat(
         [frame for frame in [identity_map_issues, roster_id_issues, academic_id_issues] if not frame.empty],
         ignore_index=True,
     ) if any(not frame.empty for frame in [identity_map_issues, roster_id_issues, academic_id_issues]) else empty_exception_frame
     term_exceptions = pd.concat(
-        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
+        [frame for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, gpa_reference_issues, gpa_benchmark_issues, roster_dup_issues, academic_dup_issues] if not frame.empty],
         ignore_index=True,
-    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
+    ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, membership_reference_issues, gpa_reference_issues, gpa_benchmark_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
     status_exceptions = build_status_exceptions(roster_term, academic_term)
     missing_evidence_cases = student_summary.loc[
         student_summary["latest_outcome_bucket"].isin(list(UNRESOLVED_OUTCOMES)),
@@ -2009,6 +2422,8 @@ def build_canonical_pipeline(
         student_summary,
         issue_frames,
         membership_reference_validation,
+        gpa_reference_validation,
+        gpa_benchmark_validation,
     )
     if not summary_qa.empty:
         qa_checks = pd.concat([qa_checks, ensure_columns(summary_qa, QA_COLUMNS)], ignore_index=True)
@@ -2026,6 +2441,10 @@ def build_canonical_pipeline(
         "qa_checks": output_folder / "qa_checks.csv",
         "membership_reference_counts": output_folder / "membership_reference_counts.csv",
         "membership_reference_validation": output_folder / "membership_reference_validation.csv",
+        "gpa_reference_values": output_folder / "gpa_reference_values.csv",
+        "gpa_reference_validation": output_folder / "gpa_reference_validation.csv",
+        "gpa_benchmark_reference_values": output_folder / "gpa_benchmark_reference_values.csv",
+        "gpa_benchmark_validation": output_folder / "gpa_benchmark_validation.csv",
         "schema": output_folder / "canonical_schema.json",
         "identity_exceptions": output_folder / "identity_exceptions.csv",
         "term_exceptions": output_folder / "term_exceptions.csv",
@@ -2043,6 +2462,10 @@ def build_canonical_pipeline(
     write_frame(files["qa_checks"], qa_checks)
     write_frame(files["membership_reference_counts"], membership_reference)
     write_frame(files["membership_reference_validation"], membership_reference_validation)
+    write_frame(files["gpa_reference_values"], gpa_reference)
+    write_frame(files["gpa_reference_validation"], gpa_reference_validation)
+    write_frame(files["gpa_benchmark_reference_values"], gpa_benchmark_reference)
+    write_frame(files["gpa_benchmark_validation"], gpa_benchmark_validation)
     files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
         write_frame(files[key], issue_frames.get(key, pd.DataFrame()))
@@ -2067,6 +2490,8 @@ def main() -> None:
         academic_root=Path(args.academic_root).expanduser().resolve(),
         graduation_root=Path(args.graduation_root).expanduser().resolve(),
         membership_reference_root=Path(args.membership_reference_root).expanduser().resolve(),
+        gpa_reference_root=Path(args.gpa_reference_root).expanduser().resolve(),
+        gpa_benchmark_root=Path(args.gpa_benchmark_root).expanduser().resolve(),
         output_root=Path(args.output_root).expanduser().resolve(),
     )
     print(f"Canonical outputs written to: {result.output_folder}")
