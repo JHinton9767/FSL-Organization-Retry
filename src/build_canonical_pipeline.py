@@ -109,7 +109,7 @@ GRADUATION_COLUMNS = [
 QA_COLUMNS = ["Check Group", "Check", "Status", "Value", "Notes"]
 
 GRADE_COLUMN_ALIASES = {
-    "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid"},
+    "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid", "netid", "net id"},
     "Last Name": {"last name", "lastname"},
     "First Name": {"first name", "firstname"},
     "Email": {"email", "email address"},
