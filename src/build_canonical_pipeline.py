@@ -83,7 +83,7 @@ SNAPSHOT_COLUMNS = [
 ]
 
 GRADUATION_ALIAS_GROUPS = {
-    "Student ID": {"student id", "banner id", "banner", "student number"},
+    "Student ID": {"student id", "banner id", "banner", "student number", "PLID", "plid"},
     "First Name": {"first name", "firstname"},
     "Last Name": {"last name", "lastname"},
     "Graduation Term": {
@@ -109,7 +109,7 @@ GRADUATION_COLUMNS = [
 QA_COLUMNS = ["Check Group", "Check", "Status", "Value", "Notes"]
 
 GRADE_COLUMN_ALIASES = {
-    "Banner ID": {"banner id", "student id", "banner", "student number"},
+    "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid"},
     "Last Name": {"last name", "lastname"},
     "First Name": {"first name", "firstname"},
     "Email": {"email", "email address"},
