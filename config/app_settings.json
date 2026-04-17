@@ -24,6 +24,15 @@
       "max": null
     }
   ],
+  "secondary_organizations": [
+    "Phi Delta Chi",
+    "Alpha Phi Omega",
+    "Delta Sigma Pi",
+    "Alpha Kappa Psi",
+    "Gamma Sigma Alpha",
+    "Rho Lambda",
+    "Order of Omega"
+  ],
   "completeness_fields": [
     "student_id",
     "chapter",

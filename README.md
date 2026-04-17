@@ -115,6 +115,20 @@ Fallback order:
 5. source sheet name clue
 6. unresolved
 
+Secondary organizations ignored for primary-chapter analytics:
+
+- `Phi Delta Chi`
+- `Alpha Phi Omega`
+- `Delta Sigma Pi`
+- `Alpha Kappa Psi`
+- `Gamma Sigma Alpha`
+- `Rho Lambda`
+- `Order of Omega`
+
+These rows are still preserved in the canonical roster outputs, but they are ignored when choosing a student's primary chapter, backfilling missing chapter assignments, detecting same-term chapter conflicts, and preferring a chapter for entry-term analytics.
+
+Same-term double-roster cleanup also prefers a non-`Resigned` / non-`Revoked` chapter row over a `Resigned` or `Revoked` row when both appear for the same student and term. This keeps RS/RV legacy rows from driving chapter-level graduation, retention, or GPA analytics for the student's later active organization.
+
 Persistent manual overrides:
 
 - add or edit rows in `config/manual_chapter_assignments.csv`

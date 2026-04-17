@@ -1085,6 +1085,62 @@ def chapter_is_missing(value: object) -> bool:
     return not normalized or normalized == "Unknown"
 
 
+def secondary_organization_set(settings: Dict[str, object]) -> set[str]:
+    values = settings.get("secondary_organizations", []) if isinstance(settings, dict) else []
+    normalized: set[str] = set()
+    for value in values:
+        chapter = normalize_chapter_name(value)
+        if chapter and chapter != "Unknown":
+            normalized.add(chapter)
+    return normalized
+
+
+def is_secondary_organization(value: object, settings: Dict[str, object]) -> bool:
+    normalized = normalize_chapter_name(clean_text(value))
+    return bool(normalized) and normalized in secondary_organization_set(settings)
+
+
+def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
+    if roster.empty:
+        return roster
+
+    preferred_rows: List[dict] = []
+    secondary_orgs = secondary_organization_set(settings)
+    working = roster.copy()
+    working["_identity_key"] = working.apply(
+        lambda row: (
+            f"id:{clean_text(row.get('student_id', '')).lower()}"
+            if clean_text(row.get("student_id", ""))
+            else f"email:{clean_text(row.get('email', '')).lower()}"
+            if clean_text(row.get("email", ""))
+            else f"name:{clean_text(row.get('last_name', '')).lower()}|{clean_text(row.get('first_name', '')).lower()}"
+        ),
+        axis=1,
+    )
+    working["_chapter_missing"] = working["chapter"].map(chapter_is_missing).astype(int)
+    working["_secondary_org"] = working["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
+    working["_assignment_rank"] = working["chapter_assignment_source"].fillna("").astype(str).map(
+        {
+            "manual_override": 0,
+            "matched_by_id_name": 1,
+            "matched_by_id": 2,
+            "original": 3,
+            "inferred_from_sheet_name": 4,
+            "inferred_from_file_name": 5,
+            "unresolved": 6,
+        }
+    ).fillna(9)
+    for (_, _), group in working.groupby(["_identity_key", "term_code"], dropna=False):
+        ordered = group.sort_values(
+            by=["_chapter_missing", "_secondary_org", "_assignment_rank", "chapter", "source_file", "source_sheet"],
+            ascending=[True, True, True, True, True, True],
+        )
+        preferred_rows.append(ordered.iloc[0].to_dict())
+
+    preferred = pd.DataFrame(preferred_rows)
+    return preferred.drop(columns=["_identity_key", "_chapter_missing", "_secondary_org", "_assignment_rank"], errors="ignore").reset_index(drop=True)
+
+
 def chapter_assignment_details(
     path: Path,
     sheet_name: str,
@@ -1713,11 +1769,12 @@ def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map
     return result, pd.DataFrame(exceptions)
 
 
-def resolve_missing_roster_chapters(roster: pd.DataFrame) -> pd.DataFrame:
+def resolve_missing_roster_chapters(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
     if roster.empty:
         return roster
 
     result = roster.copy()
+    secondary_orgs = secondary_organization_set(settings)
     known = result.loc[~result["chapter"].map(chapter_is_missing)].copy()
     id_name_candidates: Dict[Tuple[str, Tuple[str, str]], set[str]] = defaultdict(set)
     id_candidates: Dict[str, set[str]] = defaultdict(set)
@@ -1725,7 +1782,7 @@ def resolve_missing_roster_chapters(roster: pd.DataFrame) -> pd.DataFrame:
     for row in known.itertuples(index=False):
         student_id = clean_text(getattr(row, "student_id", ""))
         chapter = clean_text(getattr(row, "chapter", ""))
-        if not student_id or not chapter:
+        if not student_id or not chapter or normalize_chapter_name(chapter) in secondary_orgs:
             continue
         name_key = person_name_key(getattr(row, "first_name", ""), getattr(row, "last_name", ""))
         if name_key != ("", ""):
@@ -1982,11 +2039,12 @@ def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: 
     return deduped.reset_index(drop=True), pd.DataFrame(exception_rows)
 
 
-def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if roster.empty:
         return roster, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exceptions: List[dict] = []
     resolved_rows: List[pd.Series] = []
+    secondary_orgs = secondary_organization_set(settings)
     roster = roster.copy()
     roster["_identity_key"] = roster.apply(
         lambda row: (
@@ -1999,8 +2057,16 @@ def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
         axis=1,
     )
     for (_, _), group in roster.groupby(["_identity_key", "term_code"], dropna=False):
-        chapter_values = sorted({clean_text(value) for value in group["chapter"] if clean_text(value)})
-        status_values = sorted({clean_text(value) for value in group["org_status_bucket"] if clean_text(value)})
+        non_resigned_revoked = group.loc[~group["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"])].copy()
+        effective_group = non_resigned_revoked if not non_resigned_revoked.empty else group
+        chapter_values = sorted(
+            {
+                clean_text(value)
+                for value in effective_group["chapter"]
+                if clean_text(value) and normalize_chapter_name(clean_text(value)) not in secondary_orgs
+            }
+        )
+        status_values = sorted({clean_text(value) for value in effective_group["org_status_bucket"] if clean_text(value)})
         if len(chapter_values) > 1:
             exceptions.append(
                 {
@@ -2022,6 +2088,8 @@ def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
                 }
             )
         ranked = group.copy()
+        ranked["_resigned_or_revoked"] = ranked["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"]).astype(int)
+        ranked["_secondary_org"] = ranked["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
         ranked["_new_member"] = ranked["new_member_flag"].eq("Yes").astype(int)
         ranked["_known_id"] = ranked["student_id"].fillna("").astype(str).str.strip().ne("").astype(int)
         ranked["_status_priority"] = ranked["org_status_bucket"].map(
@@ -2036,34 +2104,58 @@ def resolve_roster_conflicts(roster: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Dat
                 "Active": 50,
             }
         ).fillna(0)
-        ranked = ranked.sort_values(by=["_status_priority", "_new_member", "_known_id"], ascending=[False, False, False])
-        resolved_rows.append(ranked.iloc[0].drop(labels=["_new_member", "_known_id", "_status_priority", "_identity_key"]))
+        ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False])
+        chosen_row = ranked.iloc[0].copy()
+        discarded_resigned_revoked = group.loc[group["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"])]
+        if (
+            not discarded_resigned_revoked.empty
+            and chosen_row["_resigned_or_revoked"] == 0
+            and discarded_resigned_revoked["chapter"].fillna("").astype(str).str.strip().ne(chosen_row.get("chapter", "")).any()
+        ):
+            existing_notes = clean_text(chosen_row.get("chapter_assignment_notes", ""))
+            rsrv_chapters = ", ".join(
+                sorted(
+                    {
+                        clean_text(value)
+                        for value in discarded_resigned_revoked["chapter"]
+                        if clean_text(value)
+                    }
+                )
+            )
+            note = f"Ignored same-term resigned/revoked roster row(s) from: {rsrv_chapters}."
+            chosen_row["chapter_assignment_notes"] = f"{existing_notes} {note}".strip() if existing_notes else note
+        resolved_rows.append(chosen_row.drop(labels=["_resigned_or_revoked", "_secondary_org", "_new_member", "_known_id", "_status_priority", "_identity_key"]))
     resolved = pd.DataFrame(resolved_rows).reset_index(drop=True)
     return resolved, pd.DataFrame(exceptions)
 
 
-def attach_org_entry_terms(roster: pd.DataFrame) -> pd.DataFrame:
+def attach_org_entry_terms(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
     if roster.empty:
         return roster
     result = roster.copy()
+    secondary_orgs = secondary_organization_set(settings)
     result["_term_sort"] = result["term_code"].map(sort_term_code)
     for student_id, group in result.groupby("student_id", dropna=False):
         if not clean_text(student_id):
             continue
-        explicit = group.loc[group["new_member_flag"].eq("Yes")].sort_values("_term_sort")
+        primary_group = group.loc[~group["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs)].copy()
+        working_group = primary_group if not primary_group.empty else group
+        explicit = working_group.loc[working_group["new_member_flag"].eq("Yes")].sort_values("_term_sort")
         if not explicit.empty:
             entry_code = clean_text(explicit.iloc[0]["term_code"])
             basis = "Explicit New Member"
         else:
-            ordered = group.sort_values("_term_sort")
+            ordered = working_group.sort_values("_term_sort")
             entry_code = clean_text(ordered.iloc[0]["term_code"])
             basis = "First Observed Roster"
+        if not primary_group.empty and len(primary_group) != len(group):
+            basis = f"{basis} (Primary Organization Preferred)"
         result.loc[group.index, "org_entry_term_code"] = entry_code
         result.loc[group.index, "org_entry_term_basis"] = basis
     return result.drop(columns=["_term_sort"])
 
 
-def build_master_longitudinal(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.DataFrame:
+def build_master_longitudinal(roster: pd.DataFrame, academic: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
     keys = sorted(
         set(
             list(roster[["student_id", "term_code"]].itertuples(index=False, name=None))
@@ -2071,7 +2163,8 @@ def build_master_longitudinal(roster: pd.DataFrame, academic: pd.DataFrame) -> p
         )
     )
     rows: List[dict] = []
-    roster_lookup = {(clean_text(row.student_id), clean_text(row.term_code)): row for row in roster.itertuples(index=False)}
+    preferred_roster = choose_preferred_roster_rows(roster, settings)
+    roster_lookup = {(clean_text(row.student_id), clean_text(row.term_code)): row for row in preferred_roster.itertuples(index=False)}
     academic_lookup = {(clean_text(row.student_id), clean_text(row.term_code)): row for row in academic.itertuples(index=False)}
 
     for student_id, term_code in keys:
@@ -2718,6 +2811,7 @@ def build_qa_checks(
     academic: pd.DataFrame,
     master: pd.DataFrame,
     summary: pd.DataFrame,
+    settings: Dict[str, object],
     issue_frames: Dict[str, pd.DataFrame],
     membership_reference_validation: pd.DataFrame,
     new_member_reference_validation: pd.DataFrame,
@@ -2727,9 +2821,11 @@ def build_qa_checks(
     reference_unclassified_rows: pd.DataFrame,
     retention_reference: pd.DataFrame,
 ) -> pd.DataFrame:
+    secondary_orgs = secondary_organization_set(settings)
+    primary_roster = roster.loc[~roster["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs)].copy() if not roster.empty else roster
     rows: List[dict] = [
         {"Check Group": "Schema", "Check": "Authoritative tables built", "Status": "Pass", "Value": 6, "Notes": "roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks"},
-        {"Check Group": "Duplicates", "Check": "Roster duplicate student-term rows", "Status": "Pass" if roster.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(roster.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
+        {"Check Group": "Duplicates", "Check": "Roster duplicate student-term rows (primary chapters only)", "Status": "Pass" if primary_roster.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(primary_roster.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": "Secondary organizations are ignored for this duplicate check."},
         {"Check Group": "Duplicates", "Check": "Academic duplicate student-term rows", "Status": "Pass" if academic.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(academic.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
         {"Check Group": "Duplicates", "Check": "Master duplicate student-term rows", "Status": "Pass" if master.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(master.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Students with roster but no academics", "Status": "Pass", "Value": int(summary.loc[summary["first_observed_org_term_code"].ne("") & summary["first_observed_academic_term_code"].eq("")].shape[0]), "Notes": ""},
@@ -2738,6 +2834,7 @@ def build_qa_checks(
         {"Check Group": "Coverage", "Check": "Still active outcomes", "Status": "Pass", "Value": int(summary["is_active_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(summary["is_unknown_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~summary["is_resolved_outcome"].fillna(False).astype(bool) & ~summary["is_active_outcome"].fillna(False).astype(bool) & ~summary["is_unknown_outcome"].fillna(False).astype(bool)).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Secondary organization roster rows", "Status": "Pass", "Value": int(roster["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).sum()) if not roster.empty else 0, "Notes": "These rows are preserved but ignored when choosing the primary chapter for analytics."},
         {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Manual chapter overrides applied", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("manual_override").sum()), "Notes": ""},
     ]
@@ -3079,15 +3176,15 @@ def build_canonical_pipeline(
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
-    roster_term = resolve_missing_roster_chapters(roster_term)
+    roster_term = resolve_missing_roster_chapters(roster_term, settings)
     roster_term = apply_manual_chapter_assignments(roster_term, manual_chapter_assignments)
 
     roster_term, roster_dup_issues = dedupe_table(roster_term, ["student_id", "term_code", "chapter"], "roster")
     academic_term, academic_dup_issues = dedupe_table(academic_term, ["student_id", "term_code"], "academic")
-    roster_term, roster_conflicts = resolve_roster_conflicts(roster_term)
-    roster_term = attach_org_entry_terms(roster_term)
+    roster_term, roster_conflicts = resolve_roster_conflicts(roster_term, settings)
+    roster_term = attach_org_entry_terms(roster_term, settings)
 
-    master_longitudinal = build_master_longitudinal(roster_term, academic_term)
+    master_longitudinal = build_master_longitudinal(roster_term, academic_term, settings)
     student_summary, summary_qa, outcome_issues = build_student_summary(master_longitudinal, snapshot, graduation, settings, chapter_mapping)
     if not student_summary.empty:
         student_summary = student_summary.loc[:, ~student_summary.columns.duplicated()].copy()
@@ -3167,6 +3264,7 @@ def build_canonical_pipeline(
         academic_term,
         master_longitudinal,
         student_summary,
+        settings,
         issue_frames,
         membership_reference_validation,
         new_member_reference_validation,

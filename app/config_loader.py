@@ -38,6 +38,15 @@ def load_settings() -> Dict[str, Any]:
             {"label": "Large (50-99)", "min": 50, "max": 99},
             {"label": "Very Large (100+)", "min": 100, "max": None},
         ],
+        "secondary_organizations": [
+            "Phi Delta Chi",
+            "Alpha Phi Omega",
+            "Delta Sigma Pi",
+            "Alpha Kappa Psi",
+            "Gamma Sigma Alpha",
+            "Rho Lambda",
+            "Order of Omega",
+        ],
         "completeness_fields": [
             "student_id",
             "chapter",
