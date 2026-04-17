@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -2897,16 +2898,13 @@ def build_canonical_pipeline(
     write_frame(files["retention_reference_values"], retention_reference)
     files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
-        write_frame(files[key], issue_frames.get(key, pd.DataFrame()))
+        write_frame(files[key], ensure_columns(issue_frames.get(key, pd.DataFrame()), empty_exception_frame.columns))
 
     latest_folder = output_root / "latest"
     latest_folder.mkdir(parents=True, exist_ok=True)
     for key, path in files.items():
         target = latest_folder / path.name
-        if path.suffix == ".csv":
-            write_frame(target, pd.read_csv(path))
-        elif path.suffix == ".json":
-            target.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        shutil.copyfile(path, target)
 
     return CanonicalBuildResult(output_folder=output_folder, files=files)
 
