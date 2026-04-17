@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import inspect
 import json
 import math
 import re
@@ -9,7 +11,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -44,6 +46,7 @@ DEFAULT_MEMBERSHIP_REFERENCE_ROOT = ROOT / "data" / "inbox" / "membership_refere
 DEFAULT_GPA_REFERENCE_ROOT = ROOT / "data" / "inbox" / "gpa_reference"
 DEFAULT_GPA_BENCHMARK_ROOT = ROOT / "data" / "inbox" / "gpa_benchmark_reference"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "canonical"
+DEFAULT_CACHE_ROOT = DEFAULT_OUTPUT_ROOT / "_source_cache"
 SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
 
 TERM_RE = re.compile(r"(Winter|Spring|Summer|Fall)\s+(19\d{2}|20\d{2})", re.IGNORECASE)
@@ -155,6 +158,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gpa-reference-root", default=str(DEFAULT_GPA_REFERENCE_ROOT))
     parser.add_argument("--gpa-benchmark-root", default=str(DEFAULT_GPA_BENCHMARK_ROOT))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument("--cache-root", default=str(DEFAULT_CACHE_ROOT))
+    parser.add_argument("--refresh-source-cache", action="store_true", help="Force raw source files to be re-read instead of using cached normalized source tables.")
     return parser.parse_args()
 
 
@@ -182,6 +187,96 @@ def combine_reference_frames(
     if dedupe_subset:
         combined = combined.drop_duplicates(subset=list(dedupe_subset), keep="first")
     return ensure_columns(combined, columns)
+
+
+def read_cached_frame(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(path, low_memory=False)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame()
+
+
+def write_cache_manifest(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def read_cache_manifest(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def file_signature(path: Path) -> dict:
+    try:
+        stat = path.stat()
+        resolved = path.resolve()
+    except Exception:
+        stat = path.stat()
+        resolved = path
+    return {
+        "path": str(resolved),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def files_manifest(paths: Sequence[Path]) -> List[dict]:
+    seen: set[str] = set()
+    manifest: List[dict] = []
+    for path in sorted(paths, key=lambda item: str(item).lower()):
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists():
+            manifest.append(file_signature(path))
+    return manifest
+
+
+def source_cache_token(functions: Sequence[Callable[..., object]]) -> str:
+    hasher = hashlib.sha256()
+    for function in functions:
+        try:
+            source = inspect.getsource(function)
+        except (OSError, TypeError):
+            source = repr(function)
+        hasher.update(source.encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def load_or_build_cached_frames(
+    *,
+    cache_root: Path,
+    cache_name: str,
+    manifest: dict,
+    builder: Callable[[], Tuple[pd.DataFrame, ...]],
+    file_names: Sequence[str],
+    refresh: bool,
+) -> Tuple[Tuple[pd.DataFrame, ...], bool]:
+    cache_dir = cache_root / cache_name
+    cache_manifest_path = cache_dir / "manifest.json"
+    cache_files = [cache_dir / file_name for file_name in file_names]
+    cached_manifest = read_cache_manifest(cache_manifest_path)
+    cache_ready = (
+        not refresh
+        and cached_manifest == manifest
+        and all(path.exists() for path in cache_files)
+    )
+    if cache_ready:
+        return tuple(read_cached_frame(path) for path in cache_files), True
+
+    frames = builder()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    for frame, path in zip(frames, cache_files):
+        write_frame(path, frame)
+    write_cache_manifest(cache_manifest_path, manifest)
+    return frames, False
 
 
 def coerce_numeric(series: pd.Series) -> pd.Series:
@@ -3089,6 +3184,8 @@ def build_canonical_pipeline(
     gpa_reference_root: Path,
     gpa_benchmark_root: Path,
     output_root: Path,
+    cache_root: Path,
+    refresh_source_cache: bool = False,
 ) -> CanonicalBuildResult:
     schema = load_schema()
     settings = load_settings()
@@ -3096,13 +3193,116 @@ def build_canonical_pipeline(
     ensure_manual_chapter_assignment_template()
     manual_chapter_assignments = load_manual_chapter_assignments()
 
-    roster_term, roster_load_issues = load_roster_term_table([roster_root, roster_inbox])
-    academic_term, academic_load_issues = load_academic_term_table(academic_root)
-    snapshot = load_snapshot_table(academic_root)
-    graduation, graduation_load_issues = load_graduation_table(graduation_root)
-    reference_inventory, reference_inventory_issues = load_reference_inventory_table(
-        [reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root]
+    roster_source_paths = roster_files([roster_root, roster_inbox])
+    academic_source_paths = academic_files(academic_root)
+    snapshot_source_paths = snapshot_files(academic_root)
+    graduation_source_paths = graduation_files(graduation_root)
+    reference_source_paths = roster_files([reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root])
+
+    roster_manifest = {
+        "files": files_manifest(roster_source_paths),
+        "loader_token": source_cache_token(
+            [
+                load_roster_term_table,
+                find_header_row,
+                find_status_column,
+                detect_inline_chapter_label,
+                get_cell,
+                infer_chapter,
+                normalize_banner_id,
+                normalize_chapter_name,
+                normalize_status,
+                chapter_assignment_details,
+                roster_status_bucket,
+            ]
+        ),
+    }
+    academic_manifest = {
+        "files": files_manifest(academic_source_paths),
+        "loader_token": source_cache_token(
+            [
+                load_academic_term_table,
+                map_grade_headers,
+                normalize_banner_id,
+                standing_bucket,
+            ]
+        ),
+    }
+    snapshot_manifest = {
+        "files": files_manifest(snapshot_source_paths),
+        "loader_token": source_cache_token(
+            [
+                load_snapshot_table,
+                choose_best_snapshot_rows,
+                normalize_banner_id,
+            ]
+        ),
+    }
+    graduation_manifest = {
+        "files": files_manifest(graduation_source_paths),
+        "loader_token": source_cache_token(
+            [
+                load_graduation_table,
+                normalize_banner_id,
+            ]
+        ),
+    }
+    reference_manifest = {
+        "files": files_manifest(reference_source_paths),
+        "loader_token": source_cache_token(
+            [
+                load_reference_inventory_table,
+                detect_membership_reference_header_row,
+                classify_reference_row,
+            ]
+        ),
+    }
+
+    (roster_term, roster_load_issues), roster_cache_hit = load_or_build_cached_frames(
+        cache_root=cache_root,
+        cache_name="roster_sources",
+        manifest=roster_manifest,
+        builder=lambda: load_roster_term_table([roster_root, roster_inbox]),
+        file_names=["roster_term.csv", "roster_load_issues.csv"],
+        refresh=refresh_source_cache,
     )
+    (academic_term, academic_load_issues), academic_cache_hit = load_or_build_cached_frames(
+        cache_root=cache_root,
+        cache_name="academic_sources",
+        manifest=academic_manifest,
+        builder=lambda: load_academic_term_table(academic_root),
+        file_names=["academic_term.csv", "academic_load_issues.csv"],
+        refresh=refresh_source_cache,
+    )
+    (snapshot,), snapshot_cache_hit = load_or_build_cached_frames(
+        cache_root=cache_root,
+        cache_name="snapshot_sources",
+        manifest=snapshot_manifest,
+        builder=lambda: (load_snapshot_table(academic_root),),
+        file_names=["snapshot.csv"],
+        refresh=refresh_source_cache,
+    )
+    (graduation, graduation_load_issues), graduation_cache_hit = load_or_build_cached_frames(
+        cache_root=cache_root,
+        cache_name="graduation_sources",
+        manifest=graduation_manifest,
+        builder=lambda: load_graduation_table(graduation_root),
+        file_names=["graduation.csv", "graduation_load_issues.csv"],
+        refresh=refresh_source_cache,
+    )
+    (reference_inventory, reference_inventory_issues), reference_cache_hit = load_or_build_cached_frames(
+        cache_root=cache_root,
+        cache_name="reference_sources",
+        manifest=reference_manifest,
+        builder=lambda: load_reference_inventory_table([reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root]),
+        file_names=["reference_inventory.csv", "reference_inventory_issues.csv"],
+        refresh=refresh_source_cache,
+    )
+    print(f"Source cache - roster: {'hit' if roster_cache_hit else 'rebuilt'}")
+    print(f"Source cache - academic: {'hit' if academic_cache_hit else 'rebuilt'}")
+    print(f"Source cache - snapshot: {'hit' if snapshot_cache_hit else 'rebuilt'}")
+    print(f"Source cache - graduation: {'hit' if graduation_cache_hit else 'rebuilt'}")
+    print(f"Source cache - reference: {'hit' if reference_cache_hit else 'rebuilt'}")
     membership_reference = build_reference_subset(
         reference_inventory,
         "membership_count",
@@ -3352,6 +3552,8 @@ def main() -> None:
         gpa_reference_root=Path(args.gpa_reference_root).expanduser().resolve(),
         gpa_benchmark_root=Path(args.gpa_benchmark_root).expanduser().resolve(),
         output_root=Path(args.output_root).expanduser().resolve(),
+        cache_root=Path(args.cache_root).expanduser().resolve(),
+        refresh_source_cache=args.refresh_source_cache,
     )
     print(f"Canonical outputs written to: {result.output_folder}")
     for key, path in result.files.items():

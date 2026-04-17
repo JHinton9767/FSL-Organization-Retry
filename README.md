@@ -44,6 +44,36 @@ py run_canonical_pipeline.py
 
 After the canonical bundle exists, any workbook/report builders are downstream exports only.
 
+## Faster reruns
+
+`run_canonical_pipeline.py` now keeps a persistent source cache under `output/canonical/_source_cache/`.
+
+On a normal rerun:
+
+- unchanged roster files reuse cached normalized roster input tables
+- unchanged academic files reuse cached normalized academic input tables
+- unchanged snapshot, graduation, and reference files do the same
+
+This means code changes in downstream analytics/report logic no longer need to reopen every raw Excel file just to rebuild the canonical outputs.
+
+Use:
+
+```powershell
+py run_canonical_pipeline.py
+```
+
+If you changed raw parsing logic and want to force the source files to be re-read, use:
+
+```powershell
+py run_canonical_pipeline.py --refresh-source-cache
+```
+
+If you only changed a downstream builder, rerun only that builder instead of the full chain. For example:
+
+- report formatting only: `py run_executive_report.py`
+- chapter workbooks only: `py run_chapter_history_workbooks.py`
+- app UI only: `py run_local_analytics_app.py`
+
 ## Downstream exports
 
 These scripts now read canonical outputs instead of using old report files as upstream inputs:
