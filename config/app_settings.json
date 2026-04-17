@@ -35,9 +35,9 @@
   "outcome_resolution": {
     "priority_order": [
       "Graduated",
-      "Known Non-Graduate Exit",
+      "Resolved Non-Graduate Exit",
       "Still Active",
-      "Unknown",
+      "Truly Unknown / Unresolved",
       "Other / Unmapped"
     ],
     "group_patterns": {
@@ -46,7 +46,7 @@
         "\\bALUM",
         "\\bDEGREE\\b"
       ],
-      "Known Non-Graduate Exit": [
+      "Resolved Non-Graduate Exit": [
         "\\bINACTIVE\\b",
         "\\bLEFT\\b",
         "\\bRESIGN",
@@ -66,22 +66,25 @@
         "\\bCURRENT\\b",
         "\\bMEMBER\\b",
         "\\bNEW MEMBER\\b",
-        "\\bCOUNCIL\\b"
+        "\\bCOUNCIL\\b",
+        "\\bENROLLED\\b"
       ],
-      "Unknown": [
+      "Truly Unknown / Unresolved": [
         "\\bUNKNOWN\\b",
         "\\bUNRESOLVED\\b",
         "\\bPENDING\\b",
         "\\bNOT KNOWN\\b",
         "\\bMISSING\\b",
         "\\bUNMAPPED\\b",
-        "\\bNO OUTCOME\\b"
+        "\\bNO OUTCOME\\b",
+        "\\bNO FURTHER OBSERVATION\\b",
+        "\\bACTIVE\\/UNKNOWN\\b"
       ],
       "Other / Unmapped": []
     },
     "resolved_only_excluded_groups": [
       "Still Active",
-      "Unknown",
+      "Truly Unknown / Unresolved",
       "Other / Unmapped"
     ]
   }

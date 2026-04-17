@@ -48,9 +48,9 @@ def load_settings() -> Dict[str, Any]:
         "outcome_resolution": {
             "priority_order": [
                 "Graduated",
-                "Known Non-Graduate Exit",
+                "Resolved Non-Graduate Exit",
                 "Still Active",
-                "Unknown",
+                "Truly Unknown / Unresolved",
                 "Other / Unmapped",
             ],
             "group_patterns": {
@@ -59,7 +59,7 @@ def load_settings() -> Dict[str, Any]:
                     "\\bALUM",
                     "\\bDEGREE\\b",
                 ],
-                "Known Non-Graduate Exit": [
+                "Resolved Non-Graduate Exit": [
                     "\\bINACTIVE\\b",
                     "\\bLEFT\\b",
                     "\\bRESIGN",
@@ -80,8 +80,9 @@ def load_settings() -> Dict[str, Any]:
                     "\\bMEMBER\\b",
                     "\\bNEW MEMBER\\b",
                     "\\bCOUNCIL\\b",
+                    "\\bENROLLED\\b",
                 ],
-                "Unknown": [
+                "Truly Unknown / Unresolved": [
                     "\\bUNKNOWN\\b",
                     "\\bUNRESOLVED\\b",
                     "\\bPENDING\\b",
@@ -89,12 +90,14 @@ def load_settings() -> Dict[str, Any]:
                     "\\bMISSING\\b",
                     "\\bUNMAPPED\\b",
                     "\\bNO OUTCOME\\b",
+                    "\\bNO FURTHER OBSERVATION\\b",
+                    "\\bACTIVE\\/UNKNOWN\\b",
                 ],
                 "Other / Unmapped": [],
             },
             "resolved_only_excluded_groups": [
                 "Still Active",
-                "Unknown",
+                "Truly Unknown / Unresolved",
                 "Other / Unmapped",
             ],
         },

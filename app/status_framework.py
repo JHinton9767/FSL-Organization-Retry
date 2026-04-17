@@ -10,22 +10,40 @@ from app.io_utils import normalize_text
 
 ALL_STUDENTS_LABEL = "All Students"
 RESOLVED_OUTCOMES_ONLY_LABEL = "Resolved Outcomes Only"
+FULL_POPULATION_LABEL = "Full Population"
+CUSTOM_FILTERED_LABEL = "Custom filtered population"
+
+GRADUATED_GROUP = "Graduated"
+RESOLVED_NON_GRADUATE_GROUP = "Resolved Non-Graduate Exit"
+STILL_ACTIVE_GROUP = "Still Active"
+TRULY_UNKNOWN_GROUP = "Truly Unknown / Unresolved"
+OTHER_UNMAPPED_GROUP = "Other / Unmapped"
+
+GROUP_ALIASES = {
+    "known non-graduate exit": RESOLVED_NON_GRADUATE_GROUP,
+    "resolved non-graduate exit": RESOLVED_NON_GRADUATE_GROUP,
+    "unknown": TRULY_UNKNOWN_GROUP,
+    "truly unknown / unresolved": TRULY_UNKNOWN_GROUP,
+    "other / unmapped": OTHER_UNMAPPED_GROUP,
+    "graduated": GRADUATED_GROUP,
+    "still active": STILL_ACTIVE_GROUP,
+}
 
 DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
     "priority_order": [
-        "Graduated",
-        "Known Non-Graduate Exit",
-        "Still Active",
-        "Unknown",
-        "Other / Unmapped",
+        GRADUATED_GROUP,
+        RESOLVED_NON_GRADUATE_GROUP,
+        STILL_ACTIVE_GROUP,
+        TRULY_UNKNOWN_GROUP,
+        OTHER_UNMAPPED_GROUP,
     ],
     "group_patterns": {
-        "Graduated": [
+        GRADUATED_GROUP: [
             r"\bGRADUAT",
             r"\bALUM",
             r"\bDEGREE\b",
         ],
-        "Known Non-Graduate Exit": [
+        RESOLVED_NON_GRADUATE_GROUP: [
             r"\bINACTIVE\b",
             r"\bLEFT\b",
             r"\bRESIGN",
@@ -39,15 +57,16 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
             r"\bDISMISS",
             r"\bEXPEL",
         ],
-        "Still Active": [
+        STILL_ACTIVE_GROUP: [
             r"\bSTILL ACTIVE\b",
             r"\bACTIVE\b",
             r"\bCURRENT\b",
             r"\bMEMBER\b",
             r"\bNEW MEMBER\b",
             r"\bCOUNCIL\b",
+            r"\bENROLLED\b",
         ],
-        "Unknown": [
+        TRULY_UNKNOWN_GROUP: [
             r"\bUNKNOWN\b",
             r"\bUNRESOLVED\b",
             r"\bPENDING\b",
@@ -55,15 +74,24 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
             r"\bMISSING\b",
             r"\bUNMAPPED\b",
             r"\bNO OUTCOME\b",
+            r"\bNO FURTHER OBSERVATION\b",
+            r"\bACTIVE\/UNKNOWN\b",
         ],
-        "Other / Unmapped": [],
+        OTHER_UNMAPPED_GROUP: [],
     },
     "resolved_only_excluded_groups": [
-        "Still Active",
-        "Unknown",
-        "Other / Unmapped",
+        STILL_ACTIVE_GROUP,
+        TRULY_UNKNOWN_GROUP,
+        OTHER_UNMAPPED_GROUP,
     ],
 }
+
+
+def _canonical_group_name(value: object) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+    return GROUP_ALIASES.get(text.lower(), text)
 
 
 def _merged_outcome_resolution_config(config: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -79,11 +107,11 @@ def _merged_outcome_resolution_config(config: Dict[str, Any] | None) -> Dict[str
         return merged
 
     if config.get("priority_order"):
-        merged["priority_order"] = list(config["priority_order"])
+        merged["priority_order"] = [_canonical_group_name(value) for value in config["priority_order"]]
     for group, patterns in config.get("group_patterns", {}).items():
-        merged["group_patterns"][group] = list(patterns)
+        merged["group_patterns"][_canonical_group_name(group)] = list(patterns)
     if config.get("resolved_only_excluded_groups"):
-        merged["resolved_only_excluded_groups"] = list(config["resolved_only_excluded_groups"])
+        merged["resolved_only_excluded_groups"] = [_canonical_group_name(value) for value in config["resolved_only_excluded_groups"]]
     return merged
 
 
@@ -117,23 +145,25 @@ def classify_outcome_resolution(
     active_is_true = _is_true(active_flag)
 
     if not candidates and active_is_true:
-        return "Still Active"
+        return STILL_ACTIVE_GROUP
     if not candidates:
-        return "Unknown"
+        return TRULY_UNKNOWN_GROUP
 
-    for group in [item for item in merged["priority_order"] if item not in {"Still Active", "Unknown"}]:
+    for group in [item for item in merged["priority_order"] if item not in {STILL_ACTIVE_GROUP, TRULY_UNKNOWN_GROUP, OTHER_UNMAPPED_GROUP}]:
         patterns = merged["group_patterns"].get(group, [])
         if any(_matches_group(candidate, patterns) for candidate in candidates):
             return group
 
-    if active_is_true:
-        return "Still Active"
+    if active_is_true or _matches_group(roster_text, merged["group_patterns"].get(STILL_ACTIVE_GROUP, [])):
+        return STILL_ACTIVE_GROUP
 
-    for group in [item for item in merged["priority_order"] if item in {"Still Active", "Unknown"}]:
-        patterns = merged["group_patterns"].get(group, [])
-        if any(_matches_group(candidate, patterns) for candidate in candidates):
-            return group
-    return "Other / Unmapped"
+    if any(_matches_group(candidate, merged["group_patterns"].get(TRULY_UNKNOWN_GROUP, [])) for candidate in candidates):
+        return TRULY_UNKNOWN_GROUP
+
+    if any(_matches_group(candidate, merged["group_patterns"].get(STILL_ACTIVE_GROUP, [])) for candidate in candidates):
+        return TRULY_UNKNOWN_GROUP
+
+    return OTHER_UNMAPPED_GROUP
 
 
 def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] | None = None) -> pd.DataFrame:
@@ -141,11 +171,16 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
     outcome_series = frame.get("latest_outcome_bucket", pd.Series("", index=frame.index, dtype="object"))
     roster_series = frame.get("latest_roster_status_bucket", pd.Series("", index=frame.index, dtype="object"))
     active_series = frame.get("active_flag", pd.Series(pd.NA, index=frame.index, dtype="object"))
+    active_hints = _bool_like_series(active_series)
+    if "outcome_evidence_source" in frame.columns:
+        active_hints = active_hints | frame["outcome_evidence_source"].fillna("").astype(str).str.contains("current or active signal only", case=False, na=False)
+    if "latest_snapshot_student_status" in frame.columns:
+        active_hints = active_hints | frame["latest_snapshot_student_status"].fillna("").astype(str).str.contains(r"active|current|enrolled", case=False, na=False)
 
     groups = pd.Series(
         [
             classify_outcome_resolution(outcome_value, roster_value, active_value, merged)
-            for outcome_value, roster_value, active_value in zip(outcome_series, roster_series, active_series)
+            for outcome_value, roster_value, active_value in zip(outcome_series, roster_series, active_hints)
         ],
         index=frame.index,
         dtype="object",
@@ -160,15 +195,24 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
             [_bool_like_series(frame[column]) for column in graduation_columns],
             axis=1,
         ).fillna(False).any(axis=1)
-        groups = groups.where(~graduated_mask, "Graduated")
+        groups = groups.where(~graduated_mask, GRADUATED_GROUP)
 
     excluded_groups = set(merged["resolved_only_excluded_groups"])
     included = ~groups.isin(excluded_groups)
     exclusion_reason = groups.where(~included, "")
+    graduated = groups.eq(GRADUATED_GROUP)
+    known_non_graduate = groups.eq(RESOLVED_NON_GRADUATE_GROUP)
+    active = groups.eq(STILL_ACTIVE_GROUP)
+    unknown = groups.eq(TRULY_UNKNOWN_GROUP)
 
     return pd.DataFrame(
         {
             "outcome_resolution_group": groups,
+            "is_resolved_outcome": included,
+            "is_active_outcome": active,
+            "is_unknown_outcome": unknown,
+            "is_graduated": graduated,
+            "is_known_non_graduate_exit": known_non_graduate,
             "resolved_outcomes_only_flag": included,
             "resolved_outcome_excluded_flag": ~included,
             "resolved_outcome_exclusion_reason": exclusion_reason,
@@ -194,9 +238,11 @@ def student_count(frame: pd.DataFrame) -> int:
 
 
 def resolved_outcomes_only_mask(frame: pd.DataFrame) -> pd.Series:
+    if "is_resolved_outcome" in frame.columns:
+        return _bool_like_series(frame["is_resolved_outcome"]).fillna(False).astype(bool)
     if "resolved_outcomes_only_flag" not in frame.columns:
         return pd.Series(True, index=frame.index, dtype="bool")
-    return frame["resolved_outcomes_only_flag"].fillna(False).astype(bool)
+    return _bool_like_series(frame["resolved_outcomes_only_flag"]).fillna(False).astype(bool)
 
 
 def resolved_outcomes_only_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -205,13 +251,22 @@ def resolved_outcomes_only_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 def outcome_population_summary(frame: pd.DataFrame) -> Dict[str, float]:
     total_students = student_count(frame)
-    resolved_frame = resolved_outcomes_only_frame(frame)
-    resolved_students = student_count(resolved_frame)
+    resolved_students = student_count(frame.loc[_bool_like_series(frame.get("is_resolved_outcome", frame.get("resolved_outcomes_only_flag", pd.Series(False, index=frame.index))))])
+    graduated_students = student_count(frame.loc[_bool_like_series(frame.get("is_graduated", pd.Series(False, index=frame.index)))])
+    known_non_graduate_students = student_count(frame.loc[_bool_like_series(frame.get("is_known_non_graduate_exit", pd.Series(False, index=frame.index)))])
+    still_active_students = student_count(frame.loc[_bool_like_series(frame.get("is_active_outcome", pd.Series(False, index=frame.index)))])
+    unknown_students = student_count(frame.loc[_bool_like_series(frame.get("is_unknown_outcome", pd.Series(False, index=frame.index)))])
+    other_students = max(total_students - resolved_students - still_active_students - unknown_students, 0)
     excluded_students = max(total_students - resolved_students, 0)
     excluded_share = (excluded_students / total_students) if total_students else 0.0
     return {
         "all_students": total_students,
         "resolved_students": resolved_students,
+        "graduated_students": graduated_students,
+        "known_non_graduate_exit_students": known_non_graduate_students,
+        "still_active_students": still_active_students,
+        "unknown_students": unknown_students,
+        "other_unmapped_students": other_students,
         "excluded_students": excluded_students,
         "excluded_share": excluded_share,
     }

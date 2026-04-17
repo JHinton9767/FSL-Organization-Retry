@@ -63,8 +63,14 @@ def _population_metric_columns(metric_views: dict[str, object], population_label
         metric_population_column("Eligible N", RESOLVED_OUTCOMES_ONLY_LABEL): resolved_result["denominator"],
         metric_population_column("Numerator", RESOLVED_OUTCOMES_ONLY_LABEL): resolved_result["numerator"],
         metric_population_column("Metric Value", RESOLVED_OUTCOMES_ONLY_LABEL): resolved_result["value"],
-        "Excluded Active/Unknown N": metric_views["excluded_active_unknown_n"],
-        "Excluded Active/Unknown Share": metric_views["excluded_active_unknown_share"],
+        "Resolved Count": metric_views["resolved_n"],
+        "Graduated Count": metric_views["graduated_n"],
+        "Resolved Non-Graduate Exit Count": metric_views["resolved_non_graduate_exit_n"],
+        "Still Active Count": metric_views["still_active_n"],
+        "Truly Unknown Count": metric_views["truly_unknown_n"],
+        "Other / Unmapped Count": metric_views["other_unmapped_n"],
+        "Excluded Count": metric_views["excluded_n"],
+        "Excluded Share": metric_views["excluded_share"],
     }
 
 
@@ -267,6 +273,10 @@ def build_distribution_table(
     if summary.empty or group_field not in summary.columns or category_field not in summary.columns:
         return pd.DataFrame()
 
+    def _truthy_sum(series: pd.Series) -> int:
+        lowered = series.fillna("").astype(str).str.strip().str.lower()
+        return int((lowered.eq("true") | lowered.eq("yes") | lowered.eq("1")).sum())
+
     def _distribution_counts(frame: pd.DataFrame, count_column: str, share_column: str) -> pd.DataFrame:
         counts = (
             frame.groupby([group_field, category_field], dropna=False)["student_id"]
@@ -305,10 +315,29 @@ def build_distribution_table(
     counts = counts.loc[totals >= min_n].copy()
     counts["Count"] = counts[selected_count_column]
     counts["Share"] = counts[selected_share_column]
-    counts["Excluded Active/Unknown N"] = (
-        counts.groupby(group_field)[metric_population_column("Count", ALL_STUDENTS_LABEL)].transform("sum")
-        - counts.groupby(group_field)[metric_population_column("Count", RESOLVED_OUTCOMES_ONLY_LABEL)].transform("sum")
+    group_population = (
+        summary.groupby(group_field, dropna=False)
+        .agg(
+            **{
+                "All Students Count": ("student_id", "nunique"),
+                "Resolved Count": ("is_resolved_outcome", _truthy_sum),
+                "Still Active Count": ("is_active_outcome", _truthy_sum),
+                "Truly Unknown Count": ("is_unknown_outcome", _truthy_sum),
+                "Graduated Count": ("is_graduated", _truthy_sum),
+                "Resolved Non-Graduate Exit Count": ("is_known_non_graduate_exit", _truthy_sum),
+            }
+        )
+        .reset_index()
     )
+    group_population[group_field] = group_population[group_field].fillna("").astype(str).str.strip().replace("", "Unknown")
+    group_population["Other / Unmapped Count"] = (
+        group_population["All Students Count"]
+        - group_population["Resolved Count"]
+        - group_population["Still Active Count"]
+        - group_population["Truly Unknown Count"]
+    ).clip(lower=0)
+    group_population["Excluded Count"] = group_population["Still Active Count"] + group_population["Truly Unknown Count"] + group_population["Other / Unmapped Count"]
+    counts = counts.merge(group_population, on=group_field, how="left")
     return counts.rename(columns={group_field: "Group", category_field: "Category"}).sort_values(["Group", "Category"])
 
 
@@ -400,7 +429,7 @@ def build_observed_term_series(
                 "Students": resolved_students if population_label == RESOLVED_OUTCOMES_ONLY_LABEL else full_students,
                 metric_population_column("Students", ALL_STUDENTS_LABEL): full_students,
                 metric_population_column("Students", RESOLVED_OUTCOMES_ONLY_LABEL): resolved_students,
-                "Excluded Active/Unknown N": max(full_students - resolved_students, 0),
+                "Excluded Count": max(full_students - resolved_students, 0),
             }
         )
     result = pd.DataFrame(rows)

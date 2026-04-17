@@ -20,11 +20,14 @@ from src.build_master_roster import (
     DEFAULT_INPUT_ROOT,
     SUPPORTED_EXTENSIONS,
     canonical_header,
+    chapter_from_filename,
     clean_text,
     detect_inline_chapter_label,
     find_header_row,
     find_status_column,
     get_cell,
+    infer_chapter,
+    is_placeholder_sheet_name,
     normalize_banner_id,
     normalize_chapter_name,
     normalize_status,
@@ -1074,6 +1077,44 @@ def person_name_key(first_name: object, last_name: object) -> Tuple[str, str]:
     return clean_text(first_name).lower(), clean_text(last_name).lower()
 
 
+def chapter_is_missing(value: object) -> bool:
+    text = clean_text(value)
+    if not text:
+        return True
+    normalized = normalize_chapter_name(text)
+    return not normalized or normalized == "Unknown"
+
+
+def chapter_assignment_details(
+    path: Path,
+    sheet_name: str,
+    chapter_raw: object,
+    fallback_raw: object,
+    fallback_source: str,
+) -> Tuple[str, str, str, str]:
+    explicit_chapter = normalize_chapter_name(chapter_raw)
+    if explicit_chapter and explicit_chapter != "Unknown":
+        return explicit_chapter, "original", "high", "Loaded from source chapter field."
+
+    fallback_chapter = normalize_chapter_name(fallback_raw)
+    if fallback_chapter and fallback_chapter != "Unknown" and fallback_source == "original":
+        return fallback_chapter, "original", "high", "Loaded from inline chapter label in source sheet."
+
+    inferred_sheet = normalize_chapter_name(sheet_name)
+    inferred_file = chapter_from_filename(path)
+    inferred = infer_chapter(path, sheet_name) or fallback_chapter
+
+    if inferred and inferred != "Unknown":
+        if inferred_sheet and inferred == inferred_sheet and not is_placeholder_sheet_name(sheet_name):
+            return inferred, "inferred_from_sheet_name", "medium", "Inferred from workbook sheet name."
+        if inferred_file and inferred == inferred_file:
+            return inferred, "inferred_from_file_name", "medium", "Inferred from source file name."
+        if fallback_source in {"inferred_from_sheet_name", "inferred_from_file_name"}:
+            return inferred, fallback_source, "medium", f"Inferred from {fallback_source.replace('_', ' ')}."
+
+    return "", "unresolved", "low", "No reliable chapter assignment was found in the source row, sheet, or file name."
+
+
 def map_grade_headers(headers: Sequence[object]) -> Dict[str, int]:
     mapped: Dict[str, int] = {}
     canon_headers = [canonical_header(value) for value in headers]
@@ -1302,9 +1343,18 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                 if "status" not in header_map and status_col_idx is not None:
                     header_map["status"] = status_col_idx
                 data_start_row = max(header_row_idx, status_row_idx or header_row_idx) + 1
-                default_chapter = normalize_chapter_name(ws.title or path.stem) or "Unknown"
+                default_chapter = infer_chapter(path, ws.title) or normalize_chapter_name(ws.title or path.stem) or "Unknown"
                 current_chapter_raw = ws.title
                 current_chapter = default_chapter
+                if default_chapter and default_chapter != "Unknown":
+                    if normalize_chapter_name(ws.title) == default_chapter and not is_placeholder_sheet_name(ws.title):
+                        current_chapter_source = "inferred_from_sheet_name"
+                    elif chapter_from_filename(path) == default_chapter:
+                        current_chapter_source = "inferred_from_file_name"
+                    else:
+                        current_chapter_source = "inferred_from_sheet_name"
+                else:
+                    current_chapter_source = "unresolved"
 
                 term_label = ""
                 for candidate in path_term_candidates(path):
@@ -1329,6 +1379,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                     if inline_chapter_raw:
                         current_chapter_raw = inline_chapter_raw
                         current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
+                        current_chapter_source = "original" if current_chapter and current_chapter != "Unknown" else current_chapter_source
                         continue
 
                     last_name = clean_text(get_cell(row, header_map.get("last_name")))
@@ -1342,7 +1393,13 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                     status_raw = clean_text(get_cell(row, header_map.get("status")))
                     position_raw = clean_text(get_cell(row, header_map.get("position")))
                     semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
-                    chapter = normalize_chapter_name(chapter_raw or current_chapter_raw or ws.title or path.stem) or current_chapter or "Unknown"
+                    chapter, chapter_assignment_source, chapter_assignment_confidence, chapter_assignment_notes = chapter_assignment_details(
+                        path,
+                        ws.title,
+                        chapter_raw,
+                        current_chapter_raw or ws.title,
+                        current_chapter_source,
+                    )
                     status_bucket = roster_status_bucket(status_raw, position_raw)
 
                     rows.append(
@@ -1363,6 +1420,9 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                             "term_source_basis": "folder_or_filename",
                             "chapter": chapter,
                             "chapter_raw": chapter_raw or current_chapter_raw or ws.title,
+                            "chapter_assignment_source": chapter_assignment_source,
+                            "chapter_assignment_confidence": chapter_assignment_confidence,
+                            "chapter_assignment_notes": chapter_assignment_notes,
                             "org_status_raw": status_raw,
                             "org_status_bucket": status_bucket,
                             "org_position_raw": position_raw,
@@ -1653,6 +1713,71 @@ def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map
     return result, pd.DataFrame(exceptions)
 
 
+def resolve_missing_roster_chapters(roster: pd.DataFrame) -> pd.DataFrame:
+    if roster.empty:
+        return roster
+
+    result = roster.copy()
+    known = result.loc[~result["chapter"].map(chapter_is_missing)].copy()
+    id_name_candidates: Dict[Tuple[str, Tuple[str, str]], set[str]] = defaultdict(set)
+    id_candidates: Dict[str, set[str]] = defaultdict(set)
+
+    for row in known.itertuples(index=False):
+        student_id = clean_text(getattr(row, "student_id", ""))
+        chapter = clean_text(getattr(row, "chapter", ""))
+        if not student_id or not chapter:
+            continue
+        name_key = person_name_key(getattr(row, "first_name", ""), getattr(row, "last_name", ""))
+        if name_key != ("", ""):
+            id_name_candidates[(student_id, name_key)].add(chapter)
+        id_candidates[student_id].add(chapter)
+
+    for idx, row in result.iterrows():
+        existing_source = clean_text(row.get("chapter_assignment_source", ""))
+        existing_chapter = clean_text(row.get("chapter", ""))
+        eligible_for_backfill = chapter_is_missing(existing_chapter) or existing_source in {"inferred_from_sheet_name", "inferred_from_file_name", "unresolved"}
+        if not eligible_for_backfill:
+            continue
+
+        student_id = clean_text(row.get("student_id", ""))
+        name_key = person_name_key(row.get("first_name", ""), row.get("last_name", ""))
+        matched_chapter = ""
+        source = ""
+        confidence = ""
+        notes = ""
+
+        id_name_key = (student_id, name_key)
+        if student_id and name_key != ("", "") and len(id_name_candidates.get(id_name_key, set())) == 1:
+            matched_chapter = next(iter(id_name_candidates[id_name_key]))
+            source = "matched_by_id_name"
+            confidence = "high"
+            notes = "Backfilled from another roster row with matching student ID and exact name."
+        elif student_id and len(id_candidates.get(student_id, set())) == 1:
+            matched_chapter = next(iter(id_candidates[student_id]))
+            source = "matched_by_id"
+            confidence = "medium"
+            notes = "Backfilled from another roster row with matching student ID."
+        else:
+            inferred, inferred_source, inferred_confidence, inferred_notes = chapter_assignment_details(
+                Path(clean_text(row.get("source_file", "")) or "unknown.xlsx"),
+                clean_text(row.get("source_sheet", "")),
+                row.get("chapter_raw", ""),
+                row.get("source_sheet", ""),
+                existing_source or "unresolved",
+            )
+            matched_chapter = inferred
+            source = inferred_source
+            confidence = inferred_confidence
+            notes = inferred_notes
+
+        result.at[idx, "chapter"] = matched_chapter
+        result.at[idx, "chapter_assignment_source"] = source or "unresolved"
+        result.at[idx, "chapter_assignment_confidence"] = confidence or "low"
+        result.at[idx, "chapter_assignment_notes"] = notes or "Chapter assignment remained unresolved."
+
+    return result
+
+
 def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if frame.empty:
         return frame, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
@@ -1811,6 +1936,9 @@ def build_master_longitudinal(roster: pd.DataFrame, academic: pd.DataFrame) -> p
                 "academic_present": "Yes" if academic_row is not None else "No",
                 "chapter": clean_text(getattr(roster_row, "chapter", "")),
                 "chapter_raw": clean_text(getattr(roster_row, "chapter_raw", "")),
+                "chapter_assignment_source": clean_text(getattr(roster_row, "chapter_assignment_source", "")),
+                "chapter_assignment_confidence": clean_text(getattr(roster_row, "chapter_assignment_confidence", "")),
+                "chapter_assignment_notes": clean_text(getattr(roster_row, "chapter_assignment_notes", "")),
                 "org_status_raw": clean_text(getattr(roster_row, "org_status_raw", "")),
                 "org_status_bucket": clean_text(getattr(roster_row, "org_status_bucket", "")),
                 "org_position_raw": clean_text(getattr(roster_row, "org_position_raw", "")),
@@ -2094,6 +2222,11 @@ def build_student_summary(
 
         first_standing = clean_text(academic_rows["academic_standing_bucket"].iloc[0]) if not academic_rows.empty else "Unknown"
         latest_standing = clean_text(academic_rows["academic_standing_bucket"].iloc[-1]) if not academic_rows.empty else "Unknown"
+        chapter_source_row = roster_rows.iloc[0] if not roster_rows.empty else None
+        if not roster_rows.empty:
+            chapter_source_candidates = roster_rows.loc[~roster_rows["chapter"].map(chapter_is_missing)]
+            if not chapter_source_candidates.empty:
+                chapter_source_row = chapter_source_candidates.iloc[0]
 
         summary_rows.append(
             {
@@ -2102,6 +2235,9 @@ def build_student_summary(
                 "chapter": clean_text(roster_rows["chapter"].iloc[0]) if not roster_rows.empty else "",
                 "initial_chapter": clean_text(roster_rows["chapter"].iloc[0]) if not roster_rows.empty else "",
                 "latest_chapter": clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else "",
+                "chapter_assignment_source": clean_text(chapter_source_row["chapter_assignment_source"]) if chapter_source_row is not None else "unresolved",
+                "chapter_assignment_confidence": clean_text(chapter_source_row["chapter_assignment_confidence"]) if chapter_source_row is not None else "low",
+                "chapter_assignment_notes": clean_text(chapter_source_row["chapter_assignment_notes"]) if chapter_source_row is not None else "No chapter assignment was available.",
                 "join_term_code": join_term_code,
                 "join_term": join_term,
                 "join_year": join_year,
@@ -2228,6 +2364,9 @@ def build_student_summary(
     resolution_fields = build_outcome_resolution_fields(summary, settings.get("outcome_resolution", {}))
     for column in resolution_fields.columns:
         summary[column] = resolution_fields[column]
+    summary["resolved_outcome_flag"] = summary["is_resolved_outcome"].fillna(False).map(lambda value: "Yes" if bool(value) else "No")
+    summary["resolved_outcome_excluded_flag"] = (~summary["is_resolved_outcome"].fillna(False)).map(lambda value: "Yes" if bool(value) else "No")
+    summary["resolved_outcome_exclusion_reason"] = summary["outcome_resolution_group"].where(~summary["is_resolved_outcome"].fillna(False), "")
 
     completeness_fields = [field for field in settings.get("completeness_fields", []) if field in summary.columns]
     if completeness_fields:
@@ -2239,8 +2378,11 @@ def build_student_summary(
     qa_rows.extend(
         [
             {"Check Group": "Coverage", "Check": "Unique students", "Status": "Pass", "Value": int(summary["student_id"].nunique()), "Notes": ""},
-            {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcomes_only_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
-            {"Check Group": "Coverage", "Check": "Unresolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcome_excluded_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["is_resolved_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Still active outcomes", "Status": "Pass", "Value": int(summary["is_active_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(summary["is_unknown_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~summary["is_resolved_outcome"].fillna(False).astype(bool) & ~summary["is_active_outcome"].fillna(False).astype(bool) & ~summary["is_unknown_outcome"].fillna(False).astype(bool)).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
         ]
     )
 
@@ -2262,6 +2404,11 @@ def build_student_summary(
         "family",
         "custom_group",
         "outcome_resolution_group",
+        "is_resolved_outcome",
+        "is_active_outcome",
+        "is_unknown_outcome",
+        "is_graduated",
+        "is_known_non_graduate_exit",
         "resolved_outcomes_only_flag",
         "data_completeness_rate",
         "latest_snapshot_student_status",
@@ -2428,8 +2575,11 @@ def build_qa_checks(
         {"Check Group": "Duplicates", "Check": "Master duplicate student-term rows", "Status": "Pass" if master.duplicated(subset=["student_id", "term_code"]).sum() == 0 else "Fail", "Value": int(master.duplicated(subset=["student_id", "term_code"]).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Students with roster but no academics", "Status": "Pass", "Value": int(summary.loc[summary["first_observed_org_term_code"].ne("") & summary["first_observed_academic_term_code"].eq("")].shape[0]), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Students with academics but no roster", "Status": "Pass", "Value": int(summary.loc[summary["first_observed_org_term_code"].eq("") & summary["first_observed_academic_term_code"].ne("")].shape[0]), "Notes": ""},
-        {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcomes_only_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
-        {"Check Group": "Coverage", "Check": "Unresolved outcomes", "Status": "Pass", "Value": int(summary["resolved_outcome_excluded_flag"].fillna(False).astype(bool).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Resolved outcomes", "Status": "Pass", "Value": int(summary["is_resolved_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Still active outcomes", "Status": "Pass", "Value": int(summary["is_active_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(summary["is_unknown_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~summary["is_resolved_outcome"].fillna(False).astype(bool) & ~summary["is_active_outcome"].fillna(False).astype(bool) & ~summary["is_unknown_outcome"].fillna(False).astype(bool)).sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
     ]
     rows.extend(build_spring_coverage_checks(roster, "Roster"))
     rows.extend(build_spring_coverage_checks(academic, "Academic"))
@@ -2767,6 +2917,7 @@ def build_canonical_pipeline(
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
+    roster_term = resolve_missing_roster_chapters(roster_term)
 
     roster_term, roster_dup_issues = dedupe_table(roster_term, ["student_id", "term_code", "chapter"], "roster")
     academic_term, academic_dup_issues = dedupe_table(academic_term, ["student_id", "term_code"], "academic")
@@ -2786,6 +2937,12 @@ def build_canonical_pipeline(
                 "outcome_evidence_source",
                 "school_entry_term_code",
                 "school_entry_term_basis",
+                "outcome_resolution_group",
+                "is_resolved_outcome",
+                "is_active_outcome",
+                "is_unknown_outcome",
+                "is_graduated",
+                "is_known_non_graduate_exit",
             ]
         ]
         master_longitudinal["final_outcome_bucket"] = master_longitudinal["student_id"].map(summary_lookup["latest_outcome_bucket"].to_dict())
@@ -2795,6 +2952,12 @@ def build_canonical_pipeline(
         master_longitudinal["outcome_evidence_source"] = master_longitudinal["student_id"].map(summary_lookup["outcome_evidence_source"].to_dict())
         master_longitudinal["school_entry_term_code"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_code"].to_dict())
         master_longitudinal["school_entry_term_basis"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_basis"].to_dict())
+        master_longitudinal["outcome_resolution_group"] = master_longitudinal["student_id"].map(summary_lookup["outcome_resolution_group"].to_dict())
+        master_longitudinal["is_resolved_outcome"] = master_longitudinal["student_id"].map(summary_lookup["is_resolved_outcome"].to_dict())
+        master_longitudinal["is_active_outcome"] = master_longitudinal["student_id"].map(summary_lookup["is_active_outcome"].to_dict())
+        master_longitudinal["is_unknown_outcome"] = master_longitudinal["student_id"].map(summary_lookup["is_unknown_outcome"].to_dict())
+        master_longitudinal["is_graduated"] = master_longitudinal["student_id"].map(summary_lookup["is_graduated"].to_dict())
+        master_longitudinal["is_known_non_graduate_exit"] = master_longitudinal["student_id"].map(summary_lookup["is_known_non_graduate_exit"].to_dict())
 
     cohort_metrics = build_cohort_metrics(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
@@ -2812,13 +2975,14 @@ def build_canonical_pipeline(
     ) if any(not frame.empty for frame in [roster_load_issues, academic_load_issues, graduation_load_issues, reference_inventory_issues, roster_dup_issues, academic_dup_issues]) else empty_exception_frame
     status_exceptions = build_status_exceptions(roster_term, academic_term)
     missing_evidence_cases = student_summary.loc[
-        student_summary["latest_outcome_bucket"].isin(list(UNRESOLVED_OUTCOMES)),
-        ["student_id", "student_name", "join_term", "latest_outcome_bucket", "outcome_evidence_source"],
+        (~student_summary["is_resolved_outcome"].fillna(False).astype(bool))
+        & (~student_summary["is_active_outcome"].fillna(False).astype(bool)),
+        ["student_id", "student_name", "join_term", "outcome_resolution_group", "outcome_evidence_source"],
     ].rename(
         columns={
             "student_name": "details",
             "join_term": "term_code",
-            "latest_outcome_bucket": "exception_type",
+            "outcome_resolution_group": "exception_type",
             "outcome_evidence_source": "source_file",
         }
     ) if not student_summary.empty else pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])

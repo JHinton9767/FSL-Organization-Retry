@@ -36,7 +36,7 @@ from app.metrics_engine import (
 )
 from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
-from app.status_framework import outcome_population_summary
+from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
 
 
 st.set_page_config(
@@ -234,23 +234,31 @@ def _population_transparency_frame(metric: MetricDefinition, metric_views: dict[
         [
             {
                 "Population View": ALL_STUDENTS_LABEL,
+                "Population Definition": all_result.get("population_definition", FULL_POPULATION_LABEL),
                 "Metric Value": all_result["value"],
                 "Formatted Value": format_metric_value(all_result["value"], metric.format),
                 "Numerator": all_result["numerator"],
                 "Denominator": all_result["denominator"],
                 "Students Included": all_result["students"],
-                "Excluded Active/Unknown N": metric_views["excluded_active_unknown_n"],
-                "Excluded Active/Unknown Share": metric_views["excluded_active_unknown_share"],
+                "Resolved Count": metric_views["resolved_n"],
+                "Still Active Excluded": metric_views["still_active_n"],
+                "Truly Unknown Excluded": metric_views["truly_unknown_n"],
+                "Other / Unmapped Excluded": metric_views["other_unmapped_n"],
+                "Excluded Total": metric_views["excluded_n"],
             },
             {
                 "Population View": RESOLVED_OUTCOMES_ONLY_LABEL,
+                "Population Definition": resolved_result.get("population_definition", RESOLVED_OUTCOMES_ONLY_LABEL),
                 "Metric Value": resolved_result["value"],
                 "Formatted Value": format_metric_value(resolved_result["value"], metric.format),
                 "Numerator": resolved_result["numerator"],
                 "Denominator": resolved_result["denominator"],
                 "Students Included": resolved_result["students"],
-                "Excluded Active/Unknown N": metric_views["excluded_active_unknown_n"],
-                "Excluded Active/Unknown Share": metric_views["excluded_active_unknown_share"],
+                "Resolved Count": metric_views["resolved_n"],
+                "Still Active Excluded": metric_views["still_active_n"],
+                "Truly Unknown Excluded": metric_views["truly_unknown_n"],
+                "Other / Unmapped Excluded": metric_views["other_unmapped_n"],
+                "Excluded Total": metric_views["excluded_n"],
             },
         ]
     )
@@ -261,31 +269,120 @@ def _render_population_summary(metric: MetricDefinition, metric_views: dict[str,
     all_result = metric_views["all"]
     resolved_result = metric_views["resolved_only"]
 
-    population_columns = st.columns(5)
+    population_columns = st.columns(6)
     with population_columns[0]:
         st.metric(ALL_STUDENTS_LABEL, format_metric_value(population_summary["all_students"], "integer"))
     with population_columns[1]:
         st.metric(RESOLVED_OUTCOMES_ONLY_LABEL, format_metric_value(population_summary["resolved_students"], "integer"))
     with population_columns[2]:
-        st.metric("Excluded Still Active/Unknown", format_metric_value(population_summary["excluded_students"], "integer"))
+        st.metric("Still Active", format_metric_value(population_summary["still_active_students"], "integer"))
     with population_columns[3]:
-        st.metric(
-            f"{metric.display_name} ({ALL_STUDENTS_LABEL})",
-            format_metric_value(all_result["value"], metric.format),
-        )
+        st.metric("Truly Unknown", format_metric_value(population_summary["unknown_students"], "integer"))
     with population_columns[4]:
+        st.metric("Other / Unmapped", format_metric_value(population_summary["other_unmapped_students"], "integer"))
+    with population_columns[5]:
         st.metric(
             f"{metric.display_name} ({RESOLVED_OUTCOMES_ONLY_LABEL})",
             format_metric_value(resolved_result["value"], metric.format),
         )
+    st.caption(
+        f"Full population result: {all_result['numerator']} / {all_result['denominator']} = {format_metric_value(all_result['value'], metric.format)} | "
+        f"Resolved-only result: {resolved_result['numerator']} / {resolved_result['denominator']} = {format_metric_value(resolved_result['value'], metric.format)}"
+    )
 
     transparency = _population_transparency_frame(metric, metric_views, filtered_summary)
     st.caption(
-        "The current/full view preserves the existing calculation. "
-        "The resolved-only view uses the same formula after excluding students classified as Still Active, Unknown, or other unresolved/unmapped outcomes by the configured status rules."
+        "Full Population keeps the entire filtered cohort in the denominator. "
+        "Resolved Outcomes Only keeps the same metric formula but excludes Still Active, Truly Unknown / Unresolved, and Other / Unmapped students."
     )
     st.dataframe(transparency, use_container_width=True, hide_index=True)
     return transparency
+
+
+def _truthy_mask(series: pd.Series) -> pd.Series:
+    lowered = series.fillna("").astype(str).str.strip().str.lower()
+    return lowered.eq("true") | lowered.eq("yes") | lowered.eq("1")
+
+
+def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
+    tables: dict[str, pd.DataFrame] = {}
+    if summary.empty:
+        return tables
+
+    def _count_table(column: str, label: str) -> None:
+        if column not in summary.columns:
+            return
+        counts = (
+            summary[column]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "Unknown")
+            .value_counts(dropna=False)
+            .rename_axis(label)
+            .reset_index(name="Student Count")
+        )
+        tables[label] = counts
+
+    _count_table("latest_outcome_bucket", "Raw Outcome Bucket")
+    _count_table("latest_roster_status_bucket", "Raw Roster Status")
+    _count_table("outcome_resolution_group", "Standardized Outcome Group")
+    _count_table("chapter_assignment_source", "Chapter Assignment Source")
+
+    summary_breakdown = outcome_population_summary(summary)
+    tables["Outcome Population Audit"] = pd.DataFrame(
+        [
+            {"Measure": "All Students", "Student Count": summary_breakdown["all_students"]},
+            {"Measure": "Resolved Outcomes", "Student Count": summary_breakdown["resolved_students"]},
+            {"Measure": "Graduated", "Student Count": summary_breakdown["graduated_students"]},
+            {"Measure": "Resolved Non-Graduate Exit", "Student Count": summary_breakdown["known_non_graduate_exit_students"]},
+            {"Measure": "Still Active", "Student Count": summary_breakdown["still_active_students"]},
+            {"Measure": "Truly Unknown / Unresolved", "Student Count": summary_breakdown["unknown_students"]},
+            {"Measure": "Other / Unmapped", "Student Count": summary_breakdown["other_unmapped_students"]},
+            {"Measure": "Excluded From Resolved-Only", "Student Count": summary_breakdown["excluded_students"]},
+        ]
+    )
+
+    chapter_unresolved = pd.DataFrame(
+        [
+            {
+                "Measure": "Rows with unresolved chapter assignment",
+                "Student Count": int(
+                    (
+                        summary.get("chapter_assignment_source", pd.Series("", index=summary.index, dtype="object"))
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .eq("unresolved")
+                    ).sum()
+                ),
+            },
+            {
+                "Measure": "Students reclassified by standardized taxonomy",
+                "Student Count": int(
+                    (
+                        summary.get("latest_outcome_bucket", pd.Series("", index=summary.index, dtype="object"))
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .replace("", "Unknown")
+                        .ne(
+                            summary.get("outcome_resolution_group", pd.Series("", index=summary.index, dtype="object"))
+                            .fillna("")
+                            .astype(str)
+                            .str.strip()
+                        )
+                    ).sum()
+                ),
+            },
+        ]
+    )
+    tables["Classification Audit"] = chapter_unresolved
+
+    for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases", "qa_checks"]:
+        if key in bundle.tables:
+            tables[key] = bundle.tables[key]
+    return tables
 
 
 def main() -> None:
@@ -378,6 +475,11 @@ def main() -> None:
             key="metric_key",
         )
         metric = metric_by_key(metrics, metric_key)
+        if metric.category.lower() == "graduation":
+            previous_metric = st.session_state.get("_auto_population_metric")
+            if previous_metric != metric_key and st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL) == ALL_STUDENTS_LABEL:
+                st.session_state["outcome_population_view"] = RESOLVED_OUTCOMES_ONLY_LABEL
+            st.session_state["_auto_population_metric"] = metric_key
         group_field = st.selectbox(
             "Aggregation level",
             options=list(dimension_map.keys()),
@@ -407,6 +509,8 @@ def main() -> None:
             options=[ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
             key="outcome_population_view",
         )
+        if metric.category.lower() == "graduation":
+            st.caption("Graduation-focused views default to Resolved Outcomes Only so active and unresolved students do not dominate the ranking.")
         max_min_n = int(settings.get("max_min_sample_size", 50))
         default_min_n = min(int(settings.get("default_min_sample_size", 5)), max_min_n)
         st.slider("Minimum N", min_value=1, max_value=max_min_n, value=default_min_n, key="min_n")
@@ -516,12 +620,12 @@ def main() -> None:
     st.info(metric_caption(metric))
     st.caption(
         f"Charts and rank ordering currently use: {outcome_population_view}. "
-        "Tables and exports include both All Students and Resolved Outcomes Only where practical."
+        "Every major table now shows the full-population and resolved-only denominators side by side where practical."
     )
     population_transparency = _render_population_summary(metric, metric_views, filtered_summary)
 
-    overview_tab, comparison_tab, ranking_tab, trend_tab, distribution_tab, export_tab, definition_tab = st.tabs(
-        ["Overview", "Comparisons", "Rankings", "Trends", "Distributions", "Data & Export", "Metric Definitions"]
+    overview_tab, comparison_tab, ranking_tab, trend_tab, distribution_tab, audit_tab, export_tab, definition_tab = st.tabs(
+        ["Overview", "Comparisons", "Rankings", "Trends", "Distributions", "Audit", "Data & Export", "Metric Definitions"]
     )
 
     with overview_tab:
@@ -578,9 +682,25 @@ def main() -> None:
 
     with ranking_tab:
         st.subheader("Ranking table")
-        ranking_direction = st.radio("Ordering", options=["Highest first", "Lowest first"], horizontal=True)
-        ranked = group_summary.sort_values("Metric Value", ascending=(ranking_direction == "Lowest first")).reset_index(drop=True)
-        st.dataframe(ranked, use_container_width=True, hide_index=True)
+        if group_summary.empty:
+            st.caption("No groups met the current minimum-N rule for the ranking table.")
+        else:
+            ranking_direction = st.radio("Ordering", options=["Highest first", "Lowest first"], horizontal=True)
+            sort_options = {
+                "Selected metric value": "Metric Value",
+                f"Resolved-only {metric.display_name}": f"Metric Value ({RESOLVED_OUTCOMES_ONLY_LABEL})",
+                f"Full-population {metric.display_name}": f"Metric Value ({ALL_STUDENTS_LABEL})",
+                "Resolved count": "Resolved Count",
+                "Still active count": "Still Active Count",
+                "Truly unknown count": "Truly Unknown Count",
+                "Excluded count": "Excluded Count",
+            }
+            default_sort_label = f"Resolved-only {metric.display_name}" if metric.category.lower() == "graduation" else "Selected metric value"
+            sort_label = st.selectbox("Sort by", options=list(sort_options.keys()), index=list(sort_options.keys()).index(default_sort_label))
+            sort_column = sort_options[sort_label]
+            ranked = group_summary.sort_values(sort_column, ascending=(ranking_direction == "Lowest first")).reset_index(drop=True)
+            st.caption("What this tells us: graduation-focused rankings are easiest to read when resolved-only rates are separated from still-active and truly unknown students.")
+            st.dataframe(ranked, use_container_width=True, hide_index=True)
 
         scatter_source = build_scatter_frame(
             filtered_summary,
@@ -741,6 +861,16 @@ def main() -> None:
         else:
             st.caption("No numeric distribution fields are available in the current filtered dataset.")
 
+    with audit_tab:
+        st.subheader("Data quality and denominator audit")
+        st.caption("How to read this: these tables separate resolved outcomes, still-active students, and truly unknown students so denominator changes stay visible.")
+        audit_tables = _audit_tables(filtered_summary, bundle)
+        for label, frame in audit_tables.items():
+            if frame is None or frame.empty:
+                continue
+            st.markdown(f"**{label}**")
+            st.dataframe(frame, use_container_width=True, hide_index=True)
+
     with export_tab:
         st.subheader("Filtered tables")
         export_columns = [
@@ -749,6 +879,9 @@ def main() -> None:
                 "student_id",
                 "student_name",
                 "chapter",
+                "chapter_assignment_source",
+                "chapter_assignment_confidence",
+                "chapter_assignment_notes",
                 "chapter_group",
                 "council",
                 "org_type",
@@ -756,6 +889,11 @@ def main() -> None:
                 "join_year",
                 "status_group",
                 "outcome_resolution_group",
+                "is_resolved_outcome",
+                "is_active_outcome",
+                "is_unknown_outcome",
+                "is_graduated",
+                "is_known_non_graduate_exit",
                 "resolved_outcomes_only_flag",
                 "resolved_outcome_excluded_flag",
                 "resolved_outcome_exclusion_reason",
@@ -780,6 +918,7 @@ def main() -> None:
             "Comparison Table": comparison_table,
             "Controlled Comparison": controlled_table,
             "Filtered Longitudinal": filtered_longitudinal,
+            "Audit Tables": pd.concat(_audit_tables(filtered_summary, bundle).values(), ignore_index=True) if _audit_tables(filtered_summary, bundle) else pd.DataFrame(),
         }
         csv_col, xlsx_col = st.columns(2)
         with csv_col:
@@ -809,12 +948,12 @@ def main() -> None:
         st.write(f"**Notes:** {metric.notes or 'None'}")
         st.write(f"**Limitations:** {metric.limitations or 'None'}")
         excluded_groups = ", ".join(settings.get("outcome_resolution", {}).get("resolved_only_excluded_groups", []))
-        st.write("**All Students view:** Preserves the existing current/full calculation logic.")
+        st.write("**Full Population view:** Uses the entire filtered student group as the comparison population.")
         st.write(
             "**Resolved Outcomes Only view:** Uses the same formula after excluding students classified as "
-            "Still Active, Unknown, or other unresolved/unmapped outcomes by the configured status framework."
+            "Still Active, Truly Unknown / Unresolved, or Other / Unmapped by the configured status framework."
         )
-        st.write("**Interpretation note:** Resolved-only results are often the better view for final-outcome metrics such as graduation rates.")
+        st.write("**Interpretation note:** Resolved-only results are usually the best default for final-outcome metrics such as graduation rates, while full-population views show the broader unresolved burden.")
         st.write(f"**Resolved-only excluded groups:** {excluded_groups or 'Configured in app settings'}")
 
         st.subheader("Available metrics")

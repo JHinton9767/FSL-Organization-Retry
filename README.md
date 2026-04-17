@@ -68,6 +68,52 @@ The app manifest now points to canonical outputs as the preferred prepared datas
 - Do not calculate long-window graduation rates for non-measurable cohorts.
 - Keep unresolved outcomes separate from resolved outcomes.
 
+## Outcome status and denominator rules
+
+The canonical pipeline and app now use one shared outcome taxonomy:
+
+- `Graduated`
+- `Resolved Non-Graduate Exit`
+- `Still Active`
+- `Truly Unknown / Unresolved`
+- `Other / Unmapped`
+
+Important distinction:
+
+- `Still Active` means the latest available evidence still points to an active/current student or member.
+- `Truly Unknown / Unresolved` means there is no reliable final outcome evidence.
+- These are not the same thing and are no longer combined silently.
+
+Graduation-focused views now expose two denominator styles:
+
+- `Full Population`
+  - keeps the whole filtered cohort in the denominator
+- `Resolved Outcomes Only`
+  - excludes `Still Active`, `Truly Unknown / Unresolved`, and `Other / Unmapped`
+
+Use `Resolved Outcomes Only` for most final-outcome interpretation.
+Use `Full Population` when you need to show the broader unresolved burden alongside the rate.
+
+## Chapter assignment provenance
+
+Canonical roster rows now preserve how a chapter was assigned:
+
+- `original`
+- `matched_by_id_name`
+- `matched_by_id`
+- `inferred_from_file_name`
+- `inferred_from_sheet_name`
+- `unresolved`
+
+Fallback order:
+
+1. source chapter field or inline chapter label
+2. matching student ID + exact name in other roster rows
+3. matching student ID in other roster rows
+4. source file name clue
+5. source sheet name clue
+6. unresolved
+
 ## Exception outputs
 
 The canonical run also writes reviewable exception files when applicable:

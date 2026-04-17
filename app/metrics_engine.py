@@ -9,6 +9,7 @@ from app.io_utils import normalize_text
 from app.models import MetricDefinition
 from app.status_framework import (
     ALL_STUDENTS_LABEL,
+    FULL_POPULATION_LABEL,
     RESOLVED_OUTCOMES_ONLY_LABEL,
     outcome_population_summary,
     resolved_outcomes_only_frame,
@@ -125,11 +126,22 @@ def compute_metric_views(frame: pd.DataFrame, definition: MetricDefinition) -> d
     resolved_result = compute_metric(resolved_frame, definition)
 
     all_result["population_label"] = ALL_STUDENTS_LABEL
+    all_result["population_definition"] = FULL_POPULATION_LABEL
     resolved_result["population_label"] = RESOLVED_OUTCOMES_ONLY_LABEL
+    resolved_result["population_definition"] = RESOLVED_OUTCOMES_ONLY_LABEL
 
     return {
         "all": all_result,
         "resolved_only": resolved_result,
+        "population_summary": population_summary,
+        "resolved_n": population_summary["resolved_students"],
+        "graduated_n": population_summary["graduated_students"],
+        "resolved_non_graduate_exit_n": population_summary["known_non_graduate_exit_students"],
+        "still_active_n": population_summary["still_active_students"],
+        "truly_unknown_n": population_summary["unknown_students"],
+        "other_unmapped_n": population_summary["other_unmapped_students"],
+        "excluded_n": population_summary["excluded_students"],
+        "excluded_share": population_summary["excluded_share"],
         "excluded_active_unknown_n": population_summary["excluded_students"],
         "excluded_active_unknown_share": population_summary["excluded_share"],
     }
