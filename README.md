@@ -99,6 +99,7 @@ Use `Full Population` when you need to show the broader unresolved burden alongs
 Canonical roster rows now preserve how a chapter was assigned:
 
 - `original`
+- `manual_override`
 - `matched_by_id_name`
 - `matched_by_id`
 - `inferred_from_file_name`
@@ -114,6 +115,24 @@ Fallback order:
 5. source sheet name clue
 6. unresolved
 
+Persistent manual overrides:
+
+- add or edit rows in `config/manual_chapter_assignments.csv`
+- the canonical pipeline will reuse those overrides on future runs
+- supported columns:
+  - `student_id`
+  - `first_name`
+  - `last_name`
+  - `chapter_override`
+  - `notes`
+
+Matching priority for manual overrides:
+
+1. exact `student_id`
+2. exact `first_name` + `last_name` when no override ID is supplied
+
+The canonical pipeline also writes `unresolved_chapter_review.csv`, which lists uncertain chapter assignments along with the roster files, academic files, and sheets where each student appears so you can review and add a one-time manual override.
+
 ## Exception outputs
 
 The canonical run also writes reviewable exception files when applicable:
@@ -124,6 +143,7 @@ The canonical run also writes reviewable exception files when applicable:
 - `chapter_conflicts.csv`
 - `outcome_exceptions.csv`
 - `missing_evidence_cases.csv`
+- `unresolved_chapter_review.csv`
 
 If supplemental membership reference workbooks are provided, the canonical run also writes:
 

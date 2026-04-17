@@ -379,7 +379,7 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
     )
     tables["Classification Audit"] = chapter_unresolved
 
-    for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases", "qa_checks"]:
+    for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases", "unresolved_chapter_review", "qa_checks"]:
         if key in bundle.tables:
             tables[key] = bundle.tables[key]
     return tables

@@ -17,6 +17,7 @@ STATUS_CODE_MAP_PATH = CONFIG_DIR / "status_code_map.json"
 DATASET_MANIFEST_PATH = CONFIG_DIR / "dataset_manifest.json"
 DEFAULT_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.csv"
 EXAMPLE_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.example.csv"
+MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -151,7 +152,8 @@ def load_dataset_manifest() -> Dict[str, Any]:
                     "status_exceptions.csv",
                     "chapter_conflicts.csv",
                     "outcome_exceptions.csv",
-                    "missing_evidence_cases.csv"
+                    "missing_evidence_cases.csv",
+                    "unresolved_chapter_review.csv"
                 ],
             },
         },
@@ -208,6 +210,57 @@ def load_chapter_mapping(path: Optional[Path] = None) -> pd.DataFrame:
             return _standardize_chapter_mapping(read_tabular_file(candidate))
 
     return pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"])
+
+
+def load_manual_chapter_assignments(path: Optional[Path] = None) -> pd.DataFrame:
+    candidate = path or MANUAL_CHAPTER_ASSIGNMENTS_PATH
+    columns = [
+        "student_id",
+        "first_name",
+        "last_name",
+        "chapter_override",
+        "notes",
+    ]
+    if not candidate.exists():
+        return pd.DataFrame(columns=columns)
+
+    frame = read_tabular_file(candidate)
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+
+    header_map = dict(zip(frame.columns, canonical_headers(frame.columns)))
+    renamed = frame.rename(columns=header_map).copy()
+    alias_map = {
+        "student_id": ["student_id", "student id", "banner id", "banner"],
+        "first_name": ["first_name", "first name"],
+        "last_name": ["last_name", "last name"],
+        "chapter_override": ["chapter_override", "chapter", "chapter name", "organization", "organization name"],
+        "notes": ["notes", "note", "comment", "comments"],
+    }
+
+    resolved: Dict[str, str] = {}
+    for target, aliases in alias_map.items():
+        source = next((column for column in renamed.columns if column in aliases), None)
+        if source:
+            resolved[target] = source
+
+    standardized = pd.DataFrame()
+    for column in columns:
+        source = resolved.get(column)
+        standardized[column] = renamed[source] if source else ""
+
+    standardized = standardized.fillna("").astype(str)
+    for column in ["student_id", "first_name", "last_name", "chapter_override", "notes"]:
+        standardized[column] = standardized[column].str.strip()
+    standardized = standardized.loc[
+        standardized["chapter_override"].ne("")
+        & (
+            standardized["student_id"].ne("")
+            | standardized["first_name"].ne("")
+            | standardized["last_name"].ne("")
+        )
+    ].copy()
+    return standardized.reset_index(drop=True)
 
 
 def stringify_notes(values: List[str]) -> List[str]:

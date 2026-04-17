@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 from openpyxl import load_workbook
 
-from app.config_loader import load_chapter_mapping, load_settings
+from app.config_loader import MANUAL_CHAPTER_ASSIGNMENTS_PATH, load_chapter_mapping, load_manual_chapter_assignments, load_settings
 from app.status_framework import build_outcome_resolution_fields
 from src.build_master_roster import (
     DEFAULT_INPUT_ROOT,
@@ -1778,6 +1778,170 @@ def resolve_missing_roster_chapters(roster: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def ensure_manual_chapter_assignment_template(path: Path = MANUAL_CHAPTER_ASSIGNMENTS_PATH) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        columns=[
+            "student_id",
+            "first_name",
+            "last_name",
+            "chapter_override",
+            "notes",
+        ]
+    ).to_csv(path, index=False)
+
+
+def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFrame) -> pd.DataFrame:
+    if roster.empty or overrides.empty:
+        return roster
+
+    result = roster.copy()
+    override_by_id: Dict[str, dict] = {}
+    override_by_name: Dict[Tuple[str, str], dict] = {}
+
+    for row in overrides.itertuples(index=False):
+        override = {
+            "chapter": normalize_chapter_name(getattr(row, "chapter_override", "")),
+            "notes": clean_text(getattr(row, "notes", "")),
+        }
+        student_id = normalize_banner_id(getattr(row, "student_id", ""))
+        first_name = clean_text(getattr(row, "first_name", ""))
+        last_name = clean_text(getattr(row, "last_name", ""))
+        if student_id:
+            override_by_id[student_id] = override
+        elif first_name or last_name:
+            override_by_name[person_name_key(first_name, last_name)] = override
+
+    for idx, row in result.iterrows():
+        student_id = normalize_banner_id(row.get("student_id", ""))
+        name_key = person_name_key(row.get("first_name", ""), row.get("last_name", ""))
+        override = override_by_id.get(student_id) if student_id else None
+        if override is None and name_key in override_by_name:
+            override = override_by_name[name_key]
+        if override is None or not override.get("chapter"):
+            continue
+
+        result.at[idx, "chapter"] = override["chapter"]
+        result.at[idx, "chapter_assignment_source"] = "manual_override"
+        result.at[idx, "chapter_assignment_confidence"] = "manual"
+        result.at[idx, "chapter_assignment_notes"] = override["notes"] or "Applied from config/manual_chapter_assignments.csv."
+
+    return result
+
+
+def build_unresolved_chapter_review(
+    roster: pd.DataFrame,
+    academic: pd.DataFrame,
+    summary: pd.DataFrame,
+) -> pd.DataFrame:
+    if roster.empty:
+        return pd.DataFrame(
+            columns=[
+                "review_key",
+                "student_id",
+                "first_name",
+                "last_name",
+                "student_name",
+                "chapter_assignment_source",
+                "chapter_assignment_confidence",
+                "chapter_assignment_notes",
+                "candidate_chapters_seen",
+                "terms_seen",
+                "roster_files_seen",
+                "roster_sheets_seen",
+                "academic_files_seen",
+                "academic_sheets_seen",
+                "manual_override_path",
+            ]
+        )
+
+    roster_lookup = roster.copy()
+    roster_lookup["_review_key"] = roster_lookup.apply(
+        lambda row: clean_text(row.get("student_id", "")) or f"name::{clean_text(row.get('last_name', '')).lower()}|{clean_text(row.get('first_name', '')).lower()}",
+        axis=1,
+    )
+    unresolved = roster_lookup.loc[
+        roster_lookup["chapter_assignment_source"].fillna("").astype(str).isin(["unresolved", "inferred_from_file_name", "inferred_from_sheet_name"])
+    ].copy()
+    if unresolved.empty:
+        return pd.DataFrame(
+            columns=[
+                "review_key",
+                "student_id",
+                "first_name",
+                "last_name",
+                "student_name",
+                "chapter_assignment_source",
+                "chapter_assignment_confidence",
+                "chapter_assignment_notes",
+                "candidate_chapters_seen",
+                "terms_seen",
+                "roster_files_seen",
+                "roster_sheets_seen",
+                "academic_files_seen",
+                "academic_sheets_seen",
+                "manual_override_path",
+            ]
+        )
+
+    academic_lookup = academic.copy()
+    if not academic_lookup.empty:
+        academic_lookup["_review_key"] = academic_lookup.apply(
+            lambda row: clean_text(row.get("student_id", "")) or f"name::{clean_text(row.get('last_name', '')).lower()}|{clean_text(row.get('first_name', '')).lower()}",
+            axis=1,
+        )
+    summary_lookup = summary.copy() if not summary.empty else pd.DataFrame()
+    if not summary_lookup.empty:
+        summary_lookup["_review_key"] = summary_lookup.apply(
+            lambda row: clean_text(row.get("student_id", "")) or f"name::{clean_text(row.get('student_name', '')).lower()}",
+            axis=1,
+        )
+
+    rows: List[dict] = []
+    for review_key, group in unresolved.groupby("_review_key", dropna=False):
+        roster_files_seen = " | ".join(sorted({clean_text(value) for value in group["source_file"] if clean_text(value)}))
+        roster_sheets_seen = " | ".join(sorted({clean_text(value) for value in group["source_sheet"] if clean_text(value)}))
+        terms_seen = " | ".join(sorted({clean_text(value) for value in group["term_label"] if clean_text(value)}))
+        candidate_chapters_seen = " | ".join(
+            sorted(
+                {
+                    clean_text(value)
+                    for value in roster_lookup.loc[roster_lookup["_review_key"].eq(review_key), "chapter"]
+                    if clean_text(value) and not chapter_is_missing(value)
+                }
+            )
+        )
+        matching_academic = academic_lookup.loc[academic_lookup["_review_key"].eq(review_key)].copy() if not academic_lookup.empty else pd.DataFrame()
+        academic_files_seen = " | ".join(sorted({clean_text(value) for value in matching_academic.get("source_file", pd.Series(dtype=object)) if clean_text(value)}))
+        academic_sheets_seen = " | ".join(sorted({clean_text(value) for value in matching_academic.get("source_sheet", pd.Series(dtype=object)) if clean_text(value)}))
+
+        first_row = group.iloc[0]
+        summary_match = summary_lookup.loc[summary_lookup["_review_key"].eq(review_key)].iloc[0] if not summary_lookup.empty and not summary_lookup.loc[summary_lookup["_review_key"].eq(review_key)].empty else None
+        rows.append(
+            {
+                "review_key": review_key,
+                "student_id": clean_text(first_row.get("student_id", "")),
+                "first_name": clean_text(first_row.get("first_name", "")),
+                "last_name": clean_text(first_row.get("last_name", "")),
+                "student_name": clean_text(summary_match.get("student_name", "")) if summary_match is not None else f"{clean_text(first_row.get('first_name', ''))} {clean_text(first_row.get('last_name', ''))}".strip(),
+                "chapter_assignment_source": clean_text(first_row.get("chapter_assignment_source", "")),
+                "chapter_assignment_confidence": clean_text(first_row.get("chapter_assignment_confidence", "")),
+                "chapter_assignment_notes": clean_text(first_row.get("chapter_assignment_notes", "")),
+                "candidate_chapters_seen": candidate_chapters_seen,
+                "terms_seen": terms_seen,
+                "roster_files_seen": roster_files_seen,
+                "roster_sheets_seen": roster_sheets_seen,
+                "academic_files_seen": academic_files_seen,
+                "academic_sheets_seen": academic_sheets_seen,
+                "manual_override_path": str(MANUAL_CHAPTER_ASSIGNMENTS_PATH),
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values(["student_id", "last_name", "first_name"], na_position="last").reset_index(drop=True)
+
+
 def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if frame.empty:
         return frame, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
@@ -2575,6 +2739,7 @@ def build_qa_checks(
         {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(summary["is_unknown_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~summary["is_resolved_outcome"].fillna(False).astype(bool) & ~summary["is_active_outcome"].fillna(False).astype(bool) & ~summary["is_unknown_outcome"].fillna(False).astype(bool)).sum()), "Notes": ""},
         {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
+        {"Check Group": "Coverage", "Check": "Manual chapter overrides applied", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("manual_override").sum()), "Notes": ""},
     ]
     rows.extend(build_spring_coverage_checks(roster, "Roster"))
     rows.extend(build_spring_coverage_checks(academic, "Academic"))
@@ -2831,6 +2996,8 @@ def build_canonical_pipeline(
     schema = load_schema()
     settings = load_settings()
     chapter_mapping = load_chapter_mapping()
+    ensure_manual_chapter_assignment_template()
+    manual_chapter_assignments = load_manual_chapter_assignments()
 
     roster_term, roster_load_issues = load_roster_term_table([roster_root, roster_inbox])
     academic_term, academic_load_issues = load_academic_term_table(academic_root)
@@ -2913,6 +3080,7 @@ def build_canonical_pipeline(
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
     roster_term = resolve_missing_roster_chapters(roster_term)
+    roster_term = apply_manual_chapter_assignments(roster_term, manual_chapter_assignments)
 
     roster_term, roster_dup_issues = dedupe_table(roster_term, ["student_id", "term_code", "chapter"], "roster")
     academic_term, academic_dup_issues = dedupe_table(academic_term, ["student_id", "term_code"], "academic")
@@ -2923,6 +3091,7 @@ def build_canonical_pipeline(
     student_summary, summary_qa, outcome_issues = build_student_summary(master_longitudinal, snapshot, graduation, settings, chapter_mapping)
     if not student_summary.empty:
         student_summary = student_summary.loc[:, ~student_summary.columns.duplicated()].copy()
+    unresolved_chapter_review = build_unresolved_chapter_review(roster_term, academic_term, student_summary)
 
     if not student_summary.empty:
         summary_lookup = student_summary.set_index("student_id")[
@@ -2991,6 +3160,7 @@ def build_canonical_pipeline(
         "chapter_conflicts": roster_conflicts,
         "outcome_exceptions": outcome_issues,
         "missing_evidence_cases": missing_evidence_cases,
+        "unresolved_chapter_review": unresolved_chapter_review,
     }
     qa_checks = build_qa_checks(
         roster_term,
@@ -3038,6 +3208,7 @@ def build_canonical_pipeline(
         "chapter_conflicts": output_folder / "chapter_conflicts.csv",
         "outcome_exceptions": output_folder / "outcome_exceptions.csv",
         "missing_evidence_cases": output_folder / "missing_evidence_cases.csv",
+        "unresolved_chapter_review": output_folder / "unresolved_chapter_review.csv",
     }
 
     write_frame(files["roster_term"], roster_term)
@@ -3057,6 +3228,7 @@ def build_canonical_pipeline(
     write_frame(files["gpa_benchmark_reference_values"], gpa_benchmark_reference)
     write_frame(files["gpa_benchmark_validation"], gpa_benchmark_validation)
     write_frame(files["retention_reference_values"], retention_reference)
+    write_frame(files["unresolved_chapter_review"], unresolved_chapter_review)
     files["schema"].write_text(json.dumps(schema, indent=2), encoding="utf-8")
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
         write_frame(files[key], ensure_columns(issue_frames.get(key, pd.DataFrame()), empty_exception_frame.columns))
@@ -3086,6 +3258,7 @@ def main() -> None:
     print(f"Canonical outputs written to: {result.output_folder}")
     for key, path in result.files.items():
         print(f"{key}: {path}")
+    print(f"manual_chapter_assignments_template: {MANUAL_CHAPTER_ASSIGNMENTS_PATH}")
 
 
 if __name__ == "__main__":

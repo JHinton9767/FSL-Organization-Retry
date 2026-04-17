@@ -23,7 +23,8 @@
         "status_exceptions.csv",
         "chapter_conflicts.csv",
         "outcome_exceptions.csv",
-        "missing_evidence_cases.csv"
+        "missing_evidence_cases.csv",
+        "unresolved_chapter_review.csv"
       ]
     }
   }
