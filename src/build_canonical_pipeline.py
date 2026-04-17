@@ -2403,16 +2403,11 @@ def build_student_summary(
         "org_type",
         "family",
         "custom_group",
-        "outcome_resolution_group",
-        "is_resolved_outcome",
-        "is_active_outcome",
-        "is_unknown_outcome",
-        "is_graduated",
-        "is_known_non_graduate_exit",
         "resolved_outcomes_only_flag",
         "data_completeness_rate",
         "latest_snapshot_student_status",
     ]
+    summary_columns = list(dict.fromkeys(summary_columns))
     return ensure_columns(summary, summary_columns), pd.DataFrame(qa_rows), pd.DataFrame(outcome_exceptions)
 
 
@@ -2926,6 +2921,8 @@ def build_canonical_pipeline(
 
     master_longitudinal = build_master_longitudinal(roster_term, academic_term)
     student_summary, summary_qa, outcome_issues = build_student_summary(master_longitudinal, snapshot, graduation, settings, chapter_mapping)
+    if not student_summary.empty:
+        student_summary = student_summary.loc[:, ~student_summary.columns.duplicated()].copy()
 
     if not student_summary.empty:
         summary_lookup = student_summary.set_index("student_id")[
