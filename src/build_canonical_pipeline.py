@@ -195,6 +195,20 @@ def ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
     return result.loc[:, list(columns)]
 
 
+def ensure_text_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """Force columns that receive string updates to object dtype.
+
+    Cached CSVs can read fully blank columns as float64. Pandas 3.x then rejects
+    later string assignments such as term codes or provenance labels.
+    """
+    result = frame.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = ""
+        result[column] = result[column].astype("object").where(result[column].notna(), "")
+    return result
+
+
 def combine_reference_frames(
     frames: Sequence[pd.DataFrame],
     columns: Sequence[str],
@@ -213,7 +227,7 @@ def read_cached_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path, low_memory=False)
+        return pd.read_csv(path, low_memory=False, dtype=str, keep_default_na=False)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
 
@@ -1909,7 +1923,14 @@ def build_identity_maps(
 
 
 def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map: Dict[Tuple[str, str], str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    result = frame.copy()
+    result = ensure_text_columns(
+        frame,
+        [
+            "student_id",
+            "identity_resolution_basis",
+            "identity_resolution_notes",
+        ],
+    )
     exceptions: List[dict] = []
 
     for idx, row in result.iterrows():
@@ -1953,7 +1974,15 @@ def resolve_missing_roster_chapters(roster: pd.DataFrame, settings: Dict[str, ob
     if roster.empty:
         return roster
 
-    result = roster.copy()
+    result = ensure_text_columns(
+        roster,
+        [
+            "chapter",
+            "chapter_assignment_source",
+            "chapter_assignment_confidence",
+            "chapter_assignment_notes",
+        ],
+    )
     secondary_orgs = secondary_organization_set(settings)
     known = result.loc[~result["chapter"].map(chapter_is_missing)].copy()
     id_name_candidates: Dict[Tuple[str, Tuple[str, str]], set[str]] = defaultdict(set)
@@ -2034,7 +2063,15 @@ def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFra
     if roster.empty or overrides.empty:
         return roster
 
-    result = roster.copy()
+    result = ensure_text_columns(
+        roster,
+        [
+            "chapter",
+            "chapter_assignment_source",
+            "chapter_assignment_confidence",
+            "chapter_assignment_notes",
+        ],
+    )
     override_by_id: Dict[str, dict] = {}
     override_by_name: Dict[Tuple[str, str], dict] = {}
 
@@ -2324,7 +2361,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
 def attach_org_entry_terms(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
     if roster.empty:
         return roster
-    result = roster.copy()
+    result = ensure_text_columns(roster, ["org_entry_term_code", "org_entry_term_basis"])
     secondary_orgs = secondary_organization_set(settings)
     result["_term_sort"] = result["term_code"].map(sort_term_code)
     for student_id, group in result.groupby("student_id", dropna=False):
