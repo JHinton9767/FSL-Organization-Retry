@@ -227,7 +227,7 @@ def read_cached_frame(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path, low_memory=False, dtype=str, keep_default_na=False)
+        return pd.read_csv(path, low_memory=False)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
 
@@ -698,7 +698,9 @@ def build_reference_subset(
     else:
         frame["benchmark_label"] = frame["entity_label_normalized"]
         frame = frame.rename(columns={"reference_value": value_column})
-    subset = frame.loc[:, list(columns)]
+    subset = frame.loc[:, list(columns)].copy()
+    if value_column in subset.columns:
+        subset[value_column] = coerce_numeric(subset[value_column])
     return subset.drop_duplicates(subset=list(dedupe_subset), keep="first").reset_index(drop=True)
 
 
@@ -999,6 +1001,8 @@ def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.Da
     )
     validation = reference.merge(pipeline_counts, on=["chapter", "term_code"], how="left")
     validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["membership_count_pipeline"] = coerce_numeric(validation["membership_count_pipeline"])
+    validation["membership_count_reference"] = coerce_numeric(validation["membership_count_reference"])
     validation["difference"] = validation["membership_count_pipeline"] - validation["membership_count_reference"]
     validation.loc[validation["membership_count_pipeline"].isna(), "difference"] = pd.NA
     validation["comparison_status"] = "Match"
@@ -1039,6 +1043,8 @@ def build_new_member_reference_validation(roster: pd.DataFrame, reference: pd.Da
     )
     validation = reference.merge(pipeline_counts, on=["chapter", "term_code"], how="left")
     validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["new_member_count_pipeline"] = coerce_numeric(validation["new_member_count_pipeline"])
+    validation["new_member_count_reference"] = coerce_numeric(validation["new_member_count_reference"])
     validation["difference"] = validation["new_member_count_pipeline"] - validation["new_member_count_reference"]
     validation.loc[validation["new_member_count_pipeline"].isna(), "difference"] = pd.NA
     validation["comparison_status"] = "Match"
@@ -1080,6 +1086,8 @@ def build_gpa_reference_validation(master: pd.DataFrame, reference: pd.DataFrame
     )
     validation = reference.merge(pipeline_gpa, on=["chapter", "term_code"], how="left")
     validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["chapter_average_gpa_pipeline"] = coerce_numeric(validation["chapter_average_gpa_pipeline"])
+    validation["chapter_average_gpa_reference"] = coerce_numeric(validation["chapter_average_gpa_reference"])
     validation["difference"] = validation["chapter_average_gpa_pipeline"] - validation["chapter_average_gpa_reference"]
     validation.loc[validation["chapter_average_gpa_pipeline"].isna(), "difference"] = pd.NA
     validation["comparison_status"] = "Match"
@@ -1161,6 +1169,8 @@ def build_gpa_benchmark_validation(master: pd.DataFrame, reference: pd.DataFrame
     pipeline_benchmarks = compute_pipeline_gpa_benchmarks(master, chapter_mapping)
     validation = reference.merge(pipeline_benchmarks, on=["benchmark_label", "term_code"], how="left")
     validation["term_label"] = validation["term_label"].fillna(validation["term_code"].map(term_label_from_code))
+    validation["benchmark_average_gpa_pipeline"] = coerce_numeric(validation["benchmark_average_gpa_pipeline"])
+    validation["benchmark_average_gpa_reference"] = coerce_numeric(validation["benchmark_average_gpa_reference"])
     validation["difference"] = validation["benchmark_average_gpa_pipeline"] - validation["benchmark_average_gpa_reference"]
     validation.loc[validation["benchmark_average_gpa_pipeline"].isna(), "difference"] = pd.NA
     validation["comparison_status"] = "Match"
