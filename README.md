@@ -83,6 +83,7 @@ These scripts now read canonical outputs instead of using old report files as up
 - `py run_yearly_chapter_rosters.py`
 - `py run_chapter_history_workbooks.py`
 - `py run_full_record_priority_list.py`
+- `py run_unresolved_outcome_year_report.py`
 - `py run_executive_report.py`
 
 ## App behavior
