@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_INPUT_ROOT = ROOT / "Copy of Rosters"
 SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
+ROSTER_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".pdf"})
 SEMESTER_FOLDER_RE = re.compile(r"^(Fall|Spring)\s+(20\d{2})$", re.IGNORECASE)
 
 STANDARD_COLUMNS = [
@@ -141,6 +142,42 @@ STATUS_PRIORITY = {
     "Active": 50,
     "": 0,
 }
+
+MONTH_PATTERNS = [
+    (1, r"\bjan(?:uary)?\b"),
+    (2, r"\bfeb(?:ruary)?\b"),
+    (3, r"\bmar(?:ch)?\b"),
+    (4, r"\bapr(?:il)?\b"),
+    (5, r"\bmay\b"),
+    (6, r"\bjun(?:e)?\b"),
+    (7, r"\bjul(?:y)?\b"),
+    (8, r"\baug(?:ust)?\b"),
+    (9, r"\bsep(?:t|tember)?\b"),
+    (10, r"\boct(?:ober)?\b"),
+    (11, r"\bnov(?:ember)?\b"),
+    (12, r"\bdec(?:ember)?\b"),
+]
+
+
+def roster_file_version_priority(source_file: str) -> float:
+    text = clean_text(source_file).lower()
+    if re.search(r"\bfinal\b", text):
+        return 3
+    has_revised = bool(re.search(r"\brevised\b|\brevision\b|\brev\b", text))
+    has_updated = bool(re.search(r"\bupdated\b|\bupdate\b", text))
+    if has_revised and has_updated:
+        return 2.5
+    if has_revised or has_updated:
+        return 2
+    return 1
+
+
+def roster_file_month_priority(source_file: str) -> int:
+    text = re.sub(r"[_\-.]+", " ", clean_text(source_file).lower())
+    for month_number, pattern in MONTH_PATTERNS:
+        if re.search(pattern, text):
+            return month_number
+    return 0
 
 GREEK_LETTER_WORDS = {
     "alpha",
@@ -289,6 +326,18 @@ def clean_text(value: object) -> str:
     return text
 
 
+def source_file_label(path: Path, root: Optional[Path] = None) -> str:
+    if root is not None:
+        try:
+            return str(path.resolve().relative_to(root.resolve()))
+        except ValueError:
+            pass
+    try:
+        return str(path.resolve().relative_to(DEFAULT_INPUT_ROOT.resolve()))
+    except ValueError:
+        return path.name
+
+
 def canonical_header(value: object) -> str:
     text = clean_text(value).lower()
     text = text.replace("_", " ")
@@ -392,8 +441,10 @@ def identity_key(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
     return None
 
 
-def row_priority(row: ExtractedRow) -> Tuple[int, int, int, int, str, str]:
+def row_priority(row: ExtractedRow) -> Tuple[float, int, int, int, int, int, str, str]:
     return (
+        roster_file_version_priority(row.source_file),
+        roster_file_month_priority(row.source_file),
         STATUS_PRIORITY.get(row.status, 10),
         1 if row.banner_id else 0,
         1 if row.email else 0,
@@ -553,12 +604,53 @@ def find_status_column(ws, max_scan_rows: int = 30) -> Tuple[Optional[int], Opti
     return best_match[1], best_match[2]
 
 
+def find_status_column_in_rows(rows: List[Tuple[object, ...]], max_scan_rows: int = 30) -> Tuple[Optional[int], Optional[int]]:
+    best_match: Tuple[int, Optional[int], Optional[int]] = (0, None, None)
+
+    for row_idx, row in enumerate(rows[:max_scan_rows], start=1):
+        for col_idx, value in enumerate(row):
+            header = canonical_header(value)
+            if not header:
+                continue
+
+            score = 0
+            if header == "status":
+                score = 3
+            elif header.startswith("status"):
+                score = 2
+            elif " status " in f" {header} ":
+                score = 1
+
+            if score > best_match[0]:
+                best_match = (score, row_idx, col_idx)
+
+    return best_match[1], best_match[2]
+
+
 def find_header_row(ws) -> Tuple[Optional[int], Dict[str, int]]:
     best_score = 0
     best_row_idx = None
     best_map: Dict[str, int] = {}
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=min(ws.max_row, 25), values_only=True), start=1):
+        score, header_map = score_header_row(list(row))
+        if score > best_score:
+            best_score = score
+            best_row_idx = row_idx
+            best_map = header_map
+
+    required = {"last_name", "first_name"}
+    if best_row_idx is None or best_score < 3 or not required.issubset(best_map):
+        return None, {}
+    return best_row_idx, best_map
+
+
+def find_header_row_in_rows(rows: List[Tuple[object, ...]]) -> Tuple[Optional[int], Dict[str, int]]:
+    best_score = 0
+    best_row_idx = None
+    best_map: Dict[str, int] = {}
+
+    for row_idx, row in enumerate(rows[:25], start=1):
         score, header_map = score_header_row(list(row))
         if score > best_score:
             best_score = score
@@ -581,9 +673,123 @@ def row_is_empty(values: Iterable[str]) -> bool:
     return all(not clean_text(value) for value in values)
 
 
+def pdf_table_rows(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]]], List[str]]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return [], [f"PDF skipped because pdfplumber is not installed. Run py -m pip install -r requirements.txt. File: {path}"]
+
+    table_sources: List[Tuple[str, List[Tuple[object, ...]]]] = []
+    issues: List[str] = []
+    try:
+        with pdfplumber.open(path) as pdf:
+            for page_idx, page in enumerate(pdf.pages, start=1):
+                tables = page.extract_tables() or []
+                for table_idx, table in enumerate(tables, start=1):
+                    rows = [
+                        tuple("" if cell is None else cell for cell in row)
+                        for row in table
+                        if row and any(clean_text(cell) for cell in row)
+                    ]
+                    if rows:
+                        table_sources.append((f"Page {page_idx} Table {table_idx}", rows))
+                if tables:
+                    continue
+                text = page.extract_text() or ""
+                text_rows = [
+                    tuple(part for part in re.split(r"\s{2,}|\t+", line.strip()) if part)
+                    for line in text.splitlines()
+                    if line.strip()
+                ]
+                if text_rows:
+                    table_sources.append((f"Page {page_idx} Text", text_rows))
+    except Exception as exc:
+        issues.append(f"FAILED to open PDF {path}: {exc}")
+
+    if not table_sources and not issues:
+        issues.append(f"PDF skipped because no extractable table/text rows were found in {path}.")
+    return table_sources, issues
+
+
+def extract_rows_from_tabular_rows(path: Path, sheet_name: str, table_rows: List[Tuple[object, ...]]) -> Tuple[List[ExtractedRow], List[str]]:
+    rows: List[ExtractedRow] = []
+    issues: List[str] = []
+
+    header_row_idx, header_map = find_header_row_in_rows(table_rows)
+    if header_row_idx is None:
+        issues.append(f"Skipped {path.name} | sheet '{sheet_name}': no usable header row found.")
+        return rows, issues
+
+    status_row_idx, status_col_idx = find_status_column_in_rows(table_rows)
+    if "status" not in header_map and status_col_idx is not None:
+        header_map["status"] = status_col_idx
+    data_start_index = max(header_row_idx, status_row_idx or header_row_idx)
+    if "status" not in header_map:
+        issues.append(f"Status column not found after full scan in {path.name} | sheet '{sheet_name}'.")
+
+    academic_year, term = parse_term_from_path(path)
+    default_chapter = infer_chapter(path, sheet_name)
+    current_chapter_raw = sheet_name
+    current_chapter = default_chapter
+
+    for row in table_rows[data_start_index:]:
+        inline_chapter_raw = detect_inline_chapter_label(row, header_map)
+        if inline_chapter_raw:
+            current_chapter_raw = inline_chapter_raw
+            current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
+            continue
+
+        last_name = get_cell(row, header_map.get("last_name"))
+        first_name = get_cell(row, header_map.get("first_name"))
+        banner_id = normalize_banner_id(get_cell(row, header_map.get("banner_id")))
+        email = get_cell(row, header_map.get("email")).lower()
+        status = normalize_status(get_cell(row, header_map.get("status")))
+        semester_joined = get_cell(row, header_map.get("semester_joined"))
+        position = get_cell(row, header_map.get("position"))
+        chapter_raw = get_cell(row, header_map.get("chapter")) or current_chapter_raw or sheet_name
+        chapter = normalize_chapter_name(chapter_raw) or current_chapter or default_chapter
+
+        core_values = [last_name, first_name, banner_id, email, status, semester_joined, position, chapter]
+        if row_is_empty(core_values):
+            continue
+
+        if not last_name and not first_name:
+            continue
+
+        rows.append(
+            ExtractedRow(
+                academic_year=academic_year,
+                term=term,
+                source_file=source_file_label(path),
+                source_sheet=sheet_name,
+                chapter=chapter,
+                last_name=last_name,
+                first_name=first_name,
+                banner_id=banner_id,
+                email=email,
+                status=status,
+                semester_joined=semester_joined,
+                position=position,
+            )
+        )
+
+    return rows, issues
+
+
 def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[ExtractedRow], List[str]]:
     rows: List[ExtractedRow] = []
     issues: List[str] = []
+
+    if path.suffix.lower() == ".pdf":
+        table_sources, pdf_issues = pdf_table_rows(path)
+        issues.extend(pdf_issues)
+        for sheet_name, table_rows in table_sources:
+            extracted, table_issues = extract_rows_from_tabular_rows(path, sheet_name, table_rows)
+            rows.extend(extracted)
+            issues.extend(table_issues)
+        if verbose:
+            print(f"Processed {path}")
+        return rows, issues
 
     try:
         wb = load_workbook(path, data_only=True, read_only=True)
@@ -595,62 +801,10 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
         academic_year, term = parse_term_from_path(path)
 
         for ws in wb.worksheets:
-            header_row_idx, header_map = find_header_row(ws)
-            if header_row_idx is None:
-                issues.append(f"Skipped {path.name} | sheet '{ws.title}': no usable header row found.")
-                continue
-
-            status_row_idx, status_col_idx = find_status_column(ws)
-            if "status" not in header_map and status_col_idx is not None:
-                header_map["status"] = status_col_idx
-            data_start_row = max(header_row_idx, status_row_idx or header_row_idx) + 1
-            if "status" not in header_map:
-                issues.append(f"Status column not found after full scan in {path.name} | sheet '{ws.title}'.")
-
-            default_chapter = infer_chapter(path, ws.title)
-            current_chapter_raw = ws.title
-            current_chapter = default_chapter
-
-            for row in ws.iter_rows(min_row=data_start_row, values_only=True):
-                inline_chapter_raw = detect_inline_chapter_label(row, header_map)
-                if inline_chapter_raw:
-                    current_chapter_raw = inline_chapter_raw
-                    current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
-                    continue
-
-                last_name = get_cell(row, header_map.get("last_name"))
-                first_name = get_cell(row, header_map.get("first_name"))
-                banner_id = normalize_banner_id(get_cell(row, header_map.get("banner_id")))
-                email = get_cell(row, header_map.get("email")).lower()
-                status = normalize_status(get_cell(row, header_map.get("status")))
-                semester_joined = get_cell(row, header_map.get("semester_joined"))
-                position = get_cell(row, header_map.get("position"))
-                chapter_raw = get_cell(row, header_map.get("chapter")) or current_chapter_raw or ws.title
-                chapter = normalize_chapter_name(chapter_raw) or current_chapter or default_chapter
-
-                core_values = [last_name, first_name, banner_id, email, status, semester_joined, position, chapter]
-                if row_is_empty(core_values):
-                    continue
-
-                if not last_name and not first_name:
-                    continue
-
-                rows.append(
-                    ExtractedRow(
-                        academic_year=academic_year,
-                        term=term,
-                        source_file=path.name,
-                        source_sheet=ws.title,
-                        chapter=chapter,
-                        last_name=last_name,
-                        first_name=first_name,
-                        banner_id=banner_id,
-                        email=email,
-                        status=status,
-                        semester_joined=semester_joined,
-                        position=position,
-                    )
-                )
+            table_rows = [tuple(row) for row in ws.iter_rows(values_only=True)]
+            extracted, table_issues = extract_rows_from_tabular_rows(path, ws.title, table_rows)
+            rows.extend(extracted)
+            issues.extend(table_issues)
     finally:
         wb.close()
 
@@ -1008,6 +1162,8 @@ def build_unique_banner_rows(rows: List[ExtractedRow]) -> List[UniqueBannerRow]:
             ordered_rows,
             key=lambda item: (
                 term_sort_key(item.academic_year, item.term),
+                roster_file_version_priority(item.source_file),
+                roster_file_month_priority(item.source_file),
                 STATUS_PRIORITY.get(item.status, 10),
                 1 if item.position else 0,
                 item.source_file.lower(),
@@ -1108,10 +1264,10 @@ def build_master_roster(
     issues: List[str] = []
     file_statuses: List[FileExtractionStatus] = []
 
-    files = sorted(path for path in input_root.rglob("*") if path.suffix.lower() in SUPPORTED_EXTENSIONS)
+    files = sorted(path for path in input_root.rglob("*") if path.suffix.lower() in ROSTER_SOURCE_EXTENSIONS)
     if not files:
         raise FileNotFoundError(
-            f"No Excel files found under {input_root}. Supported types: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+            f"No roster files found under {input_root}. Supported types: {', '.join(sorted(ROSTER_SOURCE_EXTENSIONS))}"
         )
 
     for path in files:

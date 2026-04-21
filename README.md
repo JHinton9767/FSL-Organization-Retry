@@ -160,6 +160,21 @@ These rows are still preserved in the canonical roster outputs, but they are ign
 
 Same-term double-roster cleanup also prefers a non-`Resigned` / non-`Revoked` chapter row over a `Resigned` or `Revoked` row when both appear for the same student and term. This keeps RS/RV legacy rows from driving chapter-level graduation, retention, or GPA analytics for the student's later active organization.
 
+When multiple roster files exist for the same chapter and term, source-file version priority is:
+
+1. regular roster file, meaning the filename does not contain `Revised`, `Updated`, or `Final`
+2. `Revised` or `Updated`
+3. both `Revised` and `Updated`
+4. `Final`
+
+If a student appears only in the regular file, that row is kept. If the same student appears in later revised/updated/final files for the same chapter and term, the later version wins. This preserves students who disappear from later files while still using the most recent available row when present.
+
+When two files are otherwise at the same version level, month names in the filename are used as the next tie-breaker. Month order runs January through December, so a February file outranks a January file, March outranks February, and so on. Files without a month are treated as earlier than files with a month at the same version level.
+
+Folder names are included in this same ranking logic. For example, a regular file inside a folder named `March`, `Updated`, `Revised`, or `Final` inherits that folder's priority when the roster source is ranked.
+
+Roster PDFs are now supported on a best-effort basis when they contain extractable tables that look like the Excel roster files. PDF ingestion uses `pdfplumber`; if a PDF cannot be read as a table, the canonical run records a `roster_pdf_issue` in the exception outputs instead of silently skipping it.
+
 Persistent manual overrides:
 
 - add or edit rows in `config/manual_chapter_assignments.csv`

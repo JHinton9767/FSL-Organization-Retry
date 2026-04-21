@@ -25,7 +25,9 @@ from src.build_master_roster import (
     chapter_from_filename,
     clean_text,
     detect_inline_chapter_label,
+    find_header_row_in_rows,
     find_header_row,
+    find_status_column_in_rows,
     find_status_column,
     get_cell,
     infer_chapter,
@@ -33,6 +35,8 @@ from src.build_master_roster import (
     normalize_banner_id,
     normalize_chapter_name,
     normalize_status,
+    pdf_table_rows,
+    source_file_label,
 )
 
 
@@ -48,10 +52,26 @@ DEFAULT_GPA_BENCHMARK_ROOT = ROOT / "data" / "inbox" / "gpa_benchmark_reference"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "canonical"
 DEFAULT_CACHE_ROOT = DEFAULT_OUTPUT_ROOT / "_source_cache"
 SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
+ROSTER_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv", ".pdf"})
+TABULAR_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv"})
 
 TERM_RE = re.compile(r"(Winter|Spring|Summer|Fall)\s+(19\d{2}|20\d{2})", re.IGNORECASE)
 TERM_CODE_RE = re.compile(r"^(19\d{2}|20\d{2})(WI|SP|SU|FA)$", re.IGNORECASE)
 UPDATE_RE = re.compile(r"\((\d{1,2})\.(\d{1,2})\.(\d{2,4})\)")
+MONTH_PATTERNS = [
+    ("January", 1, r"\bjan(?:uary)?\b"),
+    ("February", 2, r"\bfeb(?:ruary)?\b"),
+    ("March", 3, r"\bmar(?:ch)?\b"),
+    ("April", 4, r"\bapr(?:il)?\b"),
+    ("May", 5, r"\bmay\b"),
+    ("June", 6, r"\bjun(?:e)?\b"),
+    ("July", 7, r"\bjul(?:y)?\b"),
+    ("August", 8, r"\baug(?:ust)?\b"),
+    ("September", 9, r"\bsep(?:t|tember)?\b"),
+    ("October", 10, r"\boct(?:ober)?\b"),
+    ("November", 11, r"\bnov(?:ember)?\b"),
+    ("December", 12, r"\bdec(?:ember)?\b"),
+]
 SEASON_ORDER = {"WI": 0, "SP": 1, "SU": 2, "FA": 3}
 SEASON_NAME = {"WI": "Winter", "SP": "Spring", "SU": "Summer", "FA": "Fall"}
 UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ""}
@@ -347,6 +367,29 @@ def update_key_from_name(value: str) -> Tuple[int, int, int]:
     if year < 100:
         year += 2000
     return (year, month, day)
+
+
+def roster_file_version_details(value: object) -> Tuple[str, float]:
+    text = re.sub(r"[_\-.]+", " ", clean_text(value).lower())
+    if re.search(r"\bfinal\b", text):
+        return "Final", 3
+    has_revised = bool(re.search(r"\brevised\b|\brevision\b|\brev\b", text))
+    has_updated = bool(re.search(r"\bupdated\b|\bupdate\b", text))
+    if has_revised and has_updated:
+        return "Revised + Updated", 2.5
+    if has_revised:
+        return "Revised", 2
+    if has_updated:
+        return "Updated", 2
+    return "Regular", 1
+
+
+def roster_file_month_details(value: object) -> Tuple[str, int]:
+    text = re.sub(r"[_\-.]+", " ", clean_text(value).lower())
+    for month_name, month_number, pattern in MONTH_PATTERNS:
+        if re.search(pattern, text):
+            return month_name, month_number
+    return "", 0
 
 
 def path_term_candidates(path: Path) -> List[str]:
@@ -1132,17 +1175,18 @@ def is_snapshot_filename(path: Path) -> bool:
     return clean_text(path.stem).lower().startswith("new member")
 
 
-def list_source_files(folder: Path) -> List[Path]:
+def list_source_files(folder: Path, extensions: Optional[set[str]] = None) -> List[Path]:
     if not folder.exists():
         return []
-    return sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS.union({".csv"}))
+    allowed = extensions or TABULAR_SOURCE_EXTENSIONS
+    return sorted(path for path in folder.rglob("*") if path.is_file() and path.suffix.lower() in allowed)
 
 
 def roster_files(roots: Sequence[Path]) -> List[Path]:
     files: List[Path] = []
     seen: set[Path] = set()
     for root in roots:
-        for path in list_source_files(root):
+        for path in list_source_files(root, ROSTER_SOURCE_EXTENSIONS):
             resolved = path.resolve()
             if resolved not in seen:
                 seen.add(resolved)
@@ -1162,6 +1206,15 @@ def graduation_files(root: Path) -> List[Path]:
     if not root.exists():
         return []
     return sorted(path for path in list_source_files(root) if clean_text(path.stem).lower().find("graduat") >= 0)
+
+
+def source_label_for_roster_path(path: Path, roots: Sequence[Path]) -> str:
+    for root in roots:
+        try:
+            return source_file_label(path, root)
+        except Exception:
+            continue
+    return source_file_label(path)
 
 
 def normalize_email(value: object) -> str:
@@ -1214,6 +1267,8 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
     )
     working["_chapter_missing"] = working["chapter"].map(chapter_is_missing).astype(int)
     working["_secondary_org"] = working["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
+    working["_source_version_priority"] = coerce_numeric(working.get("roster_file_version_priority", pd.Series([1] * len(working), index=working.index))).fillna(1)
+    working["_source_month_priority"] = coerce_numeric(working.get("roster_file_month_priority", pd.Series([0] * len(working), index=working.index))).fillna(0)
     working["_assignment_rank"] = working["chapter_assignment_source"].fillna("").astype(str).map(
         {
             "manual_override": 0,
@@ -1227,13 +1282,13 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
     ).fillna(9)
     for (_, _), group in working.groupby(["_identity_key", "term_code"], dropna=False):
         ordered = group.sort_values(
-            by=["_chapter_missing", "_secondary_org", "_assignment_rank", "chapter", "source_file", "source_sheet"],
-            ascending=[True, True, True, True, True, True],
+            by=["_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_assignment_rank", "chapter", "source_file", "source_sheet"],
+            ascending=[True, True, False, False, True, True, True, True],
         )
         preferred_rows.append(ordered.iloc[0].to_dict())
 
     preferred = pd.DataFrame(preferred_rows)
-    return preferred.drop(columns=["_identity_key", "_chapter_missing", "_secondary_org", "_assignment_rank"], errors="ignore").reset_index(drop=True)
+    return preferred.drop(columns=["_identity_key", "_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_assignment_rank"], errors="ignore").reset_index(drop=True)
 
 
 def chapter_assignment_details(
@@ -1460,14 +1515,148 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
     exceptions: List[dict] = []
     schema_columns = load_schema()["tables"]["roster_term"]
 
+    def process_roster_table(path: Path, source_label: str, sheet_name: str, table_rows: List[Tuple[object, ...]]) -> None:
+        header_row_idx, header_map = find_header_row_in_rows(table_rows)
+        if header_row_idx is None:
+            exceptions.append(
+                {
+                    "exception_type": "roster_header_missing",
+                    "source_file": source_label,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": f"Sheet {sheet_name} skipped because no usable header row was found.",
+                }
+            )
+            return
+
+        status_row_idx, status_col_idx = find_status_column_in_rows(table_rows)
+        if "status" not in header_map and status_col_idx is not None:
+            header_map["status"] = status_col_idx
+        data_start_index = max(header_row_idx, status_row_idx or header_row_idx)
+
+        default_chapter = infer_chapter(path, sheet_name) or normalize_chapter_name(sheet_name or path.stem) or "Unknown"
+        current_chapter_raw = sheet_name
+        current_chapter = default_chapter
+        if default_chapter and default_chapter != "Unknown":
+            if normalize_chapter_name(sheet_name) == default_chapter and not is_placeholder_sheet_name(sheet_name):
+                current_chapter_source = "inferred_from_sheet_name"
+            elif chapter_from_filename(path) == default_chapter:
+                current_chapter_source = "inferred_from_file_name"
+            else:
+                current_chapter_source = "inferred_from_sheet_name"
+        else:
+            current_chapter_source = "unresolved"
+
+        term_label = ""
+        for candidate in path_term_candidates(path):
+            code, label, _, _ = parse_term_code(candidate)
+            if code:
+                term_label = label
+                break
+        term_code, term_label, term_year, term_season = parse_term_code(term_label)
+        if not term_code:
+            exceptions.append(
+                {
+                    "exception_type": "roster_term_unparsed",
+                    "source_file": source_label,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": f"Could not infer term for {source_label}::{sheet_name}",
+                }
+            )
+
+        version_context = " ".join([str(part) for part in path.parts])
+        roster_file_version, roster_file_version_priority = roster_file_version_details(version_context)
+        roster_file_month, roster_file_month_priority = roster_file_month_details(version_context)
+
+        for row in table_rows[data_start_index:]:
+            inline_chapter_raw = detect_inline_chapter_label(row, header_map)
+            if inline_chapter_raw:
+                current_chapter_raw = inline_chapter_raw
+                current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
+                current_chapter_source = "original" if current_chapter and current_chapter != "Unknown" else current_chapter_source
+                continue
+
+            last_name = clean_text(get_cell(row, header_map.get("last_name")))
+            first_name = clean_text(get_cell(row, header_map.get("first_name")))
+            if not last_name and not first_name:
+                continue
+
+            banner_raw = clean_text(get_cell(row, header_map.get("banner_id")))
+            email = normalize_email(get_cell(row, header_map.get("email")))
+            chapter_raw = clean_text(get_cell(row, header_map.get("chapter")))
+            status_raw = clean_text(get_cell(row, header_map.get("status")))
+            position_raw = clean_text(get_cell(row, header_map.get("position")))
+            semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
+            chapter, chapter_assignment_source, chapter_assignment_confidence, chapter_assignment_notes = chapter_assignment_details(
+                path,
+                sheet_name,
+                chapter_raw,
+                current_chapter_raw or sheet_name,
+                current_chapter_source,
+            )
+            status_bucket = roster_status_bucket(status_raw, position_raw)
+
+            rows.append(
+                {
+                    "student_id": normalize_banner_id(banner_raw),
+                    "student_id_raw": banner_raw,
+                    "identity_resolution_basis": "source_banner_id" if banner_raw else "",
+                    "identity_resolution_notes": "",
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "source_file": source_label,
+                    "source_sheet": sheet_name,
+                    "roster_file_version": roster_file_version,
+                    "roster_file_version_priority": roster_file_version_priority,
+                    "roster_file_month": roster_file_month,
+                    "roster_file_month_priority": roster_file_month_priority,
+                    "term_code": term_code,
+                    "term_label": term_label,
+                    "term_year": term_year,
+                    "term_season": term_season,
+                    "term_source_basis": "folder_or_filename",
+                    "chapter": chapter,
+                    "chapter_raw": chapter_raw or current_chapter_raw or sheet_name,
+                    "chapter_assignment_source": chapter_assignment_source,
+                    "chapter_assignment_confidence": chapter_assignment_confidence,
+                    "chapter_assignment_notes": chapter_assignment_notes,
+                    "org_status_raw": status_raw,
+                    "org_status_bucket": status_bucket,
+                    "org_position_raw": position_raw,
+                    "semester_joined_raw": semester_joined_raw,
+                    "new_member_flag": "Yes" if status_bucket == "New Member" else "No",
+                    "org_entry_term_code": "",
+                    "org_entry_term_basis": "",
+                }
+            )
+
     for path in roster_files(roots):
+        source_label = source_label_for_roster_path(path, roots)
+        if path.suffix.lower() == ".pdf":
+            table_sources, pdf_issues = pdf_table_rows(path)
+            for issue in pdf_issues:
+                exceptions.append(
+                    {
+                        "exception_type": "roster_pdf_issue",
+                        "source_file": source_label,
+                        "student_id": "",
+                        "term_code": "",
+                        "details": issue,
+                    }
+                )
+            for sheet_name, table_rows in table_sources:
+                process_roster_table(path, source_label, sheet_name, table_rows)
+            continue
+
         try:
             workbook = load_workbook(path, data_only=True, read_only=True)
         except Exception as exc:
             exceptions.append(
                 {
                     "exception_type": "roster_open_error",
-                    "source_file": path.name,
+                    "source_file": source_label,
                     "student_id": "",
                     "term_code": "",
                     "details": str(exc),
@@ -1477,112 +1666,8 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
 
         try:
             for ws in workbook.worksheets:
-                header_row_idx, header_map = find_header_row(ws)
-                if header_row_idx is None:
-                    exceptions.append(
-                        {
-                            "exception_type": "roster_header_missing",
-                            "source_file": path.name,
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"Sheet {ws.title} skipped because no usable header row was found.",
-                        }
-                    )
-                    continue
-
-                status_row_idx, status_col_idx = find_status_column(ws)
-                if "status" not in header_map and status_col_idx is not None:
-                    header_map["status"] = status_col_idx
-                data_start_row = max(header_row_idx, status_row_idx or header_row_idx) + 1
-                default_chapter = infer_chapter(path, ws.title) or normalize_chapter_name(ws.title or path.stem) or "Unknown"
-                current_chapter_raw = ws.title
-                current_chapter = default_chapter
-                if default_chapter and default_chapter != "Unknown":
-                    if normalize_chapter_name(ws.title) == default_chapter and not is_placeholder_sheet_name(ws.title):
-                        current_chapter_source = "inferred_from_sheet_name"
-                    elif chapter_from_filename(path) == default_chapter:
-                        current_chapter_source = "inferred_from_file_name"
-                    else:
-                        current_chapter_source = "inferred_from_sheet_name"
-                else:
-                    current_chapter_source = "unresolved"
-
-                term_label = ""
-                for candidate in path_term_candidates(path):
-                    code, label, _, _ = parse_term_code(candidate)
-                    if code:
-                        term_label = label
-                        break
-                term_code, term_label, term_year, term_season = parse_term_code(term_label)
-                if not term_code:
-                    exceptions.append(
-                        {
-                            "exception_type": "roster_term_unparsed",
-                            "source_file": path.name,
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"Could not infer term for {path.name}::{ws.title}",
-                        }
-                    )
-
-                for row in ws.iter_rows(min_row=data_start_row, values_only=True):
-                    inline_chapter_raw = detect_inline_chapter_label(row, header_map)
-                    if inline_chapter_raw:
-                        current_chapter_raw = inline_chapter_raw
-                        current_chapter = normalize_chapter_name(inline_chapter_raw) or default_chapter
-                        current_chapter_source = "original" if current_chapter and current_chapter != "Unknown" else current_chapter_source
-                        continue
-
-                    last_name = clean_text(get_cell(row, header_map.get("last_name")))
-                    first_name = clean_text(get_cell(row, header_map.get("first_name")))
-                    if not last_name and not first_name:
-                        continue
-
-                    banner_raw = clean_text(get_cell(row, header_map.get("banner_id")))
-                    email = normalize_email(get_cell(row, header_map.get("email")))
-                    chapter_raw = clean_text(get_cell(row, header_map.get("chapter")))
-                    status_raw = clean_text(get_cell(row, header_map.get("status")))
-                    position_raw = clean_text(get_cell(row, header_map.get("position")))
-                    semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
-                    chapter, chapter_assignment_source, chapter_assignment_confidence, chapter_assignment_notes = chapter_assignment_details(
-                        path,
-                        ws.title,
-                        chapter_raw,
-                        current_chapter_raw or ws.title,
-                        current_chapter_source,
-                    )
-                    status_bucket = roster_status_bucket(status_raw, position_raw)
-
-                    rows.append(
-                        {
-                            "student_id": normalize_banner_id(banner_raw),
-                            "student_id_raw": banner_raw,
-                            "identity_resolution_basis": "source_banner_id" if banner_raw else "",
-                            "identity_resolution_notes": "",
-                            "first_name": first_name,
-                            "last_name": last_name,
-                            "email": email,
-                            "source_file": path.name,
-                            "source_sheet": ws.title,
-                            "term_code": term_code,
-                            "term_label": term_label,
-                            "term_year": term_year,
-                            "term_season": term_season,
-                            "term_source_basis": "folder_or_filename",
-                            "chapter": chapter,
-                            "chapter_raw": chapter_raw or current_chapter_raw or ws.title,
-                            "chapter_assignment_source": chapter_assignment_source,
-                            "chapter_assignment_confidence": chapter_assignment_confidence,
-                            "chapter_assignment_notes": chapter_assignment_notes,
-                            "org_status_raw": status_raw,
-                            "org_status_bucket": status_bucket,
-                            "org_position_raw": position_raw,
-                            "semester_joined_raw": semester_joined_raw,
-                            "new_member_flag": "Yes" if status_bucket == "New Member" else "No",
-                            "org_entry_term_code": "",
-                            "org_entry_term_basis": "",
-                        }
-                    )
+                table_rows = [tuple(row) for row in ws.iter_rows(values_only=True)]
+                process_roster_table(path, source_label, ws.title, table_rows)
         finally:
             workbook.close()
 
@@ -2112,12 +2197,22 @@ def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: 
         effective_keys = ["_identity_key" if key == "student_id" else key for key in unique_keys]
     else:
         effective_keys = list(unique_keys)
+    ranked["_source_version_priority"] = (
+        coerce_numeric(ranked["roster_file_version_priority"]).fillna(1)
+        if source_label == "roster" and "roster_file_version_priority" in ranked.columns
+        else 0
+    )
+    ranked["_source_month_priority"] = (
+        coerce_numeric(ranked["roster_file_month_priority"]).fillna(0)
+        if source_label == "roster" and "roster_file_month_priority" in ranked.columns
+        else 0
+    )
     ranked["_completeness"] = ranked.notna().sum(axis=1)
     ranked["_update_key"] = ranked["source_file"].map(update_key_from_name) if "source_file" in ranked.columns else [(0, 0, 0)] * len(ranked)
-    ranked = ranked.sort_values(by=effective_keys + ["_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False])
+    ranked = ranked.sort_values(by=effective_keys + ["_source_version_priority", "_source_month_priority", "_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False, False, False])
     duplicate_mask = ranked.duplicated(subset=effective_keys, keep="first")
     exceptions = ranked.loc[duplicate_mask].copy()
-    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
+    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_source_version_priority", "_source_month_priority", "_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
     if exceptions.empty:
         return deduped.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exception_rows = []
@@ -2185,6 +2280,8 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
         ranked = group.copy()
         ranked["_resigned_or_revoked"] = ranked["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"]).astype(int)
         ranked["_secondary_org"] = ranked["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
+        ranked["_source_version_priority"] = coerce_numeric(ranked.get("roster_file_version_priority", pd.Series([1] * len(ranked), index=ranked.index))).fillna(1)
+        ranked["_source_month_priority"] = coerce_numeric(ranked.get("roster_file_month_priority", pd.Series([0] * len(ranked), index=ranked.index))).fillna(0)
         ranked["_new_member"] = ranked["new_member_flag"].eq("Yes").astype(int)
         ranked["_known_id"] = ranked["student_id"].fillna("").astype(str).str.strip().ne("").astype(int)
         ranked["_status_priority"] = ranked["org_status_bucket"].map(
@@ -2199,7 +2296,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
                 "Active": 50,
             }
         ).fillna(0)
-        ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False])
+        ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False, False, False])
         chosen_row = ranked.iloc[0].copy()
         discarded_resigned_revoked = group.loc[group["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"])]
         if (
@@ -2219,7 +2316,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
             )
             note = f"Ignored same-term resigned/revoked roster row(s) from: {rsrv_chapters}."
             chosen_row["chapter_assignment_notes"] = f"{existing_notes} {note}".strip() if existing_notes else note
-        resolved_rows.append(chosen_row.drop(labels=["_resigned_or_revoked", "_secondary_org", "_new_member", "_known_id", "_status_priority", "_identity_key"]))
+        resolved_rows.append(chosen_row.drop(labels=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_new_member", "_known_id", "_status_priority", "_identity_key"]))
     resolved = pd.DataFrame(resolved_rows).reset_index(drop=True)
     return resolved, pd.DataFrame(exceptions)
 
@@ -3197,21 +3294,29 @@ def build_canonical_pipeline(
     academic_source_paths = academic_files(academic_root)
     snapshot_source_paths = snapshot_files(academic_root)
     graduation_source_paths = graduation_files(graduation_root)
-    reference_source_paths = roster_files([reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root])
+    reference_source_paths = []
+    for reference_root in [reference_data_root, membership_reference_root, gpa_reference_root, gpa_benchmark_root]:
+        reference_source_paths.extend(list_source_files(reference_root, TABULAR_SOURCE_EXTENSIONS))
 
     roster_manifest = {
         "files": files_manifest(roster_source_paths),
         "loader_token": source_cache_token(
             [
                 load_roster_term_table,
+                pdf_table_rows,
                 find_header_row,
+                find_header_row_in_rows,
                 find_status_column,
+                find_status_column_in_rows,
                 detect_inline_chapter_label,
                 get_cell,
                 infer_chapter,
                 normalize_banner_id,
                 normalize_chapter_name,
                 normalize_status,
+                source_file_label,
+                roster_file_version_details,
+                roster_file_month_details,
                 chapter_assignment_details,
                 roster_status_bucket,
             ]
