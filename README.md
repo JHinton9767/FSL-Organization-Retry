@@ -96,8 +96,10 @@ The app manifest now points to canonical outputs as the preferred prepared datas
 
 - Do not treat first observed organization entry as true school entry.
 - Do not treat disappearance as a confirmed negative outcome.
+- Do not treat disappearance as graduation.
 - Do not calculate long-window graduation rates for non-measurable cohorts.
 - Keep unresolved outcomes separate from resolved outcomes.
+- The headcount logic is intentionally unchanged by the graduation-outcome correction.
 
 ## Outcome status and denominator rules
 
@@ -124,6 +126,25 @@ Graduation-focused views now expose two denominator styles:
 
 Use `Resolved Outcomes Only` for most final-outcome interpretation.
 Use `Full Population` when you need to show the broader unresolved burden alongside the rate.
+
+## Graduation evidence rules
+
+Graduation is now evidence-gated. A student is counted as `Graduated` only when the pipeline has a confirmed graduation signal, such as:
+
+- a match in a graduation list
+- a populated graduation term/year
+- an academic status that clearly indicates the degree was awarded or the student graduated
+- a roster status explicitly marked as graduated/alumni
+- a current snapshot or prepared-bundle graduation flag with a recorded evidence source
+
+The pipeline no longer treats generic `degree` wording, high cumulative hours, inactive status, or disappearance from later records as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
+
+Graduation-rate views keep two denominator definitions:
+
+- `Full Population`: unique students in the eligible filtered population
+- `Resolved Outcomes Only`: unique students after excluding `Still Active`, `Truly Unknown / Unresolved`, and `Other / Unmapped`
+
+Graduation metrics are calculated at the unique-student level so repeated term rows cannot inflate the numerator or denominator.
 
 ## Chapter assignment provenance
 
@@ -204,6 +225,9 @@ The canonical run also writes reviewable exception files when applicable:
 - `outcome_exceptions.csv`
 - `missing_evidence_cases.csv`
 - `unresolved_chapter_review.csv`
+- `graduation_status_audit.csv`
+
+`graduation_status_audit.csv` summarizes confirmed graduation evidence, corrected graduation claims, active/unknown/resolved counts, duplicate student checks, and warning checks for suspiciously high graduation rates.
 
 If supplemental membership reference workbooks are provided, the canonical run also writes:
 

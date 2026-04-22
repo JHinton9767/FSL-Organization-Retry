@@ -378,6 +378,9 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
         ]
     )
     tables["Classification Audit"] = chapter_unresolved
+    graduation_audit = getattr(bundle, "tables", {}).get("graduation_status_audit")
+    if graduation_audit is not None and not graduation_audit.empty:
+        tables["Graduation Evidence Audit"] = graduation_audit
 
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases", "unresolved_chapter_review", "qa_checks"]:
         if key in bundle.tables:
@@ -897,6 +900,19 @@ def main() -> None:
                 "resolved_outcomes_only_flag",
                 "resolved_outcome_excluded_flag",
                 "resolved_outcome_exclusion_reason",
+                "outcome_evidence_source",
+                "graduation_evidence_confirmed",
+                "graduation_status_without_evidence",
+                "graduation_status_corrected_flag",
+                "graduation_status_correction_reason",
+                "graduated_eventual",
+                "graduated_eventual_measurable",
+                "graduated_4yr",
+                "graduated_4yr_measurable",
+                "graduated_6yr",
+                "graduated_6yr_measurable",
+                "graduation_term",
+                "graduation_year",
                 "major",
                 "pell_group",
                 "transfer_group",

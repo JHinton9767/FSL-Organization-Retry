@@ -276,6 +276,7 @@ def _build_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame])
             "outcome_exceptions.csv",
             "missing_evidence_cases.csv",
             "unresolved_chapter_review.csv",
+            "graduation_status_audit.csv",
         ]:
             statuses.append(_loaded_status(filename, version.root_path / filename, False, tables.get(filename.replace('.csv', ''))))
         return statuses
@@ -356,6 +357,7 @@ def load_analysis_bundle(
             "outcome_exceptions",
             "missing_evidence_cases",
             "unresolved_chapter_review",
+            "graduation_status_audit",
         ]:
             path = version.root_path / f"{optional_name}.csv"
             if path.exists():

@@ -1357,18 +1357,19 @@ def map_grade_headers(headers: Sequence[object]) -> Dict[str, int]:
 
 def roster_status_bucket(raw_status: object, raw_position: object) -> str:
     status = normalize_status(clean_text(raw_status))
+    status_text = status.upper()
     combined = f"{status} {clean_text(raw_position)}".upper()
-    if "GRAD" in combined or "ALUM" in combined:
+    if "GRAD" in status_text or "ALUM" in status_text:
         return "Graduated"
-    if "SUSPEND" in combined:
+    if "SUSPEND" in status_text:
         return "Suspended"
-    if "TRANSFER" in combined:
+    if "TRANSFER" in status_text:
         return "Transfer"
-    if "REVOK" in combined:
+    if "REVOK" in status_text:
         return "Revoked"
-    if "RESIGN" in combined:
+    if "RESIGN" in status_text:
         return "Resigned"
-    if "INACTIVE" in combined or "DROP" in combined or "REMOVE" in combined:
+    if "INACTIVE" in status_text or "DROP" in status_text or "REMOVE" in status_text:
         return "Inactive"
     if "NEW MEMBER" in combined:
         return "New Member"
@@ -1379,8 +1380,6 @@ def roster_status_bucket(raw_status: object, raw_position: object) -> str:
 
 def outcome_bucket_from_signals(status_bucket: str, academic_status_raw: str, snapshot_status_raw: str) -> Tuple[str, str]:
     signals = " ".join([status_bucket, clean_text(academic_status_raw), clean_text(snapshot_status_raw)]).upper()
-    if any(token in signals for token in ["GRADUAT", "ALUMNI", "DEGREE"]):
-        return "Graduated", "Explicit graduation signal"
     if "SUSPEND" in signals:
         return "Suspended", "Explicit suspension signal"
     if "TRANSFER" in signals:
@@ -1390,6 +1389,27 @@ def outcome_bucket_from_signals(status_bucket: str, academic_status_raw: str, sn
     if any(token in signals for token in ["ACTIVE", "CURRENT", "MEMBER", "NEW MEMBER", "COUNCIL", "ENROLLED"]):
         return "Active/Unknown", "Current or active signal only"
     return "No Further Observation", "No explicit outcome evidence"
+
+
+def has_confirmed_graduation_text(value: object) -> bool:
+    text = clean_text(value).upper()
+    if not text:
+        return False
+    if any(token in text for token in ["DEGREE SEEK", "SEEKING DEGREE", "NON-DEGREE", "NON DEGREE"]):
+        return False
+    return any(
+        token in text
+        for token in [
+            "GRADUATED",
+            "ALUMNI",
+            "ALUMNUS",
+            "ALUMNA",
+            "DEGREE AWARDED",
+            "AWARDED DEGREE",
+            "DEGREE CONFER",
+            "CONFERRED DEGREE",
+        ]
+    )
 
 
 def standing_bucket(value: object) -> str:
@@ -2565,10 +2585,10 @@ def build_graduation_maps(graduation: pd.DataFrame) -> Tuple[Dict[str, Tuple[str
         grad_term_code = parse_term_code(getattr(row, "Graduation Term", ""))[0]
         source = clean_text(getattr(row, "Graduation Source File", "")) or "Graduation List"
         if student_id and student_id not in id_map:
-            id_map[student_id] = (grad_term_code, source)
+            id_map[student_id] = (grad_term_code, f"Graduation List ID match: {source}")
         name_key = person_name_key(first_name, last_name)
         if (first_name or last_name) and name_key not in name_map:
-            name_map[name_key] = (grad_term_code, source)
+            name_map[name_key] = (grad_term_code, f"Graduation List name match: {source}")
 
     return id_map, name_map
 
@@ -2614,12 +2634,18 @@ def build_student_summary(
 
         explicit_grad_term = ""
         evidence_source = ""
+        graduation_confirmed = False
+        graduation_status_corrected = False
+        graduation_status_correction_reason = ""
+        snapshot_status_text = " ".join(snapshot.loc[snapshot["Student ID"].map(normalize_banner_id).eq(student_id), "Student Status"].fillna("").astype(str).tolist()) if not snapshot.empty else ""
         if student_id in graduation_by_id:
             explicit_grad_term, evidence_source = graduation_by_id[student_id]
+            graduation_confirmed = True
         else:
             name_key = person_name_key(first_row["first_name"], first_row["last_name"])
             if name_key in graduation_by_name:
                 explicit_grad_term, evidence_source = graduation_by_name[name_key]
+                graduation_confirmed = True
         if not explicit_grad_term and (academic_rows["graduation_term_code"].fillna("").astype(str).str.strip().ne("")).any():
             explicit_grad_term = clean_text(
                 academic_rows.loc[
@@ -2628,23 +2654,35 @@ def build_student_summary(
                 ].iloc[0]
             )
             evidence_source = evidence_source or "Academic graduation term"
-        if not explicit_grad_term and (academic_rows["academic_status_raw"].fillna("").str.contains("graduat", case=False, na=False)).any():
-            explicit_grad_term = clean_text(academic_rows.loc[academic_rows["academic_status_raw"].fillna("").str.contains("graduat", case=False, na=False), "term_code"].iloc[0])
+            graduation_confirmed = True
+        if not explicit_grad_term and academic_rows["academic_status_raw"].map(has_confirmed_graduation_text).any():
+            explicit_grad_term = clean_text(academic_rows.loc[academic_rows["academic_status_raw"].map(has_confirmed_graduation_text), "term_code"].iloc[0])
             evidence_source = evidence_source or "Academic status"
+            graduation_confirmed = True
         elif not explicit_grad_term and (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
             explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
             evidence_source = evidence_source or "Roster status"
+            graduation_confirmed = True
+        if not graduation_confirmed and has_confirmed_graduation_text(snapshot_status_text):
+            evidence_source = evidence_source or "Snapshot student status"
+            graduation_confirmed = True
 
         latest_status_bucket = clean_text(roster_rows["org_status_bucket"].iloc[-1]) if not roster_rows.empty else "Unknown"
-        latest_outcome_bucket, derived_evidence_source = outcome_bucket_from_signals(
+        derived_outcome_bucket, derived_evidence_source = outcome_bucket_from_signals(
             " ".join(roster_rows["org_status_bucket"].fillna("").astype(str).tolist()),
             " ".join(academic_rows["academic_status_raw"].fillna("").astype(str).tolist()),
-            " ".join(snapshot.loc[snapshot["Student ID"].map(normalize_banner_id).eq(student_id), "Student Status"].fillna("").astype(str).tolist()) if not snapshot.empty else "",
+            snapshot_status_text,
         )
+        latest_outcome_bucket = derived_outcome_bucket
         evidence_source = evidence_source or derived_evidence_source
-        if explicit_grad_term:
+        if graduation_confirmed:
             latest_outcome_bucket = "Graduated"
             evidence_source = evidence_source or "Graduation List"
+        elif derived_outcome_bucket == "Graduated":
+            latest_outcome_bucket = "No Further Observation"
+            evidence_source = "No explicit outcome evidence"
+            graduation_status_corrected = True
+            graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
         if latest_outcome_bucket == "No Further Observation":
             outcome_exceptions.append(
                 {
@@ -2757,6 +2795,9 @@ def build_student_summary(
                 "resolved_outcome_excluded_flag": "Yes" if latest_outcome_bucket in UNRESOLVED_OUTCOMES else "No",
                 "resolved_outcome_exclusion_reason": latest_outcome_bucket if latest_outcome_bucket in UNRESOLVED_OUTCOMES else "",
                 "outcome_evidence_source": evidence_source,
+                "graduation_evidence_confirmed": "Yes" if graduation_confirmed else "No",
+                "graduation_status_corrected_flag": "Yes" if graduation_status_corrected else "No",
+                "graduation_status_correction_reason": graduation_status_correction_reason,
                 "latest_roster_status_bucket": latest_status_bucket or "Unknown",
                 "initial_roster_status_bucket": clean_text(roster_rows["org_status_bucket"].iloc[0]) if not roster_rows.empty else "Unknown",
                 "active_flag": "Yes" if latest_status_bucket in {"Active", "New Member"} else "No",
@@ -2860,6 +2901,22 @@ def build_student_summary(
     resolution_fields = build_outcome_resolution_fields(summary, settings.get("outcome_resolution", {}))
     for column in resolution_fields.columns:
         summary[column] = resolution_fields[column]
+    if "graduation_status_without_evidence" in summary.columns:
+        corrected_mask = summary["graduation_status_without_evidence"].fillna(False).astype(bool)
+        summary["graduation_status_corrected_flag"] = summary["graduation_status_corrected_flag"].where(
+            summary["graduation_status_corrected_flag"].fillna("").astype(str).str.strip().eq("Yes") | ~corrected_mask,
+            "Yes",
+        )
+        summary["graduation_status_correction_reason"] = summary["graduation_status_correction_reason"].where(
+            summary["graduation_status_correction_reason"].fillna("").astype(str).str.strip().ne("") | ~corrected_mask,
+            "Graduation claim was present, but no confirmed graduation evidence source was available.",
+        )
+        summary.loc[corrected_mask, "latest_outcome_bucket"] = "No Further Observation"
+    confirmed_grad_mask = summary["is_graduated"].fillna(False).astype(bool)
+    summary.loc[~confirmed_grad_mask, "graduated_eventual"] = "No"
+    summary.loc[~confirmed_grad_mask & summary["graduated_4yr_measurable"].fillna("").astype(str).eq("Yes"), "graduated_4yr"] = "No"
+    summary.loc[~confirmed_grad_mask & summary["graduated_6yr_measurable"].fillna("").astype(str).eq("Yes"), "graduated_6yr"] = "No"
+    summary["status_group"] = summary["latest_outcome_bucket"].replace("", "Unknown")
     summary["resolved_outcome_flag"] = summary["is_resolved_outcome"].fillna(False).map(lambda value: "Yes" if bool(value) else "No")
     summary["resolved_outcome_excluded_flag"] = (~summary["is_resolved_outcome"].fillna(False)).map(lambda value: "Yes" if bool(value) else "No")
     summary["resolved_outcome_exclusion_reason"] = summary["outcome_resolution_group"].where(~summary["is_resolved_outcome"].fillna(False), "")
@@ -2919,8 +2976,9 @@ def build_cohort_metrics(summary: pd.DataFrame) -> pd.DataFrame:
             continue
 
         def rate_row(label: str, numerator_col: str, denominator_col: str, group: str, notes: str = "") -> None:
-            eligible = int(frame[denominator_col].fillna("").astype(str).eq("Yes").sum())
-            numerator = int((frame[numerator_col].fillna("").astype(str).eq("Yes") & frame[denominator_col].fillna("").astype(str).eq("Yes")).sum())
+            rate_frame = frame.drop_duplicates(subset=["student_id"], keep="first") if group == "Graduation" and "student_id" in frame.columns else frame
+            eligible = int(rate_frame[denominator_col].fillna("").astype(str).eq("Yes").sum())
+            numerator = int((rate_frame[numerator_col].fillna("").astype(str).eq("Yes") & rate_frame[denominator_col].fillna("").astype(str).eq("Yes")).sum())
             rows.append(metric_row(group, label, cohort, eligible, numerator=numerator, rate=(numerator / eligible) if eligible else None, notes=notes))
 
         def mean_row(label: str, value_col: str, group: str) -> None:
@@ -3045,6 +3103,110 @@ def build_measurable_window_checks(summary: pd.DataFrame) -> List[dict]:
     return rows
 
 
+def boolish_series(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.lower().isin({"true", "1", "yes", "y"})
+
+
+def build_graduation_status_audit(summary: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Audit Section", "Measure", "Value", "Status", "Notes"]
+    if summary.empty:
+        return pd.DataFrame(columns=columns)
+
+    total_rows = int(len(summary))
+    total_unique = int(summary["student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    duplicate_student_rows = max(total_rows - total_unique, 0)
+    graduated = boolish_series(summary.get("is_graduated", pd.Series(False, index=summary.index)))
+    confirmed = boolish_series(summary.get("graduation_evidence_confirmed", pd.Series(False, index=summary.index)))
+    corrected = summary.get("graduation_status_corrected_flag", pd.Series("", index=summary.index)).fillna("").astype(str).str.strip().eq("Yes")
+    active = boolish_series(summary.get("is_active_outcome", pd.Series(False, index=summary.index)))
+    unknown = boolish_series(summary.get("is_unknown_outcome", pd.Series(False, index=summary.index)))
+    non_grad = boolish_series(summary.get("is_known_non_graduate_exit", pd.Series(False, index=summary.index)))
+    numerator = summary.get("graduated_eventual", pd.Series("", index=summary.index)).fillna("").astype(str).str.strip().eq("Yes")
+    without_evidence = boolish_series(summary.get("graduation_status_without_evidence", pd.Series(False, index=summary.index)))
+
+    rows = [
+        {"Audit Section": "Summary", "Measure": "Total unique students used for graduation calculations", "Value": total_unique, "Status": "Pass", "Notes": "Graduation rates are student-level calculations."},
+        {"Audit Section": "Summary", "Measure": "Duplicate student rows in summary", "Value": duplicate_student_rows, "Status": "Pass" if duplicate_student_rows == 0 else "Fail", "Notes": "Should be 0 for student-level graduation metrics."},
+        {"Audit Section": "Summary", "Measure": "Students marked Graduated", "Value": int(graduated.sum()), "Status": "Pass", "Notes": ""},
+        {"Audit Section": "Summary", "Measure": "Students with confirmed graduation evidence", "Value": int(confirmed.sum()), "Status": "Pass", "Notes": ""},
+        {"Audit Section": "Summary", "Measure": "Graduation numerator", "Value": int(numerator.sum()), "Status": "Pass" if int(numerator.sum()) <= int(confirmed.sum()) else "Fail", "Notes": "Graduation numerator must not exceed confirmed evidence count."},
+        {"Audit Section": "Summary", "Measure": "Graduation claims corrected to non-graduated outcome", "Value": int(corrected.sum()), "Status": "Review" if int(corrected.sum()) else "Pass", "Notes": "These rows claimed graduation somewhere but lacked confirmed graduation evidence."},
+        {"Audit Section": "Summary", "Measure": "Still active students", "Value": int(active.sum()), "Status": "Pass", "Notes": ""},
+        {"Audit Section": "Summary", "Measure": "Truly unknown / unresolved students", "Value": int(unknown.sum()), "Status": "Pass", "Notes": "Disappearance without confirmed graduation remains unknown."},
+        {"Audit Section": "Summary", "Measure": "Resolved non-graduate exits", "Value": int(non_grad.sum()), "Status": "Pass", "Notes": ""},
+        {"Audit Section": "Summary", "Measure": "Graduated without confirmed evidence", "Value": int((graduated & ~confirmed).sum()), "Status": "Pass" if int((graduated & ~confirmed).sum()) == 0 else "Fail", "Notes": "No student should be classified as Graduated without evidence."},
+        {"Audit Section": "Summary", "Measure": "Graduation claim without evidence", "Value": int(without_evidence.sum()), "Status": "Review" if int(without_evidence.sum()) else "Pass", "Notes": "These claims are not counted as confirmed graduation."},
+    ]
+
+    if total_unique:
+        full_population_rate = float(numerator.sum()) / float(total_unique)
+        rows.append(
+            {
+                "Audit Section": "Warning",
+                "Measure": "Full-population graduation rate sanity check",
+                "Value": full_population_rate,
+                "Status": "Review" if total_unique >= 20 and full_population_rate > 0.95 else "Pass",
+                "Notes": "Review if the full-population graduation rate is near 100%.",
+            }
+        )
+
+    if "chapter" in summary.columns:
+        chapter_rates = []
+        for chapter, frame in summary.groupby("chapter", dropna=False):
+            if not clean_text(chapter):
+                continue
+            resolved = boolish_series(frame.get("is_resolved_outcome", pd.Series(False, index=frame.index)))
+            resolved_n = int(resolved.sum())
+            if resolved_n < 5:
+                continue
+            chapter_grad = int(boolish_series(frame.get("is_graduated", pd.Series(False, index=frame.index))).sum())
+            chapter_rates.append(chapter_grad / resolved_n if resolved_n else 0)
+        near_perfect = sum(1 for rate in chapter_rates if rate > 0.95)
+        rows.append(
+            {
+                "Audit Section": "Warning",
+                "Measure": "Chapters with resolved graduation rate above 95%",
+                "Value": near_perfect,
+                "Status": "Review" if near_perfect > max(3, int(len(chapter_rates) * 0.25)) else "Pass",
+                "Notes": "A high count may indicate graduation overclassification.",
+            }
+        )
+
+    if "outcome_evidence_source" in summary.columns:
+        source_counts = (
+            summary.loc[graduated, "outcome_evidence_source"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", "Missing evidence source")
+            .value_counts()
+        )
+        for source, count in source_counts.items():
+            rows.append(
+                {
+                    "Audit Section": "Graduation Evidence Source",
+                    "Measure": source,
+                    "Value": int(count),
+                    "Status": "Pass" if source != "Missing evidence source" else "Fail",
+                    "Notes": "Counts students classified as Graduated by evidence source.",
+                }
+            )
+
+    if corrected.any():
+        for row in summary.loc[corrected, ["student_id", "student_name", "latest_outcome_bucket", "outcome_evidence_source", "graduation_status_correction_reason"]].itertuples(index=False):
+            rows.append(
+                {
+                    "Audit Section": "Corrected Student",
+                    "Measure": clean_text(getattr(row, "student_id", "")),
+                    "Value": 1,
+                    "Status": "Review",
+                    "Notes": f"{clean_text(getattr(row, 'student_name', ''))}: {clean_text(getattr(row, 'graduation_status_correction_reason', ''))}",
+                }
+            )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 def build_qa_checks(
     roster: pd.DataFrame,
     academic: pd.DataFrame,
@@ -3080,6 +3242,28 @@ def build_qa_checks(
     rows.extend(build_spring_coverage_checks(roster, "Roster"))
     rows.extend(build_spring_coverage_checks(academic, "Academic"))
     rows.extend(build_measurable_window_checks(summary))
+    graduation_audit = build_graduation_status_audit(summary)
+    if not graduation_audit.empty:
+        for measure in [
+            "Graduation numerator",
+            "Graduated without confirmed evidence",
+            "Graduation claim without evidence",
+            "Full-population graduation rate sanity check",
+            "Chapters with resolved graduation rate above 95%",
+        ]:
+            audit_row = graduation_audit.loc[graduation_audit["Measure"].eq(measure)]
+            if audit_row.empty:
+                continue
+            first = audit_row.iloc[0]
+            rows.append(
+                {
+                    "Check Group": "Graduation Evidence",
+                    "Check": clean_text(first["Measure"]),
+                    "Status": clean_text(first["Status"]),
+                    "Value": first["Value"],
+                    "Notes": clean_text(first["Notes"]),
+                }
+            )
     if reference_inventory.empty:
         rows.append(
             {
@@ -3550,6 +3734,10 @@ def build_canonical_pipeline(
                 "graduation_term_code",
                 "resolved_outcome_flag",
                 "outcome_evidence_source",
+                "graduation_evidence_confirmed",
+                "graduation_status_without_evidence",
+                "graduation_status_corrected_flag",
+                "graduation_status_correction_reason",
                 "school_entry_term_code",
                 "school_entry_term_basis",
                 "outcome_resolution_group",
@@ -3565,6 +3753,10 @@ def build_canonical_pipeline(
         master_longitudinal["graduation_term_code"] = master_longitudinal["student_id"].map(summary_lookup["graduation_term_code"].to_dict())
         master_longitudinal["resolved_outcome_flag"] = master_longitudinal["student_id"].map(summary_lookup["resolved_outcome_flag"].to_dict())
         master_longitudinal["outcome_evidence_source"] = master_longitudinal["student_id"].map(summary_lookup["outcome_evidence_source"].to_dict())
+        master_longitudinal["graduation_evidence_confirmed"] = master_longitudinal["student_id"].map(summary_lookup["graduation_evidence_confirmed"].to_dict())
+        master_longitudinal["graduation_status_without_evidence"] = master_longitudinal["student_id"].map(summary_lookup["graduation_status_without_evidence"].to_dict())
+        master_longitudinal["graduation_status_corrected_flag"] = master_longitudinal["student_id"].map(summary_lookup["graduation_status_corrected_flag"].to_dict())
+        master_longitudinal["graduation_status_correction_reason"] = master_longitudinal["student_id"].map(summary_lookup["graduation_status_correction_reason"].to_dict())
         master_longitudinal["school_entry_term_code"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_code"].to_dict())
         master_longitudinal["school_entry_term_basis"] = master_longitudinal["student_id"].map(summary_lookup["school_entry_term_basis"].to_dict())
         master_longitudinal["outcome_resolution_group"] = master_longitudinal["student_id"].map(summary_lookup["outcome_resolution_group"].to_dict())
@@ -3575,6 +3767,7 @@ def build_canonical_pipeline(
         master_longitudinal["is_known_non_graduate_exit"] = master_longitudinal["student_id"].map(summary_lookup["is_known_non_graduate_exit"].to_dict())
 
     cohort_metrics = build_cohort_metrics(student_summary)
+    graduation_status_audit = build_graduation_status_audit(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
     new_member_reference_validation = build_new_member_reference_validation(roster_term, new_member_reference)
     gpa_reference_validation = build_gpa_reference_validation(master_longitudinal, gpa_reference)
@@ -3640,6 +3833,7 @@ def build_canonical_pipeline(
         "student_summary": output_folder / "student_summary.csv",
         "cohort_metrics": output_folder / "cohort_metrics.csv",
         "qa_checks": output_folder / "qa_checks.csv",
+        "graduation_status_audit": output_folder / "graduation_status_audit.csv",
         "reference_inventory": output_folder / "reference_inventory.csv",
         "reference_unclassified_rows": output_folder / "reference_unclassified_rows.csv",
         "membership_reference_counts": output_folder / "membership_reference_counts.csv",
@@ -3667,6 +3861,7 @@ def build_canonical_pipeline(
     write_frame(files["student_summary"], student_summary)
     write_frame(files["cohort_metrics"], cohort_metrics)
     write_frame(files["qa_checks"], qa_checks)
+    write_frame(files["graduation_status_audit"], graduation_status_audit)
     write_frame(files["reference_inventory"], reference_inventory)
     write_frame(files["reference_unclassified_rows"], reference_unclassified_rows)
     write_frame(files["membership_reference_counts"], membership_reference)

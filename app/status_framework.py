@@ -41,7 +41,6 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
         GRADUATED_GROUP: [
             r"\bGRADUAT",
             r"\bALUM",
-            r"\bDEGREE\b",
         ],
         RESOLVED_NON_GRADUATE_GROUP: [
             r"\bINACTIVE\b",
@@ -85,6 +84,19 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
         OTHER_UNMAPPED_GROUP,
     ],
 }
+
+CONFIRMED_GRADUATION_EVIDENCE_PATTERNS = [
+    r"graduation list",
+    r"graduation term",
+    r"academic status",
+    r"roster status",
+    r"snapshot student status",
+    r"observed graduation term",
+    r"enhanced graduation flag",
+    r"snapshot augmented graduation flag",
+    r"processed graduation flag",
+    r"explicit graduation flag",
+]
 
 
 def _canonical_group_name(value: object) -> str:
@@ -132,10 +144,64 @@ def _bool_like_series(series: pd.Series) -> pd.Series:
     return pd.Series([_is_true(value) for value in series], index=series.index, dtype="boolean")
 
 
+def _non_blank_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype="bool")
+    cleaned = frame[column].fillna("").astype(str).str.strip()
+    return cleaned.ne("") & ~cleaned.str.lower().isin({"nan", "none", "nat", "<na>"})
+
+
+def confirmed_graduation_evidence_mask(frame: pd.DataFrame) -> pd.Series:
+    """Return rows with direct evidence that graduation actually occurred."""
+    evidence = pd.Series(False, index=frame.index, dtype="bool")
+
+    if "graduation_evidence_confirmed" in frame.columns:
+        evidence = evidence | _bool_like_series(frame["graduation_evidence_confirmed"]).fillna(False).astype(bool)
+
+    for column in ["graduation_term_code", "graduation_term", "graduation_year"]:
+        evidence = evidence | _non_blank_series(frame, column)
+
+    if "outcome_evidence_source" in frame.columns:
+        source_text = frame["outcome_evidence_source"].fillna("").astype(str)
+        for pattern in CONFIRMED_GRADUATION_EVIDENCE_PATTERNS:
+            evidence = evidence | source_text.str.contains(pattern, case=False, regex=True, na=False)
+
+    source_logic = frame.get("source_logic", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str)
+    non_canonical = ~source_logic.str.lower().eq("canonical_pipeline")
+    graduation_columns = [
+        column
+        for column in ["graduated_eventual", "graduated_4yr", "graduated_6yr"]
+        if column in frame.columns
+    ]
+    if graduation_columns:
+        flag_mask = pd.concat([_bool_like_series(frame[column]) for column in graduation_columns], axis=1).fillna(False).any(axis=1)
+        evidence = evidence | (flag_mask & non_canonical)
+
+    return evidence.fillna(False).astype(bool)
+
+
+def graduation_claim_mask(frame: pd.DataFrame, config: Dict[str, Any] | None = None) -> pd.Series:
+    """Return rows that appear to claim graduation before evidence gating."""
+    merged = _merged_outcome_resolution_config(config)
+    patterns = merged["group_patterns"].get(GRADUATED_GROUP, [])
+    claim = pd.Series(False, index=frame.index, dtype="bool")
+    for column in ["latest_outcome_bucket", "latest_roster_status_bucket"]:
+        if column in frame.columns:
+            text = frame[column].fillna("").astype(str)
+            claim = claim | text.str.strip().str.lower().eq("graduated")
+            for pattern in patterns:
+                claim = claim | text.str.contains(pattern, case=False, regex=True, na=False)
+    for column in ["graduated_eventual", "graduated_4yr", "graduated_6yr"]:
+        if column in frame.columns:
+            claim = claim | _bool_like_series(frame[column]).fillna(False).astype(bool)
+    return claim.fillna(False).astype(bool)
+
+
 def classify_outcome_resolution(
     outcome_value: object,
     roster_value: object,
     active_flag: object,
+    graduation_evidence: object = False,
     config: Dict[str, Any] | None = None,
 ) -> str:
     merged = _merged_outcome_resolution_config(config)
@@ -149,8 +215,11 @@ def classify_outcome_resolution(
     if not candidates:
         return TRULY_UNKNOWN_GROUP
 
+    has_graduation_evidence = _is_true(graduation_evidence)
     for group in [item for item in merged["priority_order"] if item not in {STILL_ACTIVE_GROUP, TRULY_UNKNOWN_GROUP, OTHER_UNMAPPED_GROUP}]:
         patterns = merged["group_patterns"].get(group, [])
+        if group == GRADUATED_GROUP and not has_graduation_evidence:
+            continue
         if any(_matches_group(candidate, patterns) for candidate in candidates):
             return group
 
@@ -172,6 +241,8 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
     roster_series = frame.get("latest_roster_status_bucket", pd.Series("", index=frame.index, dtype="object"))
     active_series = frame.get("active_flag", pd.Series(pd.NA, index=frame.index, dtype="object"))
     active_hints = _bool_like_series(active_series)
+    graduation_evidence = confirmed_graduation_evidence_mask(frame)
+    graduation_claim = graduation_claim_mask(frame, merged)
     if "outcome_evidence_source" in frame.columns:
         active_hints = active_hints | frame["outcome_evidence_source"].fillna("").astype(str).str.contains("current or active signal only", case=False, na=False)
     if "latest_snapshot_student_status" in frame.columns:
@@ -179,8 +250,8 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
 
     groups = pd.Series(
         [
-            classify_outcome_resolution(outcome_value, roster_value, active_value, merged)
-            for outcome_value, roster_value, active_value in zip(outcome_series, roster_series, active_hints)
+            classify_outcome_resolution(outcome_value, roster_value, active_value, grad_evidence, merged)
+            for outcome_value, roster_value, active_value, grad_evidence in zip(outcome_series, roster_series, active_hints, graduation_evidence)
         ],
         index=frame.index,
         dtype="object",
@@ -194,8 +265,9 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
         graduated_mask = pd.concat(
             [_bool_like_series(frame[column]) for column in graduation_columns],
             axis=1,
-        ).fillna(False).any(axis=1)
+        ).fillna(False).any(axis=1) & graduation_evidence
         groups = groups.where(~graduated_mask, GRADUATED_GROUP)
+    groups = groups.where(~(groups.eq(GRADUATED_GROUP) & ~graduation_evidence), TRULY_UNKNOWN_GROUP)
 
     excluded_groups = set(merged["resolved_only_excluded_groups"])
     included = ~groups.isin(excluded_groups)
@@ -216,6 +288,8 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
             "resolved_outcomes_only_flag": included,
             "resolved_outcome_excluded_flag": ~included,
             "resolved_outcome_exclusion_reason": exclusion_reason,
+            "graduation_evidence_confirmed": graduation_evidence,
+            "graduation_status_without_evidence": graduation_claim & ~graduation_evidence,
         },
         index=frame.index,
     )

@@ -4,6 +4,7 @@ from app.analysis import summarize_metric_by_group
 from app.metrics_engine import ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL, compute_metric_views
 from app.models import MetricDefinition
 from app.standardize import standardize_processed_summary
+from app.status_framework import build_outcome_resolution_fields
 
 
 def test_processed_summary_builds_resolved_outcome_flags() -> None:
@@ -54,7 +55,7 @@ def test_processed_summary_builds_resolved_outcome_flags() -> None:
 
     assert standardized.loc[0, "outcome_resolution_group"] == "Still Active"
     assert bool(standardized.loc[0, "resolved_outcome_excluded_flag"]) is True
-    assert standardized.loc[1, "outcome_resolution_group"] == "Known Non-Graduate Exit"
+    assert standardized.loc[1, "outcome_resolution_group"] == "Resolved Non-Graduate Exit"
     assert bool(standardized.loc[1, "resolved_outcomes_only_flag"]) is True
     assert standardized.loc[2, "outcome_resolution_group"] == "Graduated"
     assert standardized.loc[3, "outcome_resolution_group"] == "Unknown"
@@ -86,6 +87,29 @@ def test_compute_metric_views_preserves_full_and_adds_resolved_only() -> None:
     assert views["all"]["value"] == (1 / 3)
     assert views["resolved_only"]["value"] == 1.0
     assert views["excluded_active_unknown_n"] == 2
+
+
+def test_graduation_requires_confirmed_evidence() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3"],
+            "latest_outcome_bucket": ["Graduated", "Graduated", "No Further Observation"],
+            "latest_roster_status_bucket": ["Unknown", "Unknown", "Unknown"],
+            "active_flag": ["No", "No", "No"],
+            "graduated_eventual": ["Yes", "Yes", "No"],
+            "graduation_term_code": ["", "2024SP", ""],
+            "outcome_evidence_source": ["", "Academic graduation term", ""],
+            "source_logic": ["canonical_pipeline", "canonical_pipeline", "canonical_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_graduated"]) is False
+    assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
+    assert result.loc[1, "outcome_resolution_group"] == "Graduated"
+    assert bool(result.loc[1, "is_graduated"]) is True
 
 
 def test_group_summary_can_rank_on_resolved_only_denominator() -> None:
@@ -120,3 +144,30 @@ def test_group_summary_can_rank_on_resolved_only_denominator() -> None:
 
     assert all_summary["Group"].tolist() == ["A", "B"]
     assert resolved_summary["Group"].tolist() == ["B"]
+
+
+def test_graduation_metric_counts_unique_students() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1", "1", "2"],
+            "graduated_eventual": [True, True, False],
+            "graduated_eventual_measurable": [True, True, True],
+            "resolved_outcomes_only_flag": [True, True, True],
+        }
+    )
+    metric = MetricDefinition(
+        key="grad",
+        display_name="Grad",
+        category="Graduation",
+        kind="rate_bool",
+        source_table="summary",
+        numerator_field="graduated_eventual",
+        denominator_field="graduated_eventual_measurable",
+        format="percent",
+    )
+
+    views = compute_metric_views(frame, metric)
+
+    assert views["all"]["numerator"] == 1
+    assert views["all"]["denominator"] == 2
+    assert views["all"]["value"] == 0.5

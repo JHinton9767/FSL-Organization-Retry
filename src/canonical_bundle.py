@@ -26,6 +26,7 @@ OPTIONAL_FILES = {
     "outcome_exceptions": "outcome_exceptions.csv",
     "missing_evidence_cases": "missing_evidence_cases.csv",
     "unresolved_chapter_review": "unresolved_chapter_review.csv",
+    "graduation_status_audit": "graduation_status_audit.csv",
 }
 
 

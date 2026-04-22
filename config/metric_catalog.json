@@ -44,12 +44,12 @@
     "format": "percent",
     "higher_is_better": true,
     "min_sample_size": 5,
-    "description": "Share of eligible students ever observed to graduate after organization entry.",
-    "logic_source": "Existing enhanced / snapshot-augmented observed graduation flags",
-    "numerator_label": "Students with observed eventual graduation flag",
+    "description": "Share of eligible students with confirmed graduation evidence after organization entry.",
+    "logic_source": "Canonical evidence-gated graduation outcome fields",
+    "numerator_label": "Unique students with confirmed graduation evidence",
     "denominator_label": "Students with an observed organization-entry cohort",
     "notes": "This preserves the repo's observed-outcome framing rather than inventing an institutional first-time graduation rate.",
-    "limitations": "Observed graduation depends on available follow-up coverage."
+    "limitations": "Observed graduation depends on available follow-up coverage; disappearance is not counted as graduation."
   },
   {
     "key": "graduation_rate_4yr",
@@ -62,12 +62,12 @@
     "format": "percent",
     "higher_is_better": true,
     "min_sample_size": 5,
-    "description": "Observed share graduating within four years of organization entry.",
-    "logic_source": "Existing enhanced builder right-censored 4-year flag",
-    "numerator_label": "Students marked graduated within 4 years",
+    "description": "Observed share with confirmed graduation evidence within four years of organization entry.",
+    "logic_source": "Canonical evidence-gated graduation outcome fields",
+    "numerator_label": "Unique students with confirmed graduation evidence within 4 years",
     "denominator_label": "Students with enough observation window",
     "notes": "Recent cohorts may be excluded from the denominator.",
-    "limitations": "Unavailable in some processed-only bundles."
+    "limitations": "Unavailable in some processed-only bundles; requires enough follow-up time and a graduation term."
   },
   {
     "key": "graduation_rate_6yr",
@@ -80,9 +80,9 @@
     "format": "percent",
     "higher_is_better": true,
     "min_sample_size": 5,
-    "description": "Observed share graduating within six years of organization entry.",
-    "logic_source": "Existing enhanced builder right-censored 6-year flag or processed 6-year proxy",
-    "numerator_label": "Students marked graduated within 6 years",
+    "description": "Observed share with confirmed graduation evidence within six years of organization entry.",
+    "logic_source": "Canonical evidence-gated graduation outcome fields",
+    "numerator_label": "Unique students with confirmed graduation evidence within 6 years",
     "denominator_label": "Students with enough observation window",
     "notes": "This is one of the best ranking metrics for long-run outcomes.",
     "limitations": "Processed-only bundles use the lighter-weight legacy summary."
@@ -330,4 +330,3 @@
     "limitations": "The core field list is configurable in config/app_settings.json."
   }
 ]
-

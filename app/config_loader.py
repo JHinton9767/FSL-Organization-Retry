@@ -67,7 +67,6 @@ def load_settings() -> Dict[str, Any]:
                 "Graduated": [
                     "\\bGRADUAT",
                     "\\bALUM",
-                    "\\bDEGREE\\b",
                 ],
                 "Resolved Non-Graduate Exit": [
                     "\\bINACTIVE\\b",
@@ -162,7 +161,8 @@ def load_dataset_manifest() -> Dict[str, Any]:
                     "chapter_conflicts.csv",
                     "outcome_exceptions.csv",
                     "missing_evidence_cases.csv",
-                    "unresolved_chapter_review.csv"
+                    "unresolved_chapter_review.csv",
+                    "graduation_status_audit.csv",
                 ],
             },
         },

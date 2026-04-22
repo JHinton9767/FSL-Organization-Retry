@@ -510,18 +510,20 @@ def is_new_member_marker(status: str, position: str) -> bool:
 
 
 def roster_status_bucket(status: str, position: str) -> str:
-    combined = " ".join(part for part in [canonical_text(status), canonical_text(position)] if part)
+    status_text = canonical_text(status)
+    position_text = canonical_text(position)
+    combined = " ".join(part for part in [status_text, position_text] if part)
     if not combined:
         return "Unknown"
-    if "graduat" in combined:
+    if "graduated" in status_text:
         return "Graduated"
-    if "alumni" in combined:
+    if "alumni" in status_text:
         return "Alumni"
-    if "suspend" in combined:
+    if "suspend" in status_text:
         return "Suspended"
-    if "transfer" in combined:
+    if "transfer" in status_text:
         return "Transfer"
-    if any(word in combined for word in ["inactive", "resign", "revok", "drop", "removed"]):
+    if any(word in status_text for word in ["inactive", "resign", "revok", "drop", "removed"]):
         return "Dropped/Resigned/Revoked/Inactive"
     if "active" in combined or "member" in combined or is_new_member_marker(status, position):
         return "Active"
@@ -532,7 +534,7 @@ def academic_status_signal_bucket(value: str) -> str:
     text = canonical_text(value)
     if not text:
         return "Unknown"
-    if "graduat" in text or "degree" in text or "alumni" in text:
+    if any(word in text for word in ["graduated", "degree awarded", "awarded degree", "degree conferred", "alumni"]):
         return "Graduated"
     if "suspend" in text:
         return "Suspended"

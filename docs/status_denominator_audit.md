@@ -71,3 +71,22 @@ Source values:
 - graduation-focused rankings default to `Resolved Outcomes Only`
 - tables expose resolved counts, still-active counts, truly-unknown counts, and excluded totals
 - audit views expose raw status counts, standardized status counts, and chapter-assignment-source counts
+
+## Graduation evidence correction
+
+Headcount logic is intentionally frozen and was not changed for this correction.
+
+Graduation is no longer assigned from broad text matches alone. A student can be classified as `Graduated` only when there is confirmed evidence, such as a graduation-list match, populated graduation term/year, explicit academic graduation status, explicit roster graduated/alumni status, or a prepared-bundle graduation flag with an evidence source.
+
+Disappearance from later records is not graduation evidence. If there is no confirmed graduation signal and no resolved non-graduate exit, the student remains `Truly Unknown / Unresolved`.
+
+The canonical run writes `graduation_status_audit.csv` with:
+
+- total unique students used for graduation calculations
+- students marked `Graduated`
+- students with confirmed graduation evidence
+- graduation claims corrected because evidence was missing
+- active, unknown, and resolved non-graduate counts
+- graduation evidence source counts
+- duplicate-student checks for graduation calculations
+- warnings for suspiciously high graduation rates

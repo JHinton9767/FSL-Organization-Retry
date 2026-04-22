@@ -170,6 +170,8 @@ def adjusted_graduation_rate(frame: pd.DataFrame, numerator_field: str, measurab
     if measurable_field and measurable_field in eligible.columns:
         eligible = eligible.loc[yes_mask(eligible[measurable_field])]
     eligible = eligible.loc[yes_mask(eligible["resolved_outcome_flag"])]
+    if "student_id" in eligible.columns:
+        eligible = eligible.drop_duplicates(subset=["student_id"], keep="first")
     if eligible.empty:
         return "", 0
     numerator = int(yes_mask(eligible[numerator_field]).sum())
@@ -573,7 +575,7 @@ def write_readme(result: ChapterBuildResult) -> None:
         "",
         "## Important note",
         "",
-        "Graduation rates in these workbooks exclude unresolved outcomes such as `Active/Unknown` and `No Further Observation` to avoid understating results for recent or incomplete cases.",
+        "Graduation rates in these workbooks exclude unresolved outcomes such as `Active/Unknown` and `No Further Observation` and count graduation only when confirmed evidence exists.",
     ]
     result.readme_path.write_text("\n".join(lines), encoding="utf-8")
 

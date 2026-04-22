@@ -138,6 +138,8 @@ def adjusted_grad_rate(frame: pd.DataFrame, numerator_field: str, measurable_fie
     if measurable_field and measurable_field in eligible.columns:
         eligible = eligible.loc[yes_mask(eligible[measurable_field])]
     eligible = eligible.loc[yes_mask(eligible["resolved_outcome_flag"])]
+    if "student_id" in eligible.columns:
+        eligible = eligible.drop_duplicates(subset=["student_id"], keep="first")
     if eligible.empty:
         return "", 0
     numerator = int(yes_mask(eligible[numerator_field]).sum())
@@ -189,7 +191,7 @@ def build_kpis(summary: pd.DataFrame) -> List[Dict[str, object]]:
     return [
         {"Label": "Students tracked", "Display": count_text(total_students), "Explanation": "Distinct students included in the canonical analytics bundle."},
         {"Label": "Organization-entry cohorts covered", "Display": count_text(cohorts), "Explanation": "Distinct observed organization-entry cohorts in the current analysis."},
-        {"Label": "Observed graduation rate after joining, excluding unresolved outcomes", "Display": percent_text(grad_rate), "Explanation": f"Share of resolved students observed as graduated after first observed organization entry. Based on {count_text(grad_n)} resolved students."},
+        {"Label": "Observed graduation rate after joining, excluding unresolved outcomes", "Display": percent_text(grad_rate), "Explanation": f"Share of resolved students with confirmed graduation evidence after first observed organization entry. Based on {count_text(grad_n)} resolved students."},
         {"Label": "Returned the next term after joining", "Display": percent_text(next_term), "Explanation": "Share of students still observed in the organization in the next measurable term after joining."},
         {"Label": "Returned the following fall after joining", "Display": percent_text(next_fall), "Explanation": "Share of students still observed in the organization the following fall when measurable."},
         {"Label": "Earned 15+ passed hours in the first term after joining", "Display": percent_text(first15), "Explanation": "Share of students who passed at least 15 hours in the first observed academic term after joining."},
@@ -295,7 +297,9 @@ def build_frames(summary: pd.DataFrame, longitudinal: pd.DataFrame, chapter_min_
     band_frame = summary.copy()
     band_frame["selected_cumulative_gpa"] = selected_cumulative_gpa(band_frame)
     band_frame["Latest cumulative GPA band"] = band_frame["selected_cumulative_gpa"].map(cumulative_gpa_band)
-    band_frame = band_frame.loc[~band_frame["latest_outcome_bucket"].fillna("").astype(str).isin(UNRESOLVED)]
+    band_frame = band_frame.loc[yes_mask(band_frame["resolved_outcome_flag"])]
+    if "student_id" in band_frame.columns:
+        band_frame = band_frame.drop_duplicates(subset=["student_id"], keep="first")
     band_rows = []
     for band, frame in band_frame.groupby("Latest cumulative GPA band", dropna=False):
         if band == "Unknown":
@@ -316,7 +320,7 @@ def build_takeaways(kpis: List[Dict[str, object]], frames: Dict[str, pd.DataFram
     lookup = {item["Label"]: item["Display"] for item in kpis}
     takeaways = [
         f"{lookup.get('Students tracked', '0')} students are currently represented in the canonical analytics bundle.",
-        f"The adjusted observed graduation rate after joining is {lookup.get('Observed graduation rate after joining, excluding unresolved outcomes', 'Not available')}, excluding students whose outcomes are still unresolved.",
+        f"The adjusted observed graduation rate after joining is {lookup.get('Observed graduation rate after joining, excluding unresolved outcomes', 'Not available')}, excluding students whose outcomes are still unresolved and counting graduation only when confirmed evidence exists.",
         f"Next-fall chapter retention after joining is {lookup.get('Returned the following fall after joining', 'Not available')}.",
         f"First-term 15+ passed hours after joining is {lookup.get('Earned 15+ passed hours in the first term after joining', 'Not available')}.",
         "Recent cohorts should be interpreted cautiously because long-window outcomes are shown only when enough follow-up time exists.",
@@ -348,6 +352,7 @@ def build_report_bundle(canonical_root: Path, explicit_folder: Path | None, chap
             "Academic data is term-level, so missing terms can reflect either true non-enrollment or missing source coverage.",
             "Some recent cohorts are incomplete and do not yet have enough time for long-window outcomes.",
             "Some exits are explicit, while others are only observed through no further records.",
+            "Disappearance without confirmed graduation evidence is treated as unresolved, not graduated.",
             "Some joins or outcomes may still rely on fallback matching when Student ID is missing from a source row.",
         ],
         definitions=[

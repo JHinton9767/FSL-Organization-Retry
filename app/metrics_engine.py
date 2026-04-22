@@ -101,8 +101,15 @@ def compute_metric(frame: pd.DataFrame, definition: MetricDefinition) -> dict[st
             if observed.dtype == "object":
                 denominator_mask &= observed.astype(str).str.strip().ne("")
         eligible = frame.loc[denominator_mask].copy()
-        numerator = int(_bool_mask(_usable_series(eligible, definition.numerator_field)).sum())
-        denominator = int(len(eligible))
+        if definition.category.lower() == "graduation" and "student_id" in eligible.columns:
+            eligible_ids = eligible["student_id"].fillna("").astype(str).str.strip()
+            eligible = eligible.loc[eligible_ids.ne("")].copy()
+            numerator_mask = _bool_mask(_usable_series(eligible, definition.numerator_field))
+            numerator = int(eligible.loc[numerator_mask, "student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+            denominator = int(eligible["student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+        else:
+            numerator = int(_bool_mask(_usable_series(eligible, definition.numerator_field)).sum())
+            denominator = int(len(eligible))
         value = (numerator / denominator) if denominator else np.nan
         return {
             "value": value,

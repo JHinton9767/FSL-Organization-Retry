@@ -41,6 +41,8 @@ COMBINED_COLUMNS = [
     "Exit Reason",
     "Resolved Outcome Flag",
     "Outcome Evidence Source",
+    "Graduation Evidence Confirmed",
+    "Graduation Claim Without Evidence",
 ]
 
 
@@ -100,6 +102,8 @@ def combined_rows(master_longitudinal) -> List[List[object]]:
                 clean_text(getattr(row, "exit_reason_code", "")),
                 clean_text(getattr(row, "resolved_outcome_flag", "")),
                 clean_text(getattr(row, "outcome_evidence_source", "")),
+                clean_text(getattr(row, "graduation_evidence_confirmed", "")),
+                clean_text(getattr(row, "graduation_status_without_evidence", "")),
             ]
         )
     return rows

@@ -285,7 +285,7 @@ def snapshot_outcome_bucket(status_value: object) -> str:
     text = canonical_header(status_value)
     if not text:
         return "Unknown"
-    if any(word in text for word in ["graduat", "degree", "complete", "completed", "alumni"]):
+    if any(word in text for word in ["graduated", "degree awarded", "awarded degree", "degree conferred", "alumni"]):
         return "Graduated"
     if "suspend" in text:
         return "Suspended"
