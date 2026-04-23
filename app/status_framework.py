@@ -39,8 +39,12 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
     ],
     "group_patterns": {
         GRADUATED_GROUP: [
-            r"\bGRADUAT",
-            r"\bALUM",
+            r"\bGRADUATED\b",
+            r"\bGRAD\b",
+            r"DEGREE AWARDED",
+            r"AWARDED DEGREE",
+            r"DEGREE CONFER",
+            r"CONFERRED DEGREE",
         ],
         RESOLVED_NON_GRADUATE_GROUP: [
             r"\bINACTIVE\b",
@@ -87,15 +91,27 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
 
 CONFIRMED_GRADUATION_EVIDENCE_PATTERNS = [
     r"graduation list",
-    r"graduation term",
+    r"academic graduation term",
     r"academic status",
     r"roster status",
     r"snapshot student status",
-    r"observed graduation term",
-    r"enhanced graduation flag",
-    r"snapshot augmented graduation flag",
-    r"processed graduation flag",
     r"explicit graduation flag",
+    r"transcript explicit graduation",
+]
+
+EXPLICIT_GRADUATION_FLAG_COLUMNS = [
+    "explicit_graduation_flag",
+    "graduation_flag",
+    "confirmed_graduation_flag",
+    "degree_awarded_flag",
+]
+
+EXPLICIT_GRADUATION_TEXT_COLUMNS = [
+    "academic_status_raw",
+    "org_status_raw",
+    "latest_roster_status_bucket",
+    "latest_snapshot_student_status",
+    "snapshot_student_status",
 ]
 
 
@@ -151,12 +167,37 @@ def _non_blank_series(frame: pd.DataFrame, column: str) -> pd.Series:
     return cleaned.ne("") & ~cleaned.str.lower().isin({"nan", "none", "nat", "<na>"})
 
 
+def _explicit_graduation_text_mask(series: pd.Series) -> pd.Series:
+    cleaned = series.fillna("").astype(str).str.upper()
+    if cleaned.empty:
+        return pd.Series(False, index=series.index, dtype="bool")
+    disallowed = (
+        cleaned.str.contains(r"DEGREE SEEK", regex=True, na=False)
+        | cleaned.str.contains(r"SEEKING DEGREE", regex=True, na=False)
+        | cleaned.str.contains(r"NON-DEGREE", regex=True, na=False)
+        | cleaned.str.contains(r"NON DEGREE", regex=True, na=False)
+    )
+    explicit = (
+        cleaned.str.contains(r"\bGRADUATED\b", regex=True, na=False)
+        | cleaned.str.contains(r"\bGRAD\b", regex=True, na=False)
+        | cleaned.str.contains(r"DEGREE AWARDED", regex=True, na=False)
+        | cleaned.str.contains(r"AWARDED DEGREE", regex=True, na=False)
+        | cleaned.str.contains(r"DEGREE CONFER", regex=True, na=False)
+        | cleaned.str.contains(r"CONFERRED DEGREE", regex=True, na=False)
+    )
+    return (explicit & ~disallowed).fillna(False).astype(bool)
+
+
 def confirmed_graduation_evidence_mask(frame: pd.DataFrame) -> pd.Series:
     """Return rows with direct evidence that graduation actually occurred."""
     evidence = pd.Series(False, index=frame.index, dtype="bool")
 
     if "graduation_evidence_confirmed" in frame.columns:
         evidence = evidence | _bool_like_series(frame["graduation_evidence_confirmed"]).fillna(False).astype(bool)
+
+    for column in EXPLICIT_GRADUATION_FLAG_COLUMNS:
+        if column in frame.columns:
+            evidence = evidence | _bool_like_series(frame[column]).fillna(False).astype(bool)
 
     for column in ["graduation_term_code", "graduation_term", "graduation_year"]:
         evidence = evidence | _non_blank_series(frame, column)
@@ -166,16 +207,9 @@ def confirmed_graduation_evidence_mask(frame: pd.DataFrame) -> pd.Series:
         for pattern in CONFIRMED_GRADUATION_EVIDENCE_PATTERNS:
             evidence = evidence | source_text.str.contains(pattern, case=False, regex=True, na=False)
 
-    source_logic = frame.get("source_logic", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str)
-    non_canonical = ~source_logic.str.lower().eq("canonical_pipeline")
-    graduation_columns = [
-        column
-        for column in ["graduated_eventual", "graduated_4yr", "graduated_6yr"]
-        if column in frame.columns
-    ]
-    if graduation_columns:
-        flag_mask = pd.concat([_bool_like_series(frame[column]) for column in graduation_columns], axis=1).fillna(False).any(axis=1)
-        evidence = evidence | (flag_mask & non_canonical)
+    for column in EXPLICIT_GRADUATION_TEXT_COLUMNS:
+        if column in frame.columns:
+            evidence = evidence | _explicit_graduation_text_mask(frame[column])
 
     return evidence.fillna(False).astype(bool)
 

@@ -51,8 +51,12 @@
     ],
     "group_patterns": {
       "Graduated": [
-        "\\bGRADUAT",
-        "\\bALUM"
+        "\\bGRADUATED\\b",
+        "\\bGRAD\\b",
+        "DEGREE AWARDED",
+        "AWARDED DEGREE",
+        "DEGREE CONFER",
+        "CONFERRED DEGREE"
       ],
       "Resolved Non-Graduate Exit": [
         "\\bINACTIVE\\b",

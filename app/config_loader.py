@@ -65,8 +65,12 @@ def load_settings() -> Dict[str, Any]:
             ],
             "group_patterns": {
                 "Graduated": [
-                    "\\bGRADUAT",
-                    "\\bALUM",
+                    "\\bGRADUATED\\b",
+                    "\\bGRAD\\b",
+                    "DEGREE AWARDED",
+                    "AWARDED DEGREE",
+                    "DEGREE CONFER",
+                    "CONFERRED DEGREE",
                 ],
                 "Resolved Non-Graduate Exit": [
                     "\\bINACTIVE\\b",
@@ -121,7 +125,7 @@ def load_status_code_map() -> Dict[str, List[str]]:
         STATUS_CODE_MAP_PATH,
         {
             "active": ["A", "N", "T", "MEMBER", "COUNCIL", "ACTIVE", "NEW MEMBER"],
-            "graduated": ["G", "AL", "GRADUATED", "ALUMNI"],
+            "graduated": ["G", "GRAD", "GRADUATED"],
             "inactive": ["INACTIVE", "DROPPED", "RESIGNED", "REVOKED", "REMOVED"],
             "suspended": ["SUSPENDED"],
             "transfer": ["TRANSFER"],

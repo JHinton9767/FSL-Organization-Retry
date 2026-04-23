@@ -10,9 +10,8 @@
   ],
   "graduated": [
     "G",
-    "AL",
-    "GRADUATED",
-    "ALUMNI"
+    "GRAD",
+    "GRADUATED"
   ],
   "inactive": [
     "INACTIVE",
@@ -28,4 +27,3 @@
     "TRANSFER"
   ]
 }
-

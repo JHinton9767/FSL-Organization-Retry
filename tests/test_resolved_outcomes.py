@@ -15,7 +15,7 @@ def test_processed_summary_builds_resolved_outcome_flags() -> None:
             "last_name": ["Lee", "Ng", "Jordan", "Patel"],
             "chapter": ["Alpha", "Alpha", "Beta", "Beta"],
             "join_term": ["Fall 2021", "Fall 2021", "Spring 2022", "Spring 2022"],
-            "latest_membership_status": ["ACTIVE", "TRANSFER", "", ""],
+            "latest_membership_status": ["ACTIVE", "TRANSFER", "GRADUATED", ""],
             "major": ["Biology", "History", "Math", "English"],
             "pell_flag": ["Yes", "No", "", ""],
             "cohort": ["FTFT", "Transfer", "", ""],
@@ -93,7 +93,7 @@ def test_graduation_requires_confirmed_evidence() -> None:
     frame = pd.DataFrame(
         {
             "student_id": ["1", "2", "3"],
-            "latest_outcome_bucket": ["Graduated", "Graduated", "No Further Observation"],
+            "latest_outcome_bucket": ["Graduated", "Graduated", "Unknown"],
             "latest_roster_status_bucket": ["Unknown", "Unknown", "Unknown"],
             "active_flag": ["No", "No", "No"],
             "graduated_eventual": ["Yes", "Yes", "No"],
@@ -110,6 +110,50 @@ def test_graduation_requires_confirmed_evidence() -> None:
     assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
     assert result.loc[1, "outcome_resolution_group"] == "Graduated"
     assert bool(result.loc[1, "is_graduated"]) is True
+
+
+def test_legacy_graduation_flags_do_not_count_without_explicit_evidence() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "latest_outcome_bucket": ["Graduated", "Graduated"],
+            "latest_roster_status_bucket": ["Unknown", "Graduated"],
+            "active_flag": ["No", "No"],
+            "graduated_eventual": [True, True],
+            "outcome_evidence_source": ["Processed graduation flag (unconfirmed)", ""],
+            "source_logic": ["processed_pipeline", "processed_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_graduated"]) is False
+    assert result.loc[1, "outcome_resolution_group"] == "Graduated"
+    assert bool(result.loc[1, "is_graduated"]) is True
+
+
+def test_alumni_or_undergraduate_text_does_not_create_graduation() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "latest_outcome_bucket": ["Graduated", "Unknown"],
+            "latest_roster_status_bucket": ["Alumni", "Unknown"],
+            "academic_status_raw": ["Undergraduate", "Degree seeking undergraduate"],
+            "active_flag": ["No", "No"],
+            "graduated_eventual": [True, False],
+            "outcome_evidence_source": ["", ""],
+            "source_logic": ["canonical_pipeline", "canonical_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_graduated"]) is False
+    assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
+    assert result.loc[1, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[1, "is_graduated"]) is False
 
 
 def test_group_summary_can_rank_on_resolved_only_denominator() -> None:

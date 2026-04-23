@@ -457,6 +457,12 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
     graduation_audit = getattr(bundle, "tables", {}).get("graduation_status_audit")
     if graduation_audit is not None and not graduation_audit.empty:
         tables["Graduation Evidence Audit"] = graduation_audit
+    transcript_audit = getattr(bundle, "tables", {}).get("transcript_parse_audit")
+    if transcript_audit is not None and not transcript_audit.empty:
+        tables["Transcript Text Audit"] = transcript_audit
+    transcript_issues = getattr(bundle, "tables", {}).get("transcript_parse_issues")
+    if transcript_issues is not None and not transcript_issues.empty:
+        tables["Transcript Text Issues"] = transcript_issues
 
     roster_term = getattr(bundle, "tables", {}).get("roster_term")
     full_summary = getattr(bundle, "summary", summary)

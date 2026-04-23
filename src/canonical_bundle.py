@@ -27,6 +27,10 @@ OPTIONAL_FILES = {
     "missing_evidence_cases": "missing_evidence_cases.csv",
     "unresolved_chapter_review": "unresolved_chapter_review.csv",
     "graduation_status_audit": "graduation_status_audit.csv",
+    "transcript_term_summary": "transcript_term_summary.csv",
+    "transcript_course_detail": "transcript_course_detail.csv",
+    "transcript_parse_audit": "transcript_parse_audit.csv",
+    "transcript_parse_issues": "transcript_parse_issues.csv",
 }
 
 

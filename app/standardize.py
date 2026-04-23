@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -58,7 +59,14 @@ def _build_status_bucket(value: object, status_code_map: Dict[str, Iterable[str]
     for bucket, tokens in checks.items():
         if any(token.upper() in text for token in tokens):
             return bucket
-    if "GRAD" in text or "ALUM" in text:
+    if (
+        "GRADUATED" in text
+        or re.search(r"\bGRAD\b", text)
+        or "DEGREE AWARDED" in text
+        or "AWARDED DEGREE" in text
+        or "DEGREE CONFER" in text
+        or "CONFERRED DEGREE" in text
+    ):
         return "Graduated"
     if "TRANSFER" in text:
         return "Transfer"
@@ -190,7 +198,7 @@ def _finalize_summary(
             corrected & result["graduation_status_correction_reason"].fillna("").astype(str).str.strip().eq(""),
             "graduation_status_correction_reason",
         ] = "Graduation claim was present, but no confirmed graduation evidence source was available."
-        result.loc[corrected, "latest_outcome_bucket"] = "No Further Observation"
+        result.loc[corrected, "latest_outcome_bucket"] = "Unknown"
     confirmed_grad = result["is_graduated"].fillna(False).astype(bool) if "is_graduated" in result.columns else pd.Series(False, index=result.index)
     if "graduated_eventual" in result.columns:
         result.loc[~confirmed_grad, "graduated_eventual"] = False
@@ -335,7 +343,7 @@ def standardize_enhanced_summary(
     frame.loc[
         frame["outcome_evidence_source"].eq("") & frame["graduated_eventual"].fillna(False).astype(bool),
         "outcome_evidence_source",
-    ] = "Enhanced graduation flag"
+    ] = "Enhanced graduation flag (unconfirmed)"
     frame["retained_next_term"] = _flag(summary, "Retained In Organization To Next Observed Term")
     frame["retained_next_term_measurable"] = _flag(summary, "Organization Next Observed Term Measurable")
     frame["retained_next_fall"] = _flag(summary, "Retained In Organization To Next Fall")
@@ -374,7 +382,7 @@ def standardize_snapshot_summary(
     frame.loc[
         frame["graduated_eventual"].fillna(False).astype(bool),
         "outcome_evidence_source",
-    ] = "Snapshot augmented graduation flag"
+    ] = "Snapshot augmented graduation flag (unconfirmed)"
     frame["snapshot_matched"] = _flag(summary, "Snapshot Matched")
     frame["current_total_hours"] = _numeric(summary, "Snapshot Total Credit Hours")
     frame["total_cumulative_hours"] = frame["current_total_hours"]
@@ -446,7 +454,7 @@ def standardize_processed_summary(
     frame["graduated_6yr"] = _flag(summary, "graduated_6yr")
     frame["graduated_6yr_measurable"] = _text(summary, "first_term").ne("")
     frame["outcome_evidence_source"] = pd.Series("", index=summary.index, dtype="object")
-    frame.loc[frame["graduated_eventual"].fillna(False).astype(bool), "outcome_evidence_source"] = "Processed graduation flag"
+    frame.loc[frame["graduated_eventual"].fillna(False).astype(bool), "outcome_evidence_source"] = "Processed graduation flag (unconfirmed)"
     frame["retained_next_term"] = pd.Series(pd.NA, index=summary.index, dtype="object")
     frame["retained_next_term_measurable"] = pd.Series(pd.NA, index=summary.index, dtype="object")
     frame["retained_next_fall"] = pd.Series(pd.NA, index=summary.index, dtype="object")

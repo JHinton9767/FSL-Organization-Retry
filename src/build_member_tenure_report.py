@@ -21,6 +21,7 @@ OUTCOME_ORDER = [
     "Suspended",
     "Transfer",
     "Active/Unknown",
+    "Unknown",
     "No Further Observation",
 ]
 
@@ -167,7 +168,7 @@ def write_outcome_rates_sheet(wb: Workbook, new_members: pd.DataFrame) -> None:
     for semester_count, frame in sorted(grouped, key=lambda item: float(item[0]) if pd.notna(item[0]) else 9999):
         members = len(frame)
         counts = {bucket: int(frame["outcome_group"].fillna("").astype(str).eq(bucket).sum()) for bucket in OUTCOME_ORDER}
-        unresolved = counts["Active/Unknown"] + counts["No Further Observation"]
+        unresolved = counts["Active/Unknown"] + counts["Unknown"] + counts["No Further Observation"]
         ws.append(
             [
                 semester_count,
@@ -215,7 +216,7 @@ def write_join_hours_outcome_rates_sheet(wb: Workbook, new_members: pd.DataFrame
     for bucket, frame in sorted(grouped, key=lambda item: (1, 999999) if clean_text(item[0]) == "Unknown" else (0, int(clean_text(item[0]).split("-", 1)[0]))):
         members = len(frame)
         counts = {bucket_name: int(frame["outcome_group"].fillna("").astype(str).eq(bucket_name).sum()) for bucket_name in OUTCOME_ORDER}
-        unresolved = counts["Active/Unknown"] + counts["No Further Observation"]
+        unresolved = counts["Active/Unknown"] + counts["Unknown"] + counts["No Further Observation"]
         ws.append(
             [
                 bucket,

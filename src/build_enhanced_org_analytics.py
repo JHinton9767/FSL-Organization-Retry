@@ -534,7 +534,7 @@ def academic_status_signal_bucket(value: str) -> str:
     text = canonical_text(value)
     if not text:
         return "Unknown"
-    if any(word in text for word in ["graduated", "degree awarded", "awarded degree", "degree conferred", "alumni"]):
+    if any(word in text for word in ["graduated", "degree awarded", "awarded degree", "degree conferred"]):
         return "Graduated"
     if "suspend" in text:
         return "Suspended"
@@ -1162,7 +1162,7 @@ def build_student_summary(
         explicit_graduation_rows = [
             row
             for row in ordered_rows
-            if clean_text(row.get("Roster Status Bucket")) in {"Graduated", "Alumni"}
+            if clean_text(row.get("Roster Status Bucket")) == "Graduated"
             or clean_text(row.get("Academic Status Signal Bucket")) == "Graduated"
         ]
         observed_graduation_term = clean_text(explicit_graduation_rows[0].get("Term Code")) if explicit_graduation_rows else ""
@@ -1172,7 +1172,7 @@ def build_student_summary(
             row
             for row in roster_rows
             if clean_text(row.get("Roster Status Bucket"))
-            in {"Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive", "Graduated", "Alumni"}
+            in {"Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive", "Graduated"}
         ]
         explicit_terminal_term = clean_text(explicit_terminal_roster_rows[0].get("Term Code")) if explicit_terminal_roster_rows else ""
         explicit_terminal_sort = term_sort_tuple(explicit_terminal_term) if explicit_terminal_term else None
@@ -2085,13 +2085,13 @@ def build_status_mapping_rows() -> List[Dict[str, object]]:
             "Field": "Roster Status / Position",
             "Derived Bucket": "Graduated",
             "Rule": "Contains graduate / graduated",
-            "Notes": "Counts as observed graduation.",
+            "Notes": "Counts as observed graduation only when the status explicitly indicates graduation.",
         },
         {
             "Field": "Roster Status / Position",
             "Derived Bucket": "Alumni",
             "Rule": "Contains alumni",
-            "Notes": "Tracked separately in status mapping but counted with graduation outcomes where appropriate.",
+            "Notes": "Tracked separately and not treated as institutional graduation by itself.",
         },
         {
             "Field": "Roster Status / Position",
@@ -2183,7 +2183,7 @@ def build_metric_definition_rows() -> List[Dict[str, object]]:
         {
             "Metric Group": "Graduation Outcomes",
             "Metric Label": "Observed eventual graduation from first observed organization term",
-            "Definition": "Student is ever observed with graduation/alumni signals after organization entry.",
+            "Definition": "Student is ever observed with explicit graduation signals after organization entry.",
             "Window / Denominator": "All students with a first observed organization term.",
             "Limitations / Notes": "Observed graduation only; not a true institutional first-time graduation rate.",
         },

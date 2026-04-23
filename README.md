@@ -30,13 +30,15 @@ Use this order when rebuilding from source files:
 
 1. Place roster files in `Copy of Rosters/` and/or `data/inbox/rosters/`
 2. Place term-level academic files in `data/inbox/academic/`
-3. Optionally place graduation lists in `data/inbox/graduation/`
-4. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
-5. Optionally place a single combined workbook such as `Reference Data.xlsx` in `data/inbox/reference_data/`
+3. Optionally place transcript-style text exports in `data/inbox/transcript_text/`
+   These are parsed into transcript term summaries, transcript course detail, and transcript-backed academic term rows.
+4. Optionally place graduation lists in `data/inbox/graduation/`
+5. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
+6. Optionally place a single combined workbook such as `Reference Data.xlsx` in `data/inbox/reference_data/`
    The canonical run will scan mixed reference sheets for chapter counts, new-member counts, chapter GPA trends, benchmark GPA trends, and retention-style reference rows.
-6. Optionally use the specialized folders instead:
+7. Optionally use the specialized folders instead:
    `data/inbox/membership_reference/`, `data/inbox/gpa_reference/`, and `data/inbox/gpa_benchmark_reference/`
-7. Run:
+8. Run:
 
 ```powershell
 py run_canonical_pipeline.py
@@ -54,7 +56,13 @@ On a normal rerun:
 - unchanged academic files reuse cached normalized academic input tables
 - unchanged snapshot, graduation, and reference files do the same
 
-This means code changes in downstream analytics/report logic no longer need to reopen every raw Excel file just to rebuild the canonical outputs.
+The pipeline now also keeps staged downstream caches for the slowest post-ingest work:
+
+- reference-derivative tables built from `reference_inventory`
+- prepared roster / academic source tables after identity resolution, chapter backfill, deduplication, conflict cleanup, and org-entry assignment
+- canonical core outputs after longitudinal construction, student summary generation, current-active assignment, outcome classification, and unresolved chapter review
+
+This means unchanged source files no longer force the pipeline to redo the most expensive student-level rebuild steps on every rerun.
 
 Use:
 
@@ -67,6 +75,15 @@ If you changed raw parsing logic and want to force the source files to be re-rea
 ```powershell
 py run_canonical_pipeline.py --refresh-source-cache
 ```
+
+Each canonical run now also writes a small performance report to:
+
+- `output/canonical/run_*/performance_report.csv`
+- `output/canonical/run_*/performance_report.json`
+- `output/canonical/latest/performance_report.csv`
+- `output/canonical/latest/performance_report.json`
+
+The report records per-stage timing, cache hit/miss status, and key row counts so you can see where the runtime is going and whether cached stages were reused.
 
 If you only changed a downstream builder, rerun only that builder instead of the full chain. For example:
 
@@ -142,10 +159,11 @@ Graduation is now evidence-gated. A student is counted as `Graduated` only when 
 - a match in a graduation list
 - a populated graduation term/year
 - an academic status that clearly indicates the degree was awarded or the student graduated
-- a roster status explicitly marked as graduated/alumni
-- a current snapshot or prepared-bundle graduation flag with a recorded evidence source
+- a roster status explicitly marked as graduated
+- a current snapshot status that explicitly says the student graduated
+- an explicit graduation flag already present in the raw source data
 
-The pipeline no longer treats generic `degree` wording, high cumulative hours, inactive status, or disappearance from later records as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
+The pipeline does not treat disappearance, high cumulative hours, good standing, final observed term, or transcript completion history as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
 
 Graduation-rate views keep two denominator definitions:
 
@@ -153,6 +171,51 @@ Graduation-rate views keep two denominator definitions:
 - `Resolved Outcomes Only`: unique students after excluding `Still Active`, `Truly Unknown / Unresolved`, and `Other / Unmapped`
 
 Graduation metrics are calculated at the unique-student level so repeated term rows cannot inflate the numerator or denominator.
+
+## Transcript Text Support
+
+Transcript-style text files are now supported from:
+
+- `data/inbox/transcript_text/`
+
+The canonical pipeline scans `.txt` files in that folder and writes:
+
+- `transcript_term_summary.csv`
+- `transcript_course_detail.csv`
+- `transcript_parse_audit.csv`
+- `transcript_parse_issues.csv`
+
+These transcript files are treated as academic evidence only. They can add term GPA, cumulative GPA, academic standing, earned credits, and course detail, but they do not imply graduation unless the text explicitly states graduation.
+
+Supported transcript patterns include:
+
+- term headers such as `Spring 2024`
+- course rows with leading credit tokens such as `3 ...` or `0 (3) ...`
+- a `Term at a glance:` block
+- `Credits`
+- `Credit Comp %`
+- `Term GPA`
+- `Cum GPA`
+- `Academic Standing`
+- optional transfer markers such as `[TR]`
+
+Student matching for transcript text runs in this order:
+
+1. `config/transcript_text_manifest.csv` exact filename match
+2. student ID parsed from filename
+3. first/last name parsed from filename
+4. unresolved with an audit warning
+
+The transcript manifest template supports:
+
+- `source_file`
+- `student_id`
+- `first_name`
+- `last_name`
+- `notes`
+
+Transcript text does not create graduation evidence unless the file explicitly includes a graduation term, graduation flag, or other direct graduation language.
+Labels such as `alumni` or historical participation end states are not treated as institutional graduation by themselves.
 
 ## Chapter assignment provenance
 
@@ -234,6 +297,10 @@ The canonical run also writes reviewable exception files when applicable:
 - `missing_evidence_cases.csv`
 - `unresolved_chapter_review.csv`
 - `graduation_status_audit.csv`
+- `transcript_term_summary.csv`
+- `transcript_course_detail.csv`
+- `transcript_parse_audit.csv`
+- `transcript_parse_issues.csv`
 
 `graduation_status_audit.csv` summarizes confirmed graduation evidence, corrected graduation claims, active/unknown/resolved counts, duplicate student checks, and warning checks for suspiciously high graduation rates.
 

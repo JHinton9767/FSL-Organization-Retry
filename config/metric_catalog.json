@@ -49,7 +49,7 @@
     "numerator_label": "Unique students with confirmed graduation evidence",
     "denominator_label": "Students with an observed organization-entry cohort",
     "notes": "This preserves the repo's observed-outcome framing rather than inventing an institutional first-time graduation rate.",
-    "limitations": "Observed graduation depends on available follow-up coverage; disappearance is not counted as graduation."
+    "limitations": "Observed graduation depends on available follow-up coverage; disappearance and transcript completion history are not counted as graduation without explicit graduation evidence."
   },
   {
     "key": "graduation_rate_4yr",
@@ -67,7 +67,7 @@
     "numerator_label": "Unique students with confirmed graduation evidence within 4 years",
     "denominator_label": "Students with enough observation window",
     "notes": "Recent cohorts may be excluded from the denominator.",
-    "limitations": "Unavailable in some processed-only bundles; requires enough follow-up time and a graduation term."
+    "limitations": "Unavailable in some processed-only bundles; requires enough follow-up time and explicit graduation evidence with a graduation term."
   },
   {
     "key": "graduation_rate_6yr",
@@ -85,7 +85,7 @@
     "numerator_label": "Unique students with confirmed graduation evidence within 6 years",
     "denominator_label": "Students with enough observation window",
     "notes": "This is one of the best ranking metrics for long-run outcomes.",
-    "limitations": "Processed-only bundles use the lighter-weight legacy summary."
+    "limitations": "Processed-only bundles use the lighter-weight legacy summary, but disappearance and transcript completion history still do not count as graduation without explicit evidence."
   },
   {
     "key": "retention_rate_next_term",
