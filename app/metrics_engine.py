@@ -29,7 +29,13 @@ def metric_available(definition: MetricDefinition, summary: pd.DataFrame, longit
     if definition.kind == "mean":
         return pd.to_numeric(_usable_series(source, definition.value_field), errors="coerce").dropna().shape[0] > 0
 
-    if definition.kind in {"sum_bool", "rate_bool"}:
+    if definition.kind == "sum_bool":
+        observed = _usable_series(source, definition.value_field)
+        if observed.dtype == "object":
+            return observed.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().shape[0] > 0
+        return observed.notna().sum() > 0
+
+    if definition.kind == "rate_bool":
         observed = _usable_series(source, definition.numerator_field)
         if observed.dtype == "object":
             return observed.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().shape[0] > 0
@@ -129,13 +135,18 @@ def metric_population_column(base_label: str, population_label: str) -> str:
 def compute_metric_views(frame: pd.DataFrame, definition: MetricDefinition) -> dict[str, object]:
     population_summary = outcome_population_summary(frame)
     all_result = compute_metric(frame, definition)
-    resolved_frame = resolved_outcomes_only_frame(frame)
-    resolved_result = compute_metric(resolved_frame, definition)
+    if definition.key == "active_member_count":
+        resolved_result = dict(all_result)
+        resolved_result["population_label"] = RESOLVED_OUTCOMES_ONLY_LABEL
+        resolved_result["population_definition"] = "Most Recent Roster Only"
+    else:
+        resolved_frame = resolved_outcomes_only_frame(frame)
+        resolved_result = compute_metric(resolved_frame, definition)
+        resolved_result["population_label"] = RESOLVED_OUTCOMES_ONLY_LABEL
+        resolved_result["population_definition"] = RESOLVED_OUTCOMES_ONLY_LABEL
 
     all_result["population_label"] = ALL_STUDENTS_LABEL
     all_result["population_definition"] = FULL_POPULATION_LABEL
-    resolved_result["population_label"] = RESOLVED_OUTCOMES_ONLY_LABEL
-    resolved_result["population_definition"] = RESOLVED_OUTCOMES_ONLY_LABEL
 
     return {
         "all": all_result,

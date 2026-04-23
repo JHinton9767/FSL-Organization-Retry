@@ -1,6 +1,7 @@
 import pandas as pd
 
 from app.standardize import standardize_processed_summary
+from src.build_canonical_pipeline import build_current_active_fields
 
 
 def test_processed_summary_assigns_core_groups() -> None:
@@ -50,3 +51,44 @@ def test_processed_summary_assigns_core_groups() -> None:
     assert standardized.loc[1, "transfer_group"] == "Transfer"
     assert standardized.loc[1, "high_hours_group"] == "High Hours"
 
+
+def test_current_active_fields_use_latest_roster_only() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3"],
+        }
+    )
+    roster = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "2", "3"],
+            "term_code": ["2024FA", "2023FA", "2024FA", "2024FA"],
+            "org_status_bucket": ["Active", "Active", "Inactive", "New Member"],
+            "chapter": ["Alpha", "Beta", "Beta", "Gamma"],
+            "source_file": ["fall_2024.xlsx", "fall_2023.xlsx", "fall_2024.xlsx", "fall_2024.xlsx"],
+            "source_sheet": ["Alpha", "Beta", "Beta", "Gamma"],
+        }
+    )
+    chapter_mapping = pd.DataFrame(
+        {
+            "chapter": ["Alpha", "Beta", "Gamma"],
+            "chapter_group": ["North", "North", "South"],
+            "council": ["IFC", "IFC", "PHC"],
+            "org_type": ["Fraternity", "Fraternity", "Sorority"],
+            "family": ["Traditional", "Traditional", "Traditional"],
+            "custom_group": ["Pilot", "Pilot", "Pilot"],
+        }
+    )
+    result = build_current_active_fields(
+        summary,
+        roster,
+        chapter_mapping,
+        settings={"chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}]},
+    )
+    assert result.loc[0, "current_active_flag"] == "Yes"
+    assert result.loc[0, "current_active_chapter"] == "Alpha"
+    assert result.loc[1, "current_active_flag"] == "No"
+    assert result.loc[1, "current_active_chapter"] == ""
+    assert result.loc[2, "current_active_flag"] == "Yes"
+    assert result.loc[2, "current_active_chapter"] == "Gamma"
+    assert result.loc[0, "current_active_roster_term_code"] == "2024FA"
+    assert result.loc[2, "current_active_council"] == "PHC"

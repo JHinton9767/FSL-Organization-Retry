@@ -23,7 +23,7 @@ from app.analysis import (
 from app.charts import bar_chart, box_plot, histogram, line_chart, scatter_chart, stacked_bar_chart
 from app.config_loader import load_metric_catalog, load_settings, load_status_code_map
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
-from app.io_utils import safe_slug
+from app.io_utils import parse_term_label, safe_slug
 from app.legacy_bridge import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
     ALL_STUDENTS_LABEL,
@@ -45,6 +45,35 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+CURRENT_ACTIVE_METRIC_KEY = "active_member_count"
+CURRENT_ACTIVE_DIMENSION_OVERRIDES = {
+    "chapter": "current_active_chapter",
+    "chapter_group": "current_active_chapter_group",
+    "council": "current_active_council",
+    "org_type": "current_active_org_type",
+    "family": "current_active_family",
+    "custom_group": "current_active_custom_group",
+    "chapter_size_band": "current_active_chapter_size_band",
+    "active_membership_group": "current_active_membership_group",
+}
+
+
+def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
+    if summary.empty or metric.key != CURRENT_ACTIVE_METRIC_KEY or "current_active_flag" not in summary.columns:
+        return summary
+    result = summary.copy()
+    for base_column, override_column in CURRENT_ACTIVE_DIMENSION_OVERRIDES.items():
+        if override_column in result.columns:
+            result[base_column] = result[override_column]
+    return result
+
+
+def _metric_frame_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
+    if summary.empty or metric.key != CURRENT_ACTIVE_METRIC_KEY or "current_active_flag" not in summary.columns:
+        return summary
+    return summary.loc[_truthy_mask(summary["current_active_flag"])].copy()
 
 
 def _reset_state_for_dataset(version_key: str, metrics: List[MetricDefinition], dimension_map: Dict[str, str], summary: pd.DataFrame, longitudinal: pd.DataFrame, metadata: Dict[str, object]) -> None:
@@ -226,6 +255,30 @@ def _render_data_status_panel(bundle, source_statuses: List[DataSourceStatus]) -
 
 
 def _population_transparency_frame(metric: MetricDefinition, metric_views: dict[str, object], filtered_summary: pd.DataFrame) -> pd.DataFrame:
+    if metric.key == CURRENT_ACTIVE_METRIC_KEY:
+        all_result = metric_views["all"]
+        latest_term = filtered_summary.get("current_active_roster_term", pd.Series("", dtype="object"))
+        latest_term_label = latest_term.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
+        return pd.DataFrame(
+            [
+                {
+                    "Population View": ALL_STUDENTS_LABEL,
+                    "Population Definition": "Most Recent Roster Only",
+                    "Metric Value": all_result["value"],
+                    "Formatted Value": format_metric_value(all_result["value"], metric.format),
+                    "Numerator": all_result["numerator"],
+                    "Denominator": all_result["denominator"],
+                    "Students Included": all_result["students"],
+                    "Latest Roster Term": latest_term_label.iloc[0] if not latest_term_label.empty else "Unknown",
+                    "Resolved Count": pd.NA,
+                    "Still Active Excluded": pd.NA,
+                    "Truly Unknown Excluded": pd.NA,
+                    "Other / Unmapped Excluded": pd.NA,
+                    "Excluded Total": pd.NA,
+                }
+            ]
+        )
+
     population_summary = outcome_population_summary(filtered_summary)
     all_result = metric_views["all"]
     resolved_result = metric_views["resolved_only"]
@@ -265,6 +318,29 @@ def _population_transparency_frame(metric: MetricDefinition, metric_views: dict[
 
 
 def _render_population_summary(metric: MetricDefinition, metric_views: dict[str, object], filtered_summary: pd.DataFrame) -> pd.DataFrame:
+    if metric.key == CURRENT_ACTIVE_METRIC_KEY:
+        all_result = metric_views["all"]
+        latest_term = filtered_summary.get("current_active_roster_term", pd.Series("", dtype="object"))
+        latest_term_code = filtered_summary.get("current_active_roster_term_code", pd.Series("", dtype="object"))
+        latest_term_value = latest_term.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
+        if latest_term_value.empty:
+            latest_term_value = latest_term_code.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
+        latest_term_text = latest_term_value.iloc[0] if not latest_term_value.empty else "Unknown"
+        legacy_active_count = int(_truthy_mask(filtered_summary.get("active_flag", pd.Series(False, index=filtered_summary.index))).sum())
+        current_columns = st.columns(4)
+        with current_columns[0]:
+            st.metric("Current Active Students", format_metric_value(all_result["value"], metric.format))
+        with current_columns[1]:
+            st.metric("Most Recent Roster Term", latest_term_text)
+        with current_columns[2]:
+            st.metric("Historical Latest-Status Active", format_metric_value(legacy_active_count, "integer"))
+        with current_columns[3]:
+            st.metric("Inflation Removed", format_metric_value(max(legacy_active_count - int(all_result["value"]), 0), "integer"))
+        st.caption("Current active counts use only the single most recent roster term. Historical rosters remain available for cohort and trend analysis, but they do not roll forward into this present-day count.")
+        transparency = _population_transparency_frame(metric, metric_views, filtered_summary)
+        st.dataframe(transparency, use_container_width=True, hide_index=True)
+        return transparency
+
     population_summary = outcome_population_summary(filtered_summary)
     all_result = metric_views["all"]
     resolved_result = metric_views["resolved_only"]
@@ -382,6 +458,83 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
     if graduation_audit is not None and not graduation_audit.empty:
         tables["Graduation Evidence Audit"] = graduation_audit
 
+    roster_term = getattr(bundle, "tables", {}).get("roster_term")
+    full_summary = getattr(bundle, "summary", summary)
+    if roster_term is not None and not roster_term.empty and "current_active_flag" in full_summary.columns:
+        roster = roster_term.copy()
+        roster["term_code"] = roster["term_code"].fillna("").astype(str).str.strip()
+        roster = roster.loc[roster["term_code"].ne("")].copy()
+        if not roster.empty:
+            roster["_term_sort"] = roster["term_code"].map(lambda value: parse_term_label(value)["sort_value"])
+            latest_term_sort = roster["_term_sort"].max()
+            latest_roster = roster.loc[roster["_term_sort"].eq(latest_term_sort)].copy()
+            latest_term_code = latest_roster["term_code"].iloc[0] if not latest_roster.empty else ""
+            latest_term_label = latest_roster["term_label"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
+            latest_term_text = latest_term_label.iloc[0] if not latest_term_label.empty else str(latest_term_code)
+            latest_active = latest_roster.loc[
+                latest_roster["org_status_bucket"].fillna("").astype(str).isin(["Active", "New Member"])
+            ].copy()
+            current_active_students = int(
+                full_summary.loc[_truthy_mask(full_summary["current_active_flag"]), "student_id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
+            historical_active_students = int(
+                full_summary.loc[_truthy_mask(full_summary.get("active_flag", pd.Series(False, index=full_summary.index))), "student_id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
+            tables["Current Active Audit"] = pd.DataFrame(
+                [
+                    {"Measure": "Most recent roster term", "Value": latest_term_text, "Notes": "Authoritative source for present-day active membership."},
+                    {"Measure": "Rows in most recent roster term", "Value": int(len(latest_roster)), "Notes": "All roster rows in the selected latest term after canonical conflict resolution."},
+                    {"Measure": "Unique students in most recent roster term", "Value": int(latest_roster["student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()), "Notes": ""},
+                    {"Measure": "Current active students (latest roster only)", "Value": current_active_students, "Notes": "Used by the current active metric and chapter current-headcount views."},
+                    {"Measure": "Historical latest-status active students", "Value": historical_active_students, "Notes": "Legacy broader count kept only for historical/outcome context."},
+                    {"Measure": "Inflation difference removed", "Value": max(historical_active_students - current_active_students, 0), "Notes": "Difference between historical latest-status actives and latest-roster-only actives."},
+                ]
+            )
+            source_breakdown = (
+                latest_roster.groupby("source_file", dropna=False)
+                .agg(
+                    **{
+                        "Roster Rows": ("student_id", "size"),
+                        "Unique Students": ("student_id", lambda series: series.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()),
+                    }
+                )
+                .reset_index()
+                .rename(columns={"source_file": "Source File"})
+            )
+            if not latest_active.empty:
+                active_by_source = (
+                    latest_active.groupby("source_file", dropna=False)["student_id"]
+                    .apply(lambda series: series.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+                    .rename("Current Active Students")
+                    .reset_index()
+                    .rename(columns={"source_file": "Source File"})
+                )
+                source_breakdown = source_breakdown.merge(active_by_source, on="Source File", how="left")
+            else:
+                source_breakdown["Current Active Students"] = 0
+            tables["Current Active Source Files"] = source_breakdown.fillna({"Current Active Students": 0})
+            chapter_breakdown = (
+                full_summary.loc[_truthy_mask(full_summary["current_active_flag"])]
+                .groupby("current_active_chapter", dropna=False)["student_id"]
+                .apply(lambda series: series.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+                .reset_index(name="Current Active Students")
+                .rename(columns={"current_active_chapter": "Chapter"})
+            )
+            chapter_breakdown["Chapter"] = chapter_breakdown["Chapter"].fillna("").astype(str).str.strip().replace("", "Unknown")
+            tables["Current Active Chapter Counts"] = chapter_breakdown.sort_values(["Current Active Students", "Chapter"], ascending=[False, True]).reset_index(drop=True)
+
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases", "unresolved_chapter_review", "qa_checks"]:
         if key in bundle.tables:
             tables[key] = bundle.tables[key]
@@ -478,10 +631,14 @@ def main() -> None:
             key="metric_key",
         )
         metric = metric_by_key(metrics, metric_key)
+        analysis_summary = _analysis_summary_for_metric(bundle.summary, metric)
         if metric.category.lower() == "graduation":
             previous_metric = st.session_state.get("_auto_population_metric")
             if previous_metric != metric_key and st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL) == ALL_STUDENTS_LABEL:
                 st.session_state["outcome_population_view"] = RESOLVED_OUTCOMES_ONLY_LABEL
+            st.session_state["_auto_population_metric"] = metric_key
+        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
+            st.session_state["outcome_population_view"] = ALL_STUDENTS_LABEL
             st.session_state["_auto_population_metric"] = metric_key
         group_field = st.selectbox(
             "Aggregation level",
@@ -497,7 +654,7 @@ def main() -> None:
         )
         compare_values = st.multiselect(
             "Specific groups to compare",
-            options=filter_options(bundle.summary, compare_field),
+            options=filter_options(analysis_summary, compare_field),
             key="compare_values",
         )
         control_options = ["None"] + [key for key in dimension_map.keys() if key != compare_field]
@@ -509,11 +666,13 @@ def main() -> None:
         )
         st.selectbox(
             "Metric population view",
-            options=[ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
+            options=[ALL_STUDENTS_LABEL] if metric.key == CURRENT_ACTIVE_METRIC_KEY else [ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
             key="outcome_population_view",
         )
         if metric.category.lower() == "graduation":
             st.caption("Graduation-focused views default to Resolved Outcomes Only so active and unresolved students do not dominate the ranking.")
+        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
+            st.caption("Current active counts are locked to the most recent roster only and are not recalculated from historical activeness.")
         max_min_n = int(settings.get("max_min_sample_size", 50))
         default_min_n = min(int(settings.get("default_min_sample_size", 5)), max_min_n)
         st.slider("Minimum N", min_value=1, max_value=max_min_n, value=default_min_n, key="min_n")
@@ -523,7 +682,7 @@ def main() -> None:
         st.selectbox("Population", options=population_options, key="population")
 
     with st.sidebar.expander("Filters", expanded=False):
-        join_years = pd.to_numeric(bundle.summary.get("join_year", pd.Series(dtype=float)), errors="coerce").dropna()
+        join_years = pd.to_numeric(analysis_summary.get("join_year", pd.Series(dtype=float)), errors="coerce").dropna()
         if not join_years.empty:
             st.slider(
                 "Join year range",
@@ -532,7 +691,7 @@ def main() -> None:
                 value=st.session_state.get("join_year_range", (int(join_years.min()), int(join_years.max()))),
                 key="join_year_range",
             )
-        grad_years = pd.to_numeric(bundle.summary.get("graduation_year", pd.Series(dtype=float)), errors="coerce").dropna()
+        grad_years = pd.to_numeric(analysis_summary.get("graduation_year", pd.Series(dtype=float)), errors="coerce").dropna()
         if not grad_years.empty:
             st.slider(
                 "Graduation year range",
@@ -572,7 +731,7 @@ def main() -> None:
             ("snapshot_groups", "snapshot_group", "Snapshot match status"),
         ]
         for state_key, column, label in filter_specs:
-            options = filter_options(bundle.summary, column)
+            options = filter_options(analysis_summary, column)
             if options:
                 st.multiselect(label, options=options, key=state_key)
 
@@ -581,20 +740,21 @@ def main() -> None:
             st.multiselect("Observed terms", options=observed_terms, key="observed_terms")
 
     filters = _collect_filters()
-    filtered_summary = apply_summary_filters(bundle.summary, filters)
-    filtered_longitudinal = apply_longitudinal_filters(bundle.longitudinal, filtered_summary, filters)
+    filtered_summary = apply_summary_filters(analysis_summary, filters)
+    metric_summary = _metric_frame_for_metric(filtered_summary, metric)
+    filtered_longitudinal = apply_longitudinal_filters(bundle.longitudinal, metric_summary, filters)
 
     outcome_population_view = st.session_state["outcome_population_view"]
-    metric_views = compute_metric_views(filtered_summary, metric)
+    metric_views = compute_metric_views(metric_summary, metric)
     group_summary = summarize_metric_by_group(
-        filtered_summary,
+        metric_summary,
         metric,
         group_field,
         st.session_state["min_n"],
         population_label=outcome_population_view,
     )
     comparison_table = build_comparison_table(
-        filtered_summary,
+        metric_summary,
         metric,
         compare_field,
         compare_values,
@@ -602,7 +762,7 @@ def main() -> None:
         population_label=outcome_population_view,
     )
     controlled_table = build_controlled_comparison(
-        filtered_summary,
+        metric_summary,
         metric,
         compare_field,
         compare_values,
@@ -621,11 +781,14 @@ def main() -> None:
     _render_data_status_panel(bundle, source_statuses)
 
     st.info(metric_caption(metric))
-    st.caption(
-        f"Charts and rank ordering currently use: {outcome_population_view}. "
-        "Every major table now shows the full-population and resolved-only denominators side by side where practical."
-    )
-    population_transparency = _render_population_summary(metric, metric_views, filtered_summary)
+    if metric.key == CURRENT_ACTIVE_METRIC_KEY:
+        st.caption("Charts and rankings for this metric use only the most recent roster. Historical rosters still remain in the dataset for cohort and trend work, but they do not contribute to the present-day active count.")
+    else:
+        st.caption(
+            f"Charts and rank ordering currently use: {outcome_population_view}. "
+            "Every major table now shows the full-population and resolved-only denominators side by side where practical."
+        )
+    population_transparency = _render_population_summary(metric, metric_views, filtered_summary if metric.key == CURRENT_ACTIVE_METRIC_KEY else metric_summary)
 
     overview_tab, comparison_tab, ranking_tab, trend_tab, distribution_tab, audit_tab, export_tab, definition_tab = st.tabs(
         ["Overview", "Comparisons", "Rankings", "Trends", "Distributions", "Audit", "Data & Export", "Metric Definitions"]
@@ -706,7 +869,7 @@ def main() -> None:
             st.dataframe(ranked, use_container_width=True, hide_index=True)
 
         scatter_source = build_scatter_frame(
-            filtered_summary,
+            metric_summary,
             metric,
             group_field,
             st.session_state["min_n"],
@@ -727,9 +890,9 @@ def main() -> None:
 
     with trend_tab:
         st.subheader("Join cohort trend")
-        summary_time_field = "join_year" if "join_year" in filtered_summary.columns else "join_term"
+        summary_time_field = "join_year" if "join_year" in metric_summary.columns else "join_term"
         summary_trend = build_summary_time_series(
-            filtered_summary,
+            metric_summary,
             metric,
             time_field=summary_time_field,
             segment_field=group_field,
@@ -759,7 +922,7 @@ def main() -> None:
             filtered_longitudinal,
             observed_measure,
             group_field,
-            summary=filtered_summary,
+            summary=metric_summary,
             population_label=outcome_population_view,
         )
         if not observed_trend.empty:
@@ -789,7 +952,7 @@ def main() -> None:
                 "estimated_join_stage",
                 "chapter_size_band",
             ]
-            if column in filtered_summary.columns
+            if column in metric_summary.columns
         ]
         if distribution_options:
             distribution_field = st.selectbox(
@@ -798,7 +961,7 @@ def main() -> None:
                 format_func=lambda key: key.replace("_", " ").title(),
             )
             distribution_table = build_distribution_table(
-                filtered_summary,
+                metric_summary,
                 group_field,
                 distribution_field,
                 st.session_state["min_n"],
@@ -830,7 +993,7 @@ def main() -> None:
                 "estimated_pre_org_hours_txst",
                 "first_year_passed_hours",
             ]
-            if column in filtered_summary.columns and pd.to_numeric(filtered_summary[column], errors="coerce").dropna().shape[0] > 0
+            if column in metric_summary.columns and pd.to_numeric(metric_summary[column], errors="coerce").dropna().shape[0] > 0
         ]
         if numeric_options:
             numeric_field = st.selectbox(
@@ -838,8 +1001,8 @@ def main() -> None:
                 options=numeric_options,
                 format_func=lambda key: key.replace("_", " ").title(),
             )
-            numeric_frame = filtered_summary if outcome_population_view == ALL_STUDENTS_LABEL else filtered_summary.loc[
-                filtered_summary["resolved_outcomes_only_flag"].fillna(False)
+            numeric_frame = metric_summary if outcome_population_view == ALL_STUDENTS_LABEL else metric_summary.loc[
+                metric_summary["resolved_outcomes_only_flag"].fillna(False)
             ].copy()
             if numeric_frame.empty:
                 st.caption("No numeric distribution data is available for the selected outcome population view.")
@@ -882,15 +1045,24 @@ def main() -> None:
                 "student_id",
                 "student_name",
                 "chapter",
+                "current_active_chapter",
                 "chapter_assignment_source",
                 "chapter_assignment_confidence",
                 "chapter_assignment_notes",
                 "chapter_group",
+                "current_active_chapter_group",
                 "council",
+                "current_active_council",
                 "org_type",
+                "current_active_org_type",
                 "join_term",
                 "join_year",
                 "status_group",
+                "current_active_flag",
+                "current_active_membership_group",
+                "current_active_roster_term",
+                "current_active_source_file",
+                "current_active_source_sheet",
                 "outcome_resolution_group",
                 "is_resolved_outcome",
                 "is_active_outcome",
@@ -922,9 +1094,9 @@ def main() -> None:
                 "total_cumulative_hours",
                 "data_completeness_rate",
             ]
-            if column in filtered_summary.columns
+            if column in metric_summary.columns
         ]
-        summary_export = filtered_summary[export_columns].copy()
+        summary_export = metric_summary[export_columns].copy()
         st.dataframe(summary_export, use_container_width=True, hide_index=True)
 
         export_frames = {

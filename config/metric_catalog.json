@@ -18,20 +18,20 @@
   },
   {
     "key": "active_member_count",
-    "display_name": "Active Member Count",
+    "display_name": "Current Active Members (Most Recent Roster)",
     "category": "Coverage",
     "kind": "sum_bool",
     "source_table": "summary",
-    "value_field": "active_flag",
+    "value_field": "current_active_flag",
     "format": "integer",
     "higher_is_better": true,
     "min_sample_size": 1,
-    "description": "Count of filtered students whose latest roster status is active.",
-    "logic_source": "Existing status buckets from enhanced outputs or processed status normalization",
-    "numerator_label": "Rows with active membership flag",
+    "description": "Count of filtered students who appear as active on the single most recent roster term.",
+    "logic_source": "Canonical latest-roster-only current membership fields",
+    "numerator_label": "Students marked current active on the most recent roster",
     "denominator_label": "Not applicable",
-    "notes": "For processed-only bundles, active status is inferred from the latest membership code.",
-    "limitations": "Historical activeness is not the same as current chapter standing."
+    "notes": "Historical rosters remain available for trends and cohorts, but they are not combined to create the present-day active count.",
+    "limitations": "This metric requires a bundle with latest-roster current membership fields; older fallback bundles may not support it."
   },
   {
     "key": "graduation_rate_eventual",

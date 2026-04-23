@@ -2898,6 +2898,11 @@ def build_student_summary(
             summary[column] = default
         summary[column] = summary[column].fillna("").astype(str).replace("", default)
 
+    roster_present_mask = master["roster_present"].fillna("").astype(str).str.strip().str.lower().isin(["true", "yes", "1"])
+    current_active_fields = build_current_active_fields(summary, master.loc[roster_present_mask].copy(), chapter_mapping, settings)
+    for column in current_active_fields.columns:
+        summary[column] = current_active_fields[column]
+
     resolution_fields = build_outcome_resolution_fields(summary, settings.get("outcome_resolution", {}))
     for column in resolution_fields.columns:
         summary[column] = resolution_fields[column]
@@ -2935,6 +2940,8 @@ def build_student_summary(
             {"Check Group": "Coverage", "Check": "Still active outcomes", "Status": "Pass", "Value": int(summary["is_active_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
             {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(summary["is_unknown_outcome"].fillna(False).astype(bool).sum()), "Notes": ""},
             {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~summary["is_resolved_outcome"].fillna(False).astype(bool) & ~summary["is_active_outcome"].fillna(False).astype(bool) & ~summary["is_unknown_outcome"].fillna(False).astype(bool)).sum()), "Notes": ""},
+            {"Check Group": "Coverage", "Check": "Current active students (most recent roster only)", "Status": "Pass", "Value": int(summary["current_active_flag"].fillna("").astype(str).eq("Yes").sum()), "Notes": f"Most recent roster term: {clean_text(summary['current_active_roster_term'].iloc[0]) or clean_text(summary['current_active_roster_term_code'].iloc[0])}"},
+            {"Check Group": "Coverage", "Check": "Historical latest-status active students", "Status": "Pass", "Value": int(summary["active_flag"].fillna("").astype(str).eq("Yes").sum()), "Notes": "Retained for historical outcome logic only; not used for current active headcounts."},
             {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
         ]
     )
@@ -2946,6 +2953,20 @@ def build_student_summary(
         "high_hours_flag",
         "high_hours_group",
         "active_membership_group",
+        "current_active_flag",
+        "current_active_membership_group",
+        "current_active_chapter",
+        "current_active_chapter_group",
+        "current_active_council",
+        "current_active_org_type",
+        "current_active_family",
+        "current_active_custom_group",
+        "current_active_chapter_size",
+        "current_active_chapter_size_band",
+        "current_active_roster_term_code",
+        "current_active_roster_term",
+        "current_active_source_file",
+        "current_active_source_sheet",
         "pell_group",
         "transfer_group",
         "snapshot_group",
@@ -2962,6 +2983,154 @@ def build_student_summary(
     ]
     summary_columns = list(dict.fromkeys(summary_columns))
     return ensure_columns(summary, summary_columns), pd.DataFrame(qa_rows), pd.DataFrame(outcome_exceptions)
+
+
+def build_current_active_fields(
+    summary: pd.DataFrame,
+    roster: pd.DataFrame,
+    chapter_mapping: pd.DataFrame,
+    settings: dict[str, object],
+) -> pd.DataFrame:
+    columns = [
+        "current_active_flag",
+        "current_active_membership_group",
+        "current_active_chapter",
+        "current_active_chapter_group",
+        "current_active_council",
+        "current_active_org_type",
+        "current_active_family",
+        "current_active_custom_group",
+        "current_active_chapter_size",
+        "current_active_chapter_size_band",
+        "current_active_roster_term_code",
+        "current_active_roster_term",
+        "current_active_source_file",
+        "current_active_source_sheet",
+    ]
+    result = pd.DataFrame(index=summary.index)
+    for column in columns:
+        result[column] = ""
+
+    if summary.empty:
+        return result
+
+    result["current_active_flag"] = "No"
+    result["current_active_membership_group"] = "Not Current Active"
+    result["current_active_chapter_size"] = pd.NA
+
+    if roster.empty or "term_code" not in roster.columns:
+        return result
+
+    roster_working = roster.copy()
+    roster_working["term_code"] = roster_working["term_code"].fillna("").astype(str).str.strip()
+    roster_working = roster_working.loc[roster_working["term_code"].ne("")].copy()
+    if roster_working.empty:
+        return result
+
+    roster_working["_term_sort"] = roster_working["term_code"].map(sort_term_code)
+    latest_term_sort = roster_working["_term_sort"].max()
+    latest_roster = roster_working.loc[roster_working["_term_sort"].eq(latest_term_sort)].copy()
+    if latest_roster.empty:
+        return result
+
+    latest_term_code = clean_text(latest_roster["term_code"].iloc[0])
+    latest_term_label = term_label_from_code(latest_term_code)
+    result["current_active_roster_term_code"] = latest_term_code
+    result["current_active_roster_term"] = latest_term_label
+
+    active_latest = latest_roster.loc[
+        latest_roster["org_status_bucket"].fillna("").astype(str).isin(["Active", "New Member"])
+    ].copy()
+    if active_latest.empty:
+        return result
+
+    active_latest["student_id"] = active_latest["student_id"].fillna("").astype(str).str.strip()
+    active_latest = active_latest.loc[active_latest["student_id"].ne("")].copy()
+    active_latest = active_latest.sort_values(
+        ["student_id", "source_file", "source_sheet", "chapter"],
+        na_position="last",
+    ).drop_duplicates(subset=["student_id"], keep="first")
+
+    chapter_lookup = dict(zip(active_latest["student_id"], active_latest["chapter"].fillna("").astype(str).str.strip()))
+    source_file_lookup = dict(zip(active_latest["student_id"], active_latest["source_file"].fillna("").astype(str).str.strip()))
+    source_sheet_lookup = dict(zip(active_latest["student_id"], active_latest["source_sheet"].fillna("").astype(str).str.strip()))
+    active_ids = set(chapter_lookup.keys())
+    summary_ids = summary["student_id"].fillna("").astype(str).str.strip()
+    active_mask = summary_ids.isin(active_ids)
+
+    result.loc[active_mask, "current_active_flag"] = "Yes"
+    result.loc[active_mask, "current_active_membership_group"] = "Current Active"
+    result["current_active_chapter"] = summary_ids.map(chapter_lookup).fillna("")
+    result["current_active_source_file"] = summary_ids.map(source_file_lookup).fillna("")
+    result["current_active_source_sheet"] = summary_ids.map(source_sheet_lookup).fillna("")
+
+    if not chapter_mapping.empty:
+        mapping = chapter_mapping.copy()
+        mapping["_chapter_key"] = mapping["chapter"].fillna("").astype(str).str.strip().str.lower()
+        result["_chapter_key"] = result["current_active_chapter"].fillna("").astype(str).str.strip().str.lower()
+        mapped = result.merge(
+            mapping[["_chapter_key", "chapter_group", "council", "org_type", "family", "custom_group"]],
+            on="_chapter_key",
+            how="left",
+            suffixes=("", "_mapped"),
+        )
+        result = mapped.drop(columns=["_chapter_key"])
+
+    mapped_defaults = {
+        "current_active_chapter_group": "Unassigned",
+        "current_active_council": "Unknown",
+        "current_active_org_type": "Unknown",
+        "current_active_family": "Unknown",
+        "current_active_custom_group": "Unassigned",
+    }
+    mapped_aliases = {
+        "current_active_chapter_group": "chapter_group",
+        "current_active_council": "council",
+        "current_active_org_type": "org_type",
+        "current_active_family": "family",
+        "current_active_custom_group": "custom_group",
+    }
+    for output_column, source_column in mapped_aliases.items():
+        if output_column not in result.columns and source_column in result.columns:
+            result[output_column] = result[source_column]
+        if output_column not in result.columns:
+            result[output_column] = ""
+        current_mask = result["current_active_flag"].eq("Yes")
+        result.loc[current_mask, output_column] = (
+            result.loc[current_mask, output_column]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", mapped_defaults[output_column])
+        )
+        result.loc[~current_mask, output_column] = ""
+
+    active_chapter_counts = (
+        result.loc[
+            result["current_active_flag"].eq("Yes")
+            & result["current_active_chapter"].fillna("").astype(str).str.strip().ne("")
+        ]
+        .groupby("current_active_chapter", dropna=False)["current_active_flag"]
+        .size()
+        .rename("current_active_chapter_size")
+    )
+    if not active_chapter_counts.empty:
+        result["current_active_chapter_size"] = result["current_active_chapter"].map(active_chapter_counts)
+
+    def chapter_band(value: object) -> str:
+        if pd.isna(value):
+            return ""
+        number = float(value)
+        for band in settings.get("chapter_size_bands", []):
+            lower = float(band.get("min", 0))
+            upper = band.get("max")
+            if number >= lower and (upper is None or number <= float(upper)):
+                return str(band["label"])
+        return ""
+
+    result["current_active_chapter_size_band"] = result["current_active_chapter_size"].map(chapter_band)
+    result.loc[~result["current_active_flag"].eq("Yes"), "current_active_chapter_size_band"] = ""
+    return result
 
 
 def build_cohort_metrics(summary: pd.DataFrame) -> pd.DataFrame:

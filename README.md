@@ -92,6 +92,13 @@ The local analytics app is preload-only and is expected to load the canonical bu
 
 The app manifest now points to canonical outputs as the preferred prepared dataset source.
 
+Current active membership is now defined separately from historical activeness:
+
+- `Current Active Members (Most Recent Roster)` uses only the single latest roster term in the canonical `roster_term` table.
+- A student is current active only if they appear as active or new member on that most recent roster term.
+- Older active rows are still kept for historical participation, cohort, retention, graduation, and trend analysis, but they do not roll forward into the present-day active headcount.
+- Current chapter headcounts in the app use the chapter assignment from that same most recent roster term, not a student's historical initial chapter.
+
 ## Important interpretation rules
 
 - Do not treat first observed organization entry as true school entry.
@@ -100,6 +107,7 @@ The app manifest now points to canonical outputs as the preferred prepared datas
 - Do not calculate long-window graduation rates for non-measurable cohorts.
 - Keep unresolved outcomes separate from resolved outcomes.
 - The headcount logic is intentionally unchanged by the graduation-outcome correction.
+- Current active counts come only from the most recent roster, not from cumulative historical membership.
 
 ## Outcome status and denominator rules
 
