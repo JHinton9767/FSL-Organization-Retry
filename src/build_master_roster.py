@@ -9,7 +9,9 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
-from openpyxl.utils import get_column_letter
+
+from src.excel_utils import autosize_columns, style_header
+from src.shared_utils import clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -316,15 +318,6 @@ class UniqueBannerRow:
             self.statuses_seen,
             self.source_files_seen,
         ]
-
-
-def clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    text = str(value).strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
-
 
 def source_file_label(path: Path, root: Optional[Path] = None) -> str:
     if root is not None:
@@ -943,26 +936,6 @@ def infer_missing_spring_members(rows: List[ExtractedRow]) -> Tuple[List[Extract
 def remove_order_of_omega_rows(rows: List[ExtractedRow]) -> Tuple[List[ExtractedRow], int]:
     filtered = [row for row in rows if not is_excluded_chapter(row.chapter)]
     return filtered, len(rows) - len(filtered)
-
-
-def autosize_columns(ws) -> None:
-    max_widths = defaultdict(int)
-    for row in ws.iter_rows(values_only=True):
-        for idx, value in enumerate(row, start=1):
-            width = len(clean_text(value))
-            if width > max_widths[idx]:
-                max_widths[idx] = width
-    for idx, width in max_widths.items():
-        ws.column_dimensions[get_column_letter(idx)].width = min(max(width + 2, 12), 32)
-
-
-def style_header(ws) -> None:
-    fill = PatternFill("solid", fgColor="1F4E78")
-    font = Font(color="FFFFFF", bold=True)
-    for cell in ws[1]:
-        cell.fill = fill
-        cell.font = font
-
 
 def write_summary_sheet(
     wb: Workbook,

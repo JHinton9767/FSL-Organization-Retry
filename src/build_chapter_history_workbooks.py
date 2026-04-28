@@ -11,9 +11,10 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from src.build_canonical_pipeline import clean_text, coerce_numeric
-from src.build_master_roster import autosize_columns, is_excluded_chapter
+from src.excel_utils import autosize_columns, safe_filename, safe_sheet_name
+from src.build_master_roster import is_excluded_chapter
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.shared_utils import adjusted_grad_rate as adjusted_graduation_rate, clean_text, coerce_numeric, mean_or_blank, simple_rate as rate, unique_non_blank_count, yes_mask
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,21 +94,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     return parser.parse_args()
 
-
-def safe_filename(value: str) -> str:
-    text = clean_text(value) or "Unknown"
-    for char in '<>:"/\\|?*':
-        text = text.replace(char, "_")
-    return text[:120].strip(" ._") or "Unknown"
-
-
-def safe_sheet_name(value: str) -> str:
-    text = clean_text(value) or "Unknown"
-    for char in "[]:*?/\\":  # Excel-invalid sheet chars
-        text = text.replace(char, "")
-    return text[:31] or "Unknown"
-
-
 def style_row_as_header(ws, row_idx: int) -> None:
     for cell in ws[row_idx]:
         cell.fill = HEADER_FILL
@@ -147,46 +133,6 @@ def append_table(ws, start_row: int, title: str, note: str, headers: Sequence[st
         data_end = ws.max_row
     format_table_columns(ws, header_row, data_start, data_end)
     return ws.max_row + 2
-
-
-def unique_non_blank_count(series: pd.Series) -> int:
-    cleaned = series.fillna("").astype(str).str.strip()
-    return int(cleaned.replace("", pd.NA).dropna().nunique())
-
-
-def mean_or_blank(series: pd.Series) -> object:
-    numeric = coerce_numeric(series)
-    if numeric.dropna().empty:
-        return ""
-    return float(numeric.dropna().mean())
-
-
-def yes_mask(series: pd.Series) -> pd.Series:
-    return series.fillna("").astype(str).str.strip().str.lower().eq("yes")
-
-
-def adjusted_graduation_rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
-    eligible = frame.copy()
-    if measurable_field and measurable_field in eligible.columns:
-        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
-    eligible = eligible.loc[yes_mask(eligible["resolved_outcome_flag"])]
-    if "student_id" in eligible.columns:
-        eligible = eligible.drop_duplicates(subset=["student_id"], keep="first")
-    if eligible.empty:
-        return "", 0
-    numerator = int(yes_mask(eligible[numerator_field]).sum())
-    return float(numerator) / float(len(eligible)), int(len(eligible))
-
-
-def rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
-    eligible = frame.copy()
-    if measurable_field and measurable_field in eligible.columns:
-        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
-    if eligible.empty:
-        return "", 0
-    numerator = int(yes_mask(eligible[numerator_field]).sum())
-    return float(numerator) / float(len(eligible)), int(len(eligible))
-
 
 def prepare_summary(summary: pd.DataFrame) -> pd.DataFrame:
     frame = summary.copy()

@@ -9,8 +9,9 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-from src.build_master_roster import autosize_columns, style_header
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.excel_utils import autosize_columns, style_header
+from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,33 +41,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_WORKBOOK))
     return parser.parse_args()
 
-
-def clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def coerce_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
-
-
 def extract_year(term_label: object) -> int | None:
     text = clean_text(term_label)
     for token in text.split():
         if token.isdigit() and len(token) == 4:
             return int(token)
     return None
-
-
-def bucket_hours(value: object) -> str:
-    if value in ("", None) or pd.isna(value):
-        return "Unknown"
-    number = float(value)
-    lower = int(number // 30) * 30
-    upper = lower + 29
-    return f"{lower}-{upper}"
-
 
 def semester_sort_key(label: str):
     parts = clean_text(label).split()
@@ -114,7 +94,7 @@ def build_new_member_frame(summary: pd.DataFrame, master: pd.DataFrame) -> pd.Da
     result = result.merge(histories, on="student_id", how="left")
     result["join_cumulative_hours_bucket"] = result["entry_hours_bucket"].where(
         result["entry_hours_bucket"].fillna("").astype(str).str.strip().ne(""),
-        result["entry_cumulative_hours"].map(bucket_hours),
+        result["entry_cumulative_hours"].map(bucket_30_hours),
     )
     result["confirmed_join_within_window"] = result["org_entry_term_basis"].fillna("").astype(str).eq("Explicit New Member").map(lambda value: "Yes" if value else "No")
     result["manual_graduation_confirmed"] = manual_graduation_confirmed(result).map(lambda value: "Yes" if value else "No")

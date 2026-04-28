@@ -13,7 +13,7 @@ from app.io_utils import (
     parse_term_label,
 )
 from app.status_framework import build_outcome_resolution_fields
-from src.build_current_snapshot_analytics import bucket_30_hours
+from src.shared_utils import bucket_30_hours
 
 
 def _text(frame: pd.DataFrame, column: str) -> pd.Series:

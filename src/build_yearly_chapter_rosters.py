@@ -8,8 +8,10 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 
 from openpyxl import Workbook
 
-from src.build_master_roster import STATUS_PRIORITY, autosize_columns, is_excluded_chapter, style_header
+from src.build_master_roster import STATUS_PRIORITY, is_excluded_chapter
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.excel_utils import autosize_columns, safe_sheet_name, style_header
+from src.shared_utils import clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -39,20 +41,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--canonical-folder", default="")
     parser.add_argument("-o", "--output-dir", default=str(DEFAULT_OUTPUT_DIR))
     return parser.parse_args()
-
-
-def clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def safe_sheet_name(value: str) -> str:
-    cleaned = clean_text(value) or "Unknown"
-    for char in "[]:*?/\\":  # Excel-invalid sheet chars
-        cleaned = cleaned.replace(char, "")
-    return cleaned[:31] or "Unknown"
-
 
 def choose_preferred_member(existing: ChapterMember, candidate: ChapterMember) -> ChapterMember:
     existing_unknown = existing.chapter.lower() == "unknown"

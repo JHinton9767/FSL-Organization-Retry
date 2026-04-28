@@ -10,8 +10,8 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from src.build_canonical_pipeline import clean_text
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.shared_utils import clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent

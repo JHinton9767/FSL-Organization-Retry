@@ -11,8 +11,8 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from src.build_canonical_pipeline import clean_text, coerce_numeric
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.shared_utils import clean_text, coerce_numeric, extract_year_from_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -38,8 +38,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def extract_year(term_label: object) -> int | None:
-    match = re.search(r"(19\d{2}|20\d{2})", clean_text(term_label))
-    return int(match.group(1)) if match else None
+    return extract_year_from_text(term_label)
 
 
 def estimate_missing_pre_org_terms(entry_hours: object) -> int:

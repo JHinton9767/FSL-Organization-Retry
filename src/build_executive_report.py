@@ -10,12 +10,13 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
-from src.build_canonical_pipeline import clean_text, coerce_numeric
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.enhanced_bundle import SourceBundle
+from src.excel_utils import autosize_columns
+from src.shared_utils import adjusted_grad_rate, clean_text, coerce_numeric, count_text, decimal_text, percent_text, simple_rate, yes_mask
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_ENHANCED_ROOT = ROOT / "output" / "enhanced_metrics"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "presentation_ready"
 DEFAULT_SEGMENT_MIN_SIZE = 10
 DEFAULT_CHAPTER_MIN_SIZE = 15
@@ -40,16 +41,6 @@ class ReportBundle:
     withheld_items: List[str]
 
 
-@dataclass
-class SourceBundle:
-    enhanced_folder: Path
-    enhanced_workbook: Path
-    tables: Dict[str, pd.DataFrame]
-    sources_used: List[str]
-    sources_ignored: List[str]
-    caveats: List[str]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build executive-facing reporting outputs from the canonical analytics bundle.")
     parser.add_argument("--canonical-root", default=str(DEFAULT_CANONICAL_ROOT))
@@ -61,99 +52,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--include-charts", action="store_true")
     parser.add_argument("--skip-chart-export", action="store_true")
     return parser.parse_args()
-
-
-def load_latest_bundle(
-    enhanced_root: Path,
-    explicit_folder: Path | None = None,
-    explicit_workbook: Path | None = None,
-) -> SourceBundle:
-    folder = explicit_folder.expanduser().resolve() if explicit_folder else None
-    if explicit_workbook:
-        workbook = explicit_workbook.expanduser().resolve()
-        folder = workbook.parent
-    else:
-        if folder is None:
-            root = enhanced_root.expanduser().resolve()
-            candidates = [path for path in root.iterdir()] if root.exists() else []
-            runs = sorted([path for path in candidates if path.is_dir() and path.name.startswith("run_")])
-            if not runs:
-                raise FileNotFoundError(f"No enhanced analytics runs found under {root}")
-            folder = runs[-1]
-        matches = sorted(folder.glob("organization_entry_analytics_enhanced_*.xlsx"))
-        workbook = matches[-1] if matches else folder / "organization_entry_analytics_enhanced.xlsx"
-
-    tables: Dict[str, pd.DataFrame] = {}
-    for filename, key in [
-        ("student_summary.csv", "student_summary"),
-        ("cohort_metrics.csv", "cohort_metrics"),
-        ("master_longitudinal.csv", "master_longitudinal"),
-        ("metric_definitions.csv", "metric_definitions"),
-        ("qa_checks.csv", "qa_checks"),
-        ("outcome_segments.csv", "outcome_segments"),
-        ("status_mapping.csv", "status_mapping"),
-        ("change_log.csv", "change_log"),
-    ]:
-        path = folder / filename
-        if path.exists():
-            tables[key] = pd.read_csv(path)
-
-    caveats: List[str] = []
-    if "master_longitudinal" not in tables:
-        caveats.append("Master_Longitudinal was not available, so observed-term trend views are limited.")
-    return SourceBundle(
-        enhanced_folder=folder,
-        enhanced_workbook=workbook,
-        tables=tables,
-        sources_used=[str(path) for path in folder.glob("*.csv")],
-        sources_ignored=[],
-        caveats=caveats,
-    )
-
-
-def yes_mask(series: pd.Series) -> pd.Series:
-    return series.fillna("").astype(str).str.strip().str.lower().eq("yes")
-
-
-def percent_text(value: object) -> str:
-    if value in ("", None) or pd.isna(value):
-        return "Not available"
-    return f"{float(value):.1%}"
-
-
-def decimal_text(value: object) -> str:
-    if value in ("", None) or pd.isna(value):
-        return "Not available"
-    return f"{float(value):.2f}"
-
-
-def count_text(value: object) -> str:
-    if value in ("", None) or pd.isna(value):
-        return "0"
-    return f"{int(round(float(value))):,}"
-
-
-def adjusted_grad_rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
-    eligible = frame.copy()
-    if measurable_field and measurable_field in eligible.columns:
-        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
-    eligible = eligible.loc[yes_mask(eligible["resolved_outcome_flag"])]
-    if "student_id" in eligible.columns:
-        eligible = eligible.drop_duplicates(subset=["student_id"], keep="first")
-    if eligible.empty:
-        return "", 0
-    numerator = int(yes_mask(eligible[numerator_field]).sum())
-    return float(numerator) / float(len(eligible)), int(len(eligible))
-
-
-def simple_rate(frame: pd.DataFrame, numerator_field: str, measurable_field: str | None = None) -> Tuple[object, int]:
-    eligible = frame.copy()
-    if measurable_field and measurable_field in eligible.columns:
-        eligible = eligible.loc[yes_mask(eligible[measurable_field])]
-    if eligible.empty:
-        return "", 0
-    numerator = int(yes_mask(eligible[numerator_field]).sum())
-    return float(numerator) / float(len(eligible)), int(len(eligible))
 
 
 def selected_cumulative_gpa(frame: pd.DataFrame) -> pd.Series:
@@ -380,18 +278,6 @@ def style_header_row(ws, row_idx: int, columns: int) -> None:
         cell.fill = PatternFill("solid", fgColor=HEADER_FILL)
 
 
-def autosize_columns(ws) -> None:
-    widths: Dict[str, int] = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            text = clean_text(cell.value)
-            if not text:
-                continue
-            widths[cell.column_letter] = min(max(widths.get(cell.column_letter, 10), len(text) + 2), 45)
-    for column_letter, width in widths.items():
-        ws.column_dimensions[column_letter].width = width
-
-
 def write_dataframe(ws, frame: pd.DataFrame, start_row: int) -> int:
     if frame.empty:
         ws.cell(row=start_row, column=1, value="No reliable data was available for this section.")
@@ -422,7 +308,7 @@ def write_slides_data_workbook(output_folder: Path, report: ReportBundle) -> Pat
         style_sheet_title(ws, sheet_name, "Slide-ready data table.")
         write_dataframe(ws, frame, 4)
         ws.freeze_panes = "A5"
-        autosize_columns(ws)
+        autosize_columns(ws, max_width=45)
     wb.save(path)
     return path
 
@@ -441,14 +327,14 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         ws[f"C{row}"] = item["Explanation"]
         ws[f"C{row}"].alignment = Alignment(wrap_text=True)
         row += 1
-    autosize_columns(ws)
+    autosize_columns(ws, max_width=45)
 
     takeaways_ws = wb.create_sheet(title="Key Takeaways")
     style_sheet_title(takeaways_ws, "Key Takeaways", "Plain-English summary of the biggest patterns currently visible in the data.")
     for idx, takeaway in enumerate(report.takeaways, start=4):
         takeaways_ws[f"A{idx}"] = f"- {takeaway}"
         takeaways_ws[f"A{idx}"].alignment = Alignment(wrap_text=True)
-    autosize_columns(takeaways_ws)
+    autosize_columns(takeaways_ws, max_width=45)
 
     for sheet_name in ["Cohort Overview", "Retention", "Graduation Outcomes", "Credit Momentum", "GPA and Academic Progress", "Academic Standing", "Outcome Breakdown"]:
         ws = wb.create_sheet(title=sheet_name[:31])
@@ -465,7 +351,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
             next_row = ws.max_row + 3
             ws[f"A{next_row}"] = "Join-hours comparison"
             write_dataframe(ws, report.frames.get("Join Hours Comparison", pd.DataFrame()), next_row + 1)
-        autosize_columns(ws)
+        autosize_columns(ws, max_width=45)
 
     defs = wb.create_sheet(title="Definitions and Notes")
     style_sheet_title(defs, "Definitions and Notes", "Short plain-language explanations of how to read the measures in this package.")
@@ -476,14 +362,14 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         defs[f"A{idx}"] = term
         defs[f"B{idx}"] = meaning
         defs[f"B{idx}"].alignment = Alignment(wrap_text=True)
-    autosize_columns(defs)
+    autosize_columns(defs, max_width=45)
 
     limits = wb.create_sheet(title="Data Limitations")
     style_sheet_title(limits, "Data Limitations", "These cautions help keep the results honest and prevent overstatement.")
     for idx, limitation in enumerate(report.limitations, start=4):
         limits[f"A{idx}"] = f"- {limitation}"
         limits[f"A{idx}"].alignment = Alignment(wrap_text=True)
-    autosize_columns(limits)
+    autosize_columns(limits, max_width=45)
 
     qa = wb.create_sheet(title="QA Summary")
     style_sheet_title(qa, "QA Summary", "Source checks, caveats, and withheld items.")
@@ -499,7 +385,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         qa[f"A{idx}"].alignment = Alignment(wrap_text=True)
     next_row = qa.max_row + 2
     write_dataframe(qa, report.qa, next_row)
-    autosize_columns(qa)
+    autosize_columns(qa, max_width=45)
 
     appendix = wb.create_sheet(title="Appendix")
     style_sheet_title(appendix, "Appendix / Technical Detail", "Friendly label map and additional technical detail for advanced readers.")
@@ -515,7 +401,7 @@ def write_executive_workbook(output_folder: Path, report: ReportBundle) -> Path:
         appendix[f"A{idx}"] = row[0]
         appendix[f"B{idx}"] = row[1]
         appendix[f"B{idx}"].alignment = Alignment(wrap_text=True)
-    autosize_columns(appendix)
+    autosize_columns(appendix, max_width=45)
 
     wb.save(path)
     return path

@@ -33,7 +33,6 @@ from src.build_master_roster import (
     SUPPORTED_EXTENSIONS,
     canonical_header,
     chapter_from_filename,
-    clean_text,
     detect_inline_chapter_label,
     find_header_row_in_rows,
     find_header_row,
@@ -48,6 +47,7 @@ from src.build_master_roster import (
     pdf_table_rows,
     source_file_label,
 )
+from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -463,19 +463,6 @@ def write_performance_report(
     shutil.copyfile(csv_path, latest_csv)
     shutil.copyfile(json_path, latest_json)
     return {"performance_report_csv": csv_path, "performance_report_json": json_path}
-
-
-def coerce_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
-
-
-def bucket_30_hours(value: object) -> str:
-    number = coerce_numeric(pd.Series([value])).iloc[0]
-    if pd.isna(number):
-        return "Unknown"
-    lower = int(math.floor(float(number) / 30.0) * 30)
-    upper = lower + 29
-    return f"{lower}-{upper}"
 
 
 @lru_cache(maxsize=None)

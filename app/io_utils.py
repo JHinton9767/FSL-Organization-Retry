@@ -6,6 +6,7 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from src.shared_utils import coerce_numeric
 from src.greek_life_pipeline import canonicalize_column, parse_term
 
 
@@ -53,11 +54,6 @@ def write_dataframe_cache(frame: pd.DataFrame, csv_path: Path, parquet_path: Opt
     frame.to_csv(csv_path, index=False)
     if parquet_path is not None:
         frame.to_parquet(parquet_path, index=False)
-
-
-def coerce_numeric(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce")
-
 
 def bool_from_flag(value: object) -> Optional[bool]:
     text = normalize_text(value).lower()
@@ -117,4 +113,3 @@ def unique_values(series: pd.Series) -> list[str]:
 
 def canonical_headers(columns: Iterable[object]) -> list[str]:
     return [normalize_key(column) for column in columns]
-

@@ -7,8 +7,9 @@ from typing import Dict, List, Sequence, Tuple
 
 from openpyxl import Workbook
 
-from src.build_master_roster import autosize_columns, style_header
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
+from src.excel_utils import autosize_columns, style_header
+from src.shared_utils import clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -58,13 +59,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-o", "--output", default=str(DEFAULT_OUTPUT_WORKBOOK))
     parser.add_argument("--chunk-size", type=int, default=1000)
     return parser.parse_args()
-
-
-def clean_text(value: object) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
 
 def combined_rows(master_longitudinal) -> List[List[object]]:
     rows: List[List[object]] = []

@@ -10,8 +10,9 @@ from typing import Dict, List, Optional, Sequence
 import pandas as pd
 from openpyxl import Workbook
 
-from src.build_executive_report import clean_text, coerce_numeric, load_latest_bundle, yes_mask
-from src.build_master_roster import autosize_columns, style_header
+from src.excel_utils import autosize_columns, style_header
+from src.enhanced_bundle import DEFAULT_ENHANCED_ROOT, load_latest_bundle
+from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric, mean_or_blank, yes_mask
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -258,18 +259,6 @@ def load_combined_snapshot_table(snapshot_paths: Sequence[Path]) -> pd.DataFrame
     combined = choose_best_snapshot_rows(combined)
     return combined.reset_index(drop=True)
 
-
-def bucket_30_hours(value: object) -> str:
-    if value == "" or pd.isna(value):
-        return "Unknown"
-    number = float(value)
-    if number < 0:
-        return "Unknown"
-    lower = int(number // 30) * 30
-    upper = lower + 29
-    return f"{lower}-{upper}"
-
-
 def current_intensity_bucket(value: object) -> str:
     text = canonical_header(value)
     if not text:
@@ -380,14 +369,6 @@ def merge_augmented_summary(summary: pd.DataFrame, longitudinal: pd.DataFrame, s
         axis=1,
     )
     return merged
-
-
-def mean_or_blank(series: pd.Series) -> object:
-    numeric = coerce_numeric(series)
-    if numeric.dropna().empty:
-        return ""
-    return float(numeric.dropna().mean())
-
 
 def add_metric_row(
     rows: List[Dict[str, object]],

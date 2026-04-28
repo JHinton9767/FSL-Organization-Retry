@@ -18,7 +18,7 @@ from app.standardize import (
     standardize_processed_summary,
     standardize_snapshot_summary,
 )
-from src.build_executive_report import DEFAULT_ENHANCED_ROOT, load_latest_bundle
+from src.enhanced_bundle import DEFAULT_ENHANCED_ROOT, load_latest_bundle
 from src.greek_life_pipeline import (
     build_alias_lookup,
     build_master_dataset,
