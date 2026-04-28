@@ -254,6 +254,18 @@ def _render_data_status_panel(bundle, source_statuses: List[DataSourceStatus]) -
             _render_source_file_status(source_statuses)
 
 
+def _render_startup_failure(message: str, source_statuses: List[DataSourceStatus], detail: str = "") -> None:
+    st.title("FSL Academic Outcomes Analytics")
+    st.error(message)
+    if detail:
+        st.write(detail)
+    st.subheader("Detected Local Data Sources")
+    _render_source_scan(source_statuses)
+    if any(status.files for status in source_statuses):
+        st.subheader("Expected Files")
+        _render_source_file_status(source_statuses)
+
+
 def _population_transparency_frame(metric: MetricDefinition, metric_views: dict[str, object], filtered_summary: pd.DataFrame) -> pd.DataFrame:
     if metric.key == CURRENT_ACTIVE_METRIC_KEY:
         all_result = metric_views["all"]
@@ -561,16 +573,11 @@ def main() -> None:
     st.sidebar.caption("The app reads pre-positioned local project files on startup.")
 
     if version is None:
-        st.title("FSL Academic Outcomes Analytics")
-        st.error(
+        _render_startup_failure(
             "No valid prepared dataset was found in the expected local project folders. "
-            "Run the external prep pipeline, place the finished files in their documented folders, and relaunch the app."
+            "Run the external prep pipeline, place the finished files in their documented folders, and relaunch the app.",
+            source_statuses,
         )
-        st.subheader("Detected Local Data Sources")
-        _render_source_scan(source_statuses)
-        if any(status.files for status in source_statuses):
-            st.subheader("Expected Files")
-            _render_source_file_status(source_statuses)
         return
 
     st.sidebar.caption(f"Auto-loaded dataset: {version.label}")
@@ -583,17 +590,12 @@ def main() -> None:
             status_code_map=status_code_map,
         )
     except Exception as exc:
-        st.title("FSL Academic Outcomes Analytics")
-        st.error(
+        _render_startup_failure(
             "A prepared dataset was found, but it could not be loaded cleanly. "
-            "Check the generated files, rerun the external prep workflow if needed, and relaunch the app."
+            "Check the generated files, rerun the external prep workflow if needed, and relaunch the app.",
+            source_statuses,
+            detail=f"**Load error:** `{exc}`",
         )
-        st.write(f"**Load error:** `{exc}`")
-        st.subheader("Detected Local Data Sources")
-        _render_source_scan(source_statuses)
-        if any(status.files for status in source_statuses):
-            st.subheader("Expected Files")
-            _render_source_file_status(source_statuses)
         return
 
     metrics = available_metrics(bundle.metric_definitions, bundle.summary, bundle.longitudinal)

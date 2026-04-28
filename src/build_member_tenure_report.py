@@ -25,6 +25,8 @@ OUTCOME_ORDER = [
     "No Further Observation",
 ]
 
+MANUAL_GRADUATION_SOURCE_PATTERNS = ("roster status",)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -74,6 +76,16 @@ def semester_sort_key(label: str):
     return (year, order, label)
 
 
+def manual_graduation_confirmed(frame: pd.DataFrame) -> pd.Series:
+    source_text = frame.get("outcome_evidence_source", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str).str.lower()
+    latest_roster = frame.get("latest_roster_status_bucket", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str).str.strip()
+    confirmed_flag = frame.get("graduation_evidence_confirmed", pd.Series("", index=frame.index, dtype="object")).fillna("").astype(str).str.strip().str.lower().isin({"yes", "true", "1"})
+    manual_source = pd.Series(False, index=frame.index, dtype="bool")
+    for pattern in MANUAL_GRADUATION_SOURCE_PATTERNS:
+        manual_source = manual_source | source_text.str.contains(pattern, regex=False, na=False)
+    return (manual_source | latest_roster.eq("Graduated")) & confirmed_flag.fillna(False)
+
+
 def build_new_member_frame(summary: pd.DataFrame, master: pd.DataFrame) -> pd.DataFrame:
     result = summary.copy()
     result = result.loc[result["join_term"].fillna("").astype(str).str.strip().ne("")]
@@ -105,6 +117,11 @@ def build_new_member_frame(summary: pd.DataFrame, master: pd.DataFrame) -> pd.Da
         result["entry_cumulative_hours"].map(bucket_hours),
     )
     result["confirmed_join_within_window"] = result["org_entry_term_basis"].fillna("").astype(str).eq("Explicit New Member").map(lambda value: "Yes" if value else "No")
+    result["manual_graduation_confirmed"] = manual_graduation_confirmed(result).map(lambda value: "Yes" if value else "No")
+    result["outcome_group"] = result["latest_outcome_bucket"].where(
+        ~result["latest_outcome_bucket"].fillna("").astype(str).eq("Graduated") | result["manual_graduation_confirmed"].eq("Yes"),
+        "Unknown",
+    )
     result["start_term"] = result["join_term"]
     result["start_basis"] = result["org_entry_term_basis"]
     result["first_new_member_term"] = result["join_term"].where(result["confirmed_join_within_window"].eq("Yes"), "")
@@ -113,14 +130,13 @@ def build_new_member_frame(summary: pd.DataFrame, master: pd.DataFrame) -> pd.Da
         result["last_observed_academic_term"],
     )
     result["left_term"] = result["graduation_term"].where(
-        result["graduation_term"].fillna("").astype(str).str.strip().ne(""),
-        result["last_observed_term"].where(result["latest_outcome_bucket"].fillna("").astype(str).isin(["Graduated", "Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive"]), ""),
+        result["manual_graduation_confirmed"].eq("Yes") & result["graduation_term"].fillna("").astype(str).str.strip().ne(""),
+        result["last_observed_term"].where(result["outcome_group"].fillna("").astype(str).isin(["Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive"]), ""),
     )
     result["final_status"] = result["latest_roster_status_bucket"].where(
         result["latest_roster_status_bucket"].fillna("").astype(str).str.strip().ne(""),
         result["latest_outcome_bucket"],
     )
-    result["outcome_group"] = result["latest_outcome_bucket"]
     result["join_semester_at_school"] = ""
     result["exit_semester_at_school"] = ""
     return result

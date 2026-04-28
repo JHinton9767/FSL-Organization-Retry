@@ -49,6 +49,15 @@ def _build_status_bucket(value: object, status_code_map: Dict[str, Iterable[str]
     text = normalize_text(value).upper()
     if not text:
         return "Unknown"
+
+    def token_matches(token: object) -> bool:
+        candidate = normalize_text(token).upper()
+        if not candidate:
+            return False
+        if len(candidate) <= 3 and candidate.replace("/", "").replace("-", "").isalnum():
+            return text == candidate
+        return candidate in text
+
     checks = {
         "Transfer": status_code_map.get("transfer", []),
         "Suspended": status_code_map.get("suspended", []),
@@ -57,7 +66,7 @@ def _build_status_bucket(value: object, status_code_map: Dict[str, Iterable[str]
         "Active": status_code_map.get("active", []),
     }
     for bucket, tokens in checks.items():
-        if any(token.upper() in text for token in tokens):
+        if any(token_matches(token) for token in tokens):
             return bucket
     if (
         "GRADUATED" in text

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -8,6 +9,7 @@ import pandas as pd
 
 from app.io_utils import ROOT, canonical_headers, normalize_text, read_tabular_file
 from app.models import MetricDefinition
+from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
 
 
 CONFIG_DIR = ROOT / "config"
@@ -55,65 +57,7 @@ def load_settings() -> Dict[str, Any]:
             "average_cumulative_gpa",
             "total_cumulative_hours",
         ],
-        "outcome_resolution": {
-            "priority_order": [
-                "Graduated",
-                "Resolved Non-Graduate Exit",
-                "Still Active",
-                "Truly Unknown / Unresolved",
-                "Other / Unmapped",
-            ],
-            "group_patterns": {
-                "Graduated": [
-                    "\\bGRADUATED\\b",
-                    "\\bGRAD\\b",
-                    "DEGREE AWARDED",
-                    "AWARDED DEGREE",
-                    "DEGREE CONFER",
-                    "CONFERRED DEGREE",
-                ],
-                "Resolved Non-Graduate Exit": [
-                    "\\bINACTIVE\\b",
-                    "\\bLEFT\\b",
-                    "\\bRESIGN",
-                    "\\bREVOK",
-                    "\\bSUSPEND",
-                    "\\bTRANSFER\\b",
-                    "\\bDROP",
-                    "\\bREMOVE",
-                    "\\bWITHDRAW",
-                    "\\bTERMINAT",
-                    "\\bDISMISS",
-                    "\\bEXPEL",
-                ],
-                "Still Active": [
-                    "\\bSTILL ACTIVE\\b",
-                    "\\bACTIVE\\b",
-                    "\\bCURRENT\\b",
-                    "\\bMEMBER\\b",
-                    "\\bNEW MEMBER\\b",
-                    "\\bCOUNCIL\\b",
-                    "\\bENROLLED\\b",
-                ],
-                "Truly Unknown / Unresolved": [
-                    "\\bUNKNOWN\\b",
-                    "\\bUNRESOLVED\\b",
-                    "\\bPENDING\\b",
-                    "\\bNOT KNOWN\\b",
-                    "\\bMISSING\\b",
-                    "\\bUNMAPPED\\b",
-                    "\\bNO OUTCOME\\b",
-                    "\\bNO FURTHER OBSERVATION\\b",
-                    "\\bACTIVE\\/UNKNOWN\\b",
-                ],
-                "Other / Unmapped": [],
-            },
-            "resolved_only_excluded_groups": [
-                "Still Active",
-                "Truly Unknown / Unresolved",
-                "Other / Unmapped",
-            ],
-        },
+        "outcome_resolution": deepcopy(DEFAULT_OUTCOME_RESOLUTION_CONFIG),
     }
     loaded = load_json(APP_SETTINGS_PATH, {})
     defaults.update(loaded)

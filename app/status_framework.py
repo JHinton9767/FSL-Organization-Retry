@@ -90,28 +90,12 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
 }
 
 CONFIRMED_GRADUATION_EVIDENCE_PATTERNS = [
-    r"graduation list",
-    r"academic graduation term",
-    r"academic status",
     r"roster status",
-    r"snapshot student status",
-    r"explicit graduation flag",
-    r"transcript explicit graduation",
-]
-
-EXPLICIT_GRADUATION_FLAG_COLUMNS = [
-    "explicit_graduation_flag",
-    "graduation_flag",
-    "confirmed_graduation_flag",
-    "degree_awarded_flag",
 ]
 
 EXPLICIT_GRADUATION_TEXT_COLUMNS = [
-    "academic_status_raw",
     "org_status_raw",
     "latest_roster_status_bucket",
-    "latest_snapshot_student_status",
-    "snapshot_student_status",
 ]
 
 
@@ -188,24 +172,19 @@ def _explicit_graduation_text_mask(series: pd.Series) -> pd.Series:
     return (explicit & ~disallowed).fillna(False).astype(bool)
 
 
+def _manual_graduation_source_mask(frame: pd.DataFrame) -> pd.Series:
+    if "outcome_evidence_source" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype="bool")
+    source_text = frame["outcome_evidence_source"].fillna("").astype(str)
+    manual = pd.Series(False, index=frame.index, dtype="bool")
+    for pattern in CONFIRMED_GRADUATION_EVIDENCE_PATTERNS:
+        manual = manual | source_text.str.contains(pattern, case=False, regex=True, na=False)
+    return manual.fillna(False).astype(bool)
+
+
 def confirmed_graduation_evidence_mask(frame: pd.DataFrame) -> pd.Series:
     """Return rows with direct evidence that graduation actually occurred."""
-    evidence = pd.Series(False, index=frame.index, dtype="bool")
-
-    if "graduation_evidence_confirmed" in frame.columns:
-        evidence = evidence | _bool_like_series(frame["graduation_evidence_confirmed"]).fillna(False).astype(bool)
-
-    for column in EXPLICIT_GRADUATION_FLAG_COLUMNS:
-        if column in frame.columns:
-            evidence = evidence | _bool_like_series(frame[column]).fillna(False).astype(bool)
-
-    for column in ["graduation_term_code", "graduation_term", "graduation_year"]:
-        evidence = evidence | _non_blank_series(frame, column)
-
-    if "outcome_evidence_source" in frame.columns:
-        source_text = frame["outcome_evidence_source"].fillna("").astype(str)
-        for pattern in CONFIRMED_GRADUATION_EVIDENCE_PATTERNS:
-            evidence = evidence | source_text.str.contains(pattern, case=False, regex=True, na=False)
+    evidence = _manual_graduation_source_mask(frame)
 
     for column in EXPLICIT_GRADUATION_TEXT_COLUMNS:
         if column in frame.columns:

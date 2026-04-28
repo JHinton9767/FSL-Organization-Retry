@@ -3519,34 +3519,19 @@ def build_student_summary(
         graduation_status_corrected = False
         graduation_status_correction_reason = ""
         snapshot_status_text = snapshot_status_by_id.get(student_id, "")
+        graduation_list_term = ""
         if student_id in graduation_by_id:
-            explicit_grad_term, evidence_source = graduation_by_id[student_id]
-            graduation_confirmed = True
+            graduation_list_term, _ = graduation_by_id[student_id]
         else:
             name_key = person_name_key(first_row["first_name"], first_row["last_name"])
             if name_key in graduation_by_name:
-                explicit_grad_term, evidence_source = graduation_by_name[name_key]
-                graduation_confirmed = True
-        if not explicit_grad_term and (academic_rows["graduation_term_code"].fillna("").astype(str).str.strip().ne("")).any():
-            explicit_grad_term = clean_text(
-                academic_rows.loc[
-                    academic_rows["graduation_term_code"].fillna("").astype(str).str.strip().ne(""),
-                    "graduation_term_code",
-                ].iloc[0]
-            )
-            evidence_source = evidence_source or "Academic graduation term"
-            graduation_confirmed = True
-        if not explicit_grad_term and academic_rows["academic_status_raw"].map(has_confirmed_graduation_text).any():
-            explicit_grad_term = clean_text(academic_rows.loc[academic_rows["academic_status_raw"].map(has_confirmed_graduation_text), "term_code"].iloc[0])
-            evidence_source = evidence_source or "Academic status"
-            graduation_confirmed = True
-        elif not explicit_grad_term and (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
+                graduation_list_term, _ = graduation_by_name[name_key]
+        if (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
             explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
-            evidence_source = evidence_source or "Roster status"
+            evidence_source = "Roster status"
             graduation_confirmed = True
-        if not graduation_confirmed and has_confirmed_graduation_text(snapshot_status_text):
-            evidence_source = evidence_source or "Snapshot student status"
-            graduation_confirmed = True
+        elif graduation_list_term:
+            evidence_source = "Graduation list only; no Copy of Rosters confirmation"
 
         latest_status_bucket = clean_text(roster_rows["org_status_bucket"].iloc[-1]) if not roster_rows.empty else "Unknown"
         derived_outcome_bucket, derived_evidence_source = outcome_bucket_from_signals(
@@ -3558,12 +3543,16 @@ def build_student_summary(
         evidence_source = evidence_source or derived_evidence_source
         if graduation_confirmed:
             latest_outcome_bucket = "Graduated"
-            evidence_source = evidence_source or "Graduation List"
-        elif derived_outcome_bucket == "Graduated":
+        elif derived_outcome_bucket == "Graduated" or graduation_list_term:
             latest_outcome_bucket = "Unknown"
-            evidence_source = "No explicit outcome evidence"
+            evidence_source = evidence_source or "No explicit outcome evidence"
             graduation_status_corrected = True
-            graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
+            if graduation_list_term:
+                graduation_status_correction_reason = (
+                    "Graduation list matched, but Copy of Rosters did not mark the student as graduated."
+                )
+            else:
+                graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
         if latest_outcome_bucket == "Unknown":
             outcome_exceptions.append(
                 {

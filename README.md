@@ -154,16 +154,11 @@ Use `Full Population` when you need to show the broader unresolved burden alongs
 
 ## Graduation evidence rules
 
-Graduation is now evidence-gated. A student is counted as `Graduated` only when the pipeline has a confirmed graduation signal, such as:
+Graduation is now evidence-gated. A student is counted as `Graduated` only when the pipeline has a confirmed manual graduation signal from `Copy of Rosters`, such as:
 
-- a match in a graduation list
-- a populated graduation term/year
-- an academic status that clearly indicates the degree was awarded or the student graduated
-- a roster status explicitly marked as graduated
-- a current snapshot status that explicitly says the student graduated
-- an explicit graduation flag already present in the raw source data
+- a roster status explicitly marked as graduated in `Copy of Rosters`
 
-The pipeline does not treat disappearance, high cumulative hours, good standing, final observed term, or transcript completion history as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
+Graduation lists can still be loaded for audit and comparison, but they no longer mark a student as graduated unless `Copy of Rosters` also shows that student as graduated. The pipeline does not treat disappearance, high cumulative hours, good standing, final observed term, or transcript completion history as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
 
 Graduation-rate views keep two denominator definitions:
 

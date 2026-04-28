@@ -16,114 +16,119 @@ COLOR_SEQUENCE = [
 ]
 
 
-def empty_figure(message: str) -> go.Figure:
-    fig = go.Figure()
-    fig.add_annotation(text=message, showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
-    fig.update_layout(template=PLOTLY_TEMPLATE, height=420)
-    return fig
-
-
-def bar_chart(frame: pd.DataFrame, x: str, y: str, color: str | None, title: str, y_format: str = "") -> go.Figure:
-    if frame.empty:
-        return empty_figure("No data available for the current selection.")
-    fig = px.bar(
-        frame,
-        x=x,
-        y=y,
-        color=color,
-        template=PLOTLY_TEMPLATE,
-        title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
-    )
-    fig.update_layout(xaxis_title="", legend_title="")
+def _finalize_figure(fig: go.Figure, y_format: str = "", **layout_updates: object) -> go.Figure:
+    fig.update_layout(template=PLOTLY_TEMPLATE, **layout_updates)
     if y_format == "percent":
         fig.update_yaxes(tickformat=".0%")
     return fig
 
 
-def line_chart(frame: pd.DataFrame, x: str, y: str, color: str | None, title: str, y_format: str = "") -> go.Figure:
+def empty_figure(message: str) -> go.Figure:
+    fig = go.Figure()
+    fig.add_annotation(text=message, showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper")
+    return _finalize_figure(fig, height=420)
+
+
+def _build_plotly_figure(
+    builder,
+    frame: pd.DataFrame,
+    empty_message: str,
+    y_format: str = "",
+    layout_updates: dict[str, object] | None = None,
+    **kwargs: object,
+) -> go.Figure:
     if frame.empty:
-        return empty_figure("No trend data is available for the current selection.")
-    fig = px.line(
+        return empty_figure(empty_message)
+    fig = builder(
         frame,
+        template=PLOTLY_TEMPLATE,
+        color_discrete_sequence=COLOR_SEQUENCE,
+        **kwargs,
+    )
+    return _finalize_figure(
+        fig,
+        y_format=y_format,
+        xaxis_title="",
+        legend_title="",
+        **(layout_updates or {}),
+    )
+
+
+def bar_chart(frame: pd.DataFrame, x: str, y: str, color: str | None, title: str, y_format: str = "") -> go.Figure:
+    return _build_plotly_figure(
+        px.bar,
+        frame,
+        "No data available for the current selection.",
+        x=x,
+        y=y,
+        color=color,
+        title=title,
+        y_format=y_format,
+    )
+
+
+def line_chart(frame: pd.DataFrame, x: str, y: str, color: str | None, title: str, y_format: str = "") -> go.Figure:
+    return _build_plotly_figure(
+        px.line,
+        frame,
+        "No trend data is available for the current selection.",
         x=x,
         y=y,
         color=color,
         markers=True,
-        template=PLOTLY_TEMPLATE,
         title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
+        y_format=y_format,
     )
-    fig.update_layout(xaxis_title="", legend_title="")
-    if y_format == "percent":
-        fig.update_yaxes(tickformat=".0%")
-    return fig
 
 
 def stacked_bar_chart(frame: pd.DataFrame, x: str, y: str, color: str, title: str) -> go.Figure:
-    if frame.empty:
-        return empty_figure("No distribution data is available for the current selection.")
-    fig = px.bar(
+    return _build_plotly_figure(
+        px.bar,
         frame,
+        "No distribution data is available for the current selection.",
         x=x,
         y=y,
         color=color,
-        template=PLOTLY_TEMPLATE,
         title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
+        y_format="percent",
+        layout_updates={"barmode": "stack"},
     )
-    fig.update_layout(barmode="stack", xaxis_title="", legend_title="")
-    fig.update_yaxes(tickformat=".0%")
-    return fig
 
 
 def scatter_chart(frame: pd.DataFrame, x: str, y: str, size: str | None, color: str | None, title: str, y_format: str = "") -> go.Figure:
-    if frame.empty:
-        return empty_figure("No comparison data is available for the current selection.")
-    fig = px.scatter(
+    return _build_plotly_figure(
+        px.scatter,
         frame,
+        "No comparison data is available for the current selection.",
         x=x,
         y=y,
         size=size,
         color=color,
-        template=PLOTLY_TEMPLATE,
         title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
         hover_name="Group" if "Group" in frame.columns else None,
+        y_format=y_format,
     )
-    fig.update_layout(xaxis_title="", legend_title="")
-    if y_format == "percent":
-        fig.update_yaxes(tickformat=".0%")
-    return fig
 
 
 def histogram(frame: pd.DataFrame, x: str, color: str | None, title: str) -> go.Figure:
-    if frame.empty:
-        return empty_figure("No distribution data is available for the current selection.")
-    fig = px.histogram(
+    return _build_plotly_figure(
+        px.histogram,
         frame,
+        "No distribution data is available for the current selection.",
         x=x,
         color=color,
         nbins=25,
-        template=PLOTLY_TEMPLATE,
         title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
     )
-    fig.update_layout(xaxis_title="", legend_title="")
-    return fig
 
 
 def box_plot(frame: pd.DataFrame, x: str | None, y: str, color: str | None, title: str) -> go.Figure:
-    if frame.empty:
-        return empty_figure("No distribution data is available for the current selection.")
-    fig = px.box(
+    return _build_plotly_figure(
+        px.box,
         frame,
+        "No distribution data is available for the current selection.",
         x=x,
         y=y,
         color=color,
-        template=PLOTLY_TEMPLATE,
         title=title,
-        color_discrete_sequence=COLOR_SEQUENCE,
     )
-    fig.update_layout(xaxis_title="", legend_title="")
-    return fig

@@ -74,6 +74,29 @@ def _population_metric_columns(metric_views: dict[str, object], population_label
     }
 
 
+def _label_or_unknown(value: object) -> str:
+    if pd.isna(value):
+        return "Unknown"
+    text = str(value).strip()
+    return text or "Unknown"
+
+
+def _metric_row(
+    frame: pd.DataFrame,
+    metric: MetricDefinition,
+    population_label: str,
+    min_n: int | None = None,
+    **labels: object,
+) -> dict[str, object] | None:
+    metric_views = compute_metric_views(frame, metric)
+    primary = select_metric_view(metric_views, population_label)
+    if min_n is not None and not _meets_min_n(primary, min_n):
+        return None
+    row = {key: value for key, value in labels.items()}
+    row.update(_population_metric_columns(metric_views, population_label))
+    return row
+
+
 def available_dimensions(summary: pd.DataFrame) -> dict[str, str]:
     return {
         key: label
@@ -176,14 +199,9 @@ def summarize_metric_by_group(
 
     rows = []
     for group_value, frame in summary.groupby(group_field, dropna=False):
-        label = str(group_value).strip() if pd.notna(group_value) and str(group_value).strip() else "Unknown"
-        metric_views = compute_metric_views(frame, metric)
-        primary = select_metric_view(metric_views, population_label)
-        if not _meets_min_n(primary, min_n):
-            continue
-        row = {"Group": label}
-        row.update(_population_metric_columns(metric_views, population_label))
-        rows.append(row)
+        row = _metric_row(frame, metric, population_label, min_n=min_n, Group=_label_or_unknown(group_value))
+        if row is not None:
+            rows.append(row)
     ranked = pd.DataFrame(rows)
     if ranked.empty:
         return ranked
@@ -204,30 +222,20 @@ def build_comparison_table(
         frame = summary.loc[summary[compare_field].fillna("").astype(str).str.strip().eq(value)].copy()
         if frame.empty:
             continue
-        metric_views = compute_metric_views(frame, metric)
-        primary = select_metric_view(metric_views, population_label)
-        if not _meets_min_n(primary, min_n):
-            continue
-        row = {"Comparison Group": value}
-        row.update(_population_metric_columns(metric_views, population_label))
-        rows.append(row)
+        row = _metric_row(frame, metric, population_label, min_n=min_n, **{"Comparison Group": value})
+        if row is not None:
+            rows.append(row)
 
     overall = summary.loc[summary["is_fsl_member"].fillna(True)] if "is_fsl_member" in summary.columns else summary
-    overall_views = compute_metric_views(overall, metric)
-    overall_result = select_metric_view(overall_views, population_label)
-    if overall_result["students"] > 0:
-        row = {"Comparison Group": "FSL-wide Average"}
-        row.update(_population_metric_columns(overall_views, population_label))
-        rows.append(row)
+    overall_row = _metric_row(overall, metric, population_label, min_n=0, **{"Comparison Group": "FSL-wide Average"})
+    if overall_row is not None and int(overall_row["Students"]) > 0:
+        rows.append(overall_row)
 
     if "is_fsl_member" in summary.columns and (~summary["is_fsl_member"].fillna(True)).any():
         campus = summary.loc[~summary["is_fsl_member"].fillna(True)].copy()
-        campus_views = compute_metric_views(campus, metric)
-        campus_result = select_metric_view(campus_views, population_label)
-        if campus_result["students"] > 0:
-            row = {"Comparison Group": "Campus Baseline"}
-            row.update(_population_metric_columns(campus_views, population_label))
-            rows.append(row)
+        campus_row = _metric_row(campus, metric, population_label, min_n=0, **{"Comparison Group": "Campus Baseline"})
+        if campus_row is not None and int(campus_row["Students"]) > 0:
+            rows.append(campus_row)
 
     return pd.DataFrame(rows)
 
@@ -250,16 +258,18 @@ def build_controlled_comparison(
         selected = summary.loc[summary[compare_field].fillna("").astype(str).str.strip().eq(compare_value)].copy()
         for control_value in control_values:
             frame = selected.loc[selected[control_field].fillna("").astype(str).str.strip().eq(control_value)].copy()
-            metric_views = compute_metric_views(frame, metric)
-            primary = select_metric_view(metric_views, population_label)
-            if not _meets_min_n(primary, min_n):
-                continue
-            row = {
-                "Comparison Group": compare_value,
-                "Control Group": control_value,
-            }
-            row.update(_population_metric_columns(metric_views, population_label))
-            rows.append(row)
+            row = _metric_row(
+                frame,
+                metric,
+                population_label,
+                min_n=min_n,
+                **{
+                    "Comparison Group": compare_value,
+                    "Control Group": control_value,
+                },
+            )
+            if row is not None:
+                rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -357,18 +367,16 @@ def build_summary_time_series(
     for group_value, frame in summary.groupby(group_fields, dropna=False):
         if not isinstance(group_value, tuple):
             group_value = (group_value,)
-        time_value = group_value[0]
-        segment_value = group_value[1] if len(group_value) > 1 else "All Students"
-        metric_views = compute_metric_views(frame, metric)
-        primary = select_metric_view(metric_views, population_label)
-        if not _meets_min_n(primary, min_n):
-            continue
-        row = {
-            "Time": time_value,
-            "Segment": segment_value,
-        }
-        row.update(_population_metric_columns(metric_views, population_label))
-        rows.append(row)
+        row = _metric_row(
+            frame,
+            metric,
+            population_label,
+            min_n=min_n,
+            Time=group_value[0],
+            Segment=group_value[1] if len(group_value) > 1 else "All Students",
+        )
+        if row is not None:
+            rows.append(row)
     result = pd.DataFrame(rows)
     if result.empty:
         return result

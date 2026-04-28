@@ -94,11 +94,11 @@ def test_graduation_requires_confirmed_evidence() -> None:
         {
             "student_id": ["1", "2", "3"],
             "latest_outcome_bucket": ["Graduated", "Graduated", "Unknown"],
-            "latest_roster_status_bucket": ["Unknown", "Unknown", "Unknown"],
+            "latest_roster_status_bucket": ["Unknown", "Graduated", "Unknown"],
             "active_flag": ["No", "No", "No"],
             "graduated_eventual": ["Yes", "Yes", "No"],
             "graduation_term_code": ["", "2024SP", ""],
-            "outcome_evidence_source": ["", "Academic graduation term", ""],
+            "outcome_evidence_source": ["", "Roster status", ""],
             "source_logic": ["canonical_pipeline", "canonical_pipeline", "canonical_pipeline"],
         }
     )
@@ -110,6 +110,48 @@ def test_graduation_requires_confirmed_evidence() -> None:
     assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
     assert result.loc[1, "outcome_resolution_group"] == "Graduated"
     assert bool(result.loc[1, "is_graduated"]) is True
+
+
+def test_academic_graduation_term_alone_does_not_count() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "latest_outcome_bucket": ["Graduated"],
+            "latest_roster_status_bucket": ["Unknown"],
+            "active_flag": ["No"],
+            "graduated_eventual": ["Yes"],
+            "graduation_term_code": ["2024SP"],
+            "outcome_evidence_source": ["Academic graduation term"],
+            "source_logic": ["canonical_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_graduated"]) is False
+    assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
+
+
+def test_graduation_list_alone_does_not_count_without_roster_confirmation() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "latest_outcome_bucket": ["Graduated"],
+            "latest_roster_status_bucket": ["Unknown"],
+            "active_flag": ["No"],
+            "graduated_eventual": ["Yes"],
+            "graduation_term_code": ["2024SP"],
+            "outcome_evidence_source": ["Graduation list only; no Copy of Rosters confirmation"],
+            "source_logic": ["canonical_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_graduated"]) is False
+    assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
 
 
 def test_legacy_graduation_flags_do_not_count_without_explicit_evidence() -> None:

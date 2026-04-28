@@ -1163,7 +1163,6 @@ def build_student_summary(
             row
             for row in ordered_rows
             if clean_text(row.get("Roster Status Bucket")) == "Graduated"
-            or clean_text(row.get("Academic Status Signal Bucket")) == "Graduated"
         ]
         observed_graduation_term = clean_text(explicit_graduation_rows[0].get("Term Code")) if explicit_graduation_rows else ""
         explicit_graduation_sort = term_sort_tuple(observed_graduation_term) if observed_graduation_term else None

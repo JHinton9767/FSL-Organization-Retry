@@ -92,3 +92,41 @@ def test_current_active_fields_use_latest_roster_only() -> None:
     assert result.loc[2, "current_active_chapter"] == "Gamma"
     assert result.loc[0, "current_active_roster_term_code"] == "2024FA"
     assert result.loc[2, "current_active_council"] == "PHC"
+
+
+def test_processed_summary_does_not_treat_single_letter_g_inside_longer_text_as_graduated() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "first_name": ["Alex"],
+            "last_name": ["Lee"],
+            "chapter": ["Alpha"],
+            "join_term": ["Fall 2021"],
+            "latest_membership_status": ["Good Standing"],
+            "major": ["Biology"],
+            "pell_flag": ["Yes"],
+            "cohort": ["FTFT"],
+            "total_earned": [45],
+            "avg_term_gpa": [3.1],
+            "latest_gpa_cum": [3.2],
+            "graduated": [False],
+            "graduated_4yr": [False],
+            "graduated_6yr": [False],
+            "first_term": ["Fall 2021"],
+            "first_term_sort": [20213],
+            "last_term_sort": [20223],
+        }
+    )
+
+    standardized = standardize_processed_summary(
+        summary=summary,
+        chapter_mapping=pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
+        settings={
+            "high_hours_threshold": 60,
+            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
+            "completeness_fields": ["student_id", "chapter", "join_term"],
+        },
+        status_code_map={"active": ["A"], "transfer": ["T"], "graduated": ["G"], "inactive": [], "suspended": []},
+    )
+
+    assert standardized.loc[0, "latest_outcome_bucket"] != "Graduated"

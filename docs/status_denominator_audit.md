@@ -76,7 +76,9 @@ Source values:
 
 Headcount logic is intentionally frozen and was not changed for this correction.
 
-Graduation is no longer assigned from broad text matches alone. A student can be classified as `Graduated` only when there is confirmed evidence, such as a graduation-list match, populated graduation term/year, explicit academic graduation status, explicit roster graduated/alumni status, or a prepared-bundle graduation flag with an evidence source.
+Graduation is no longer assigned from broad text matches alone. A student can be classified as `Graduated` only when there is confirmed manual evidence from `Copy of Rosters`, specifically an explicit graduated status on roster history sourced from `Copy of Rosters`.
+
+Graduation-list matches without `Copy of Rosters` confirmation are kept as audit clues only and do not count as graduated outcomes.
 
 Disappearance from later records is not graduation evidence. If there is no confirmed graduation signal and no resolved non-graduate exit, the student remains `Truly Unknown / Unresolved`.
 

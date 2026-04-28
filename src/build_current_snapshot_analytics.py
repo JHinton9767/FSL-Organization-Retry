@@ -366,7 +366,7 @@ def merge_augmented_summary(summary: pd.DataFrame, longitudinal: pd.DataFrame, s
         if existing not in UNRESOLVED_OUTCOMES:
             return existing
         snapshot_bucket = clean_text(row.get("Snapshot Explicit Outcome Bucket"))
-        if snapshot_bucket in {"Graduated", "Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive"}:
+        if snapshot_bucket in {"Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive"}:
             return snapshot_bucket
         if snapshot_bucket == "Active/Enrolled":
             return "Active/Unknown"
@@ -375,7 +375,7 @@ def merge_augmented_summary(summary: pd.DataFrame, longitudinal: pd.DataFrame, s
     merged["Augmented Latest Outcome Bucket"] = merged.apply(augmented_outcome, axis=1)
     merged["Augmented Ever Graduated Flag"] = merged.apply(
         lambda row: "Yes"
-        if clean_text(row.get("Ever Graduated Flag")) == "Yes" or clean_text(row.get("Augmented Latest Outcome Bucket")) == "Graduated"
+        if clean_text(row.get("Ever Graduated Flag")) == "Yes"
         else "No",
         axis=1,
     )
