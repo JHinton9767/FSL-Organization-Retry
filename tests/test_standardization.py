@@ -94,6 +94,29 @@ def test_current_active_fields_use_latest_roster_only() -> None:
     assert result.loc[2, "current_active_council"] == "PHC"
 
 
+def test_current_active_fields_allow_missing_source_metadata_columns() -> None:
+    summary = pd.DataFrame({"student_id": ["1", "2"]})
+    roster = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "term_code": ["2024FA", "2024FA"],
+            "org_status_bucket": ["Active", "Inactive"],
+            "chapter": ["Alpha", "Beta"],
+        }
+    )
+    result = build_current_active_fields(
+        summary,
+        roster,
+        pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
+        settings={"chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}]},
+    )
+
+    assert result.loc[0, "current_active_flag"] == "Yes"
+    assert result.loc[0, "current_active_source_file"] == ""
+    assert result.loc[0, "current_active_source_sheet"] == ""
+    assert result.loc[1, "current_active_flag"] == "No"
+
+
 def test_processed_summary_does_not_treat_single_letter_g_inside_longer_text_as_graduated() -> None:
     summary = pd.DataFrame(
         {

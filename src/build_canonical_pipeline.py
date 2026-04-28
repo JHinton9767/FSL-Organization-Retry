@@ -3922,6 +3922,9 @@ def build_current_active_fields(
 
     active_latest["student_id"] = active_latest["student_id"].fillna("").astype(str).str.strip()
     active_latest = active_latest.loc[active_latest["student_id"].ne("")].copy()
+    for column in ["source_file", "source_sheet", "chapter"]:
+        if column not in active_latest.columns:
+            active_latest[column] = ""
     active_latest = active_latest.sort_values(
         ["student_id", "source_file", "source_sheet", "chapter"],
         na_position="last",
