@@ -181,6 +181,17 @@ def roster_file_month_priority(source_file: str) -> int:
             return month_number
     return 0
 
+
+def source_file_format_priority(source_file: str) -> int:
+    suffix = Path(clean_text(source_file)).suffix.lower()
+    if suffix == ".pdf":
+        return 1
+    if suffix == ".csv":
+        return 2
+    if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb"}:
+        return 3
+    return 0
+
 GREEK_LETTER_WORDS = {
     "alpha",
     "beta",
@@ -230,6 +241,67 @@ CHAPTER_JUNK_PATTERNS = [
     r"\bfall\s*20\d{2}\b",
     r"\b(19|20)\d{2}\b",
     r"\b2\b",
+]
+
+GENERIC_ROSTER_CONTEXT_PATTERNS = [
+    r"^(copy of )?rosters?$",
+    r"^raw rosters?$",
+    r"^raw data$",
+    r"^master roster$",
+    r"^(ifc|phc|nphc|mcg)$",
+    r"^(ifc|phc|nphc|mcg)\s+rosters?$",
+    r"^(ifc|phc|nphc|mcg)\s+council$",
+    r"^all greek(?: life)?$",
+    r"^greek life$",
+    r"^entire council$",
+    r"^all fraternit(?:y|ies)$",
+    r"^all sororit(?:y|ies)$",
+    r"^(initial|final|revised|revision|updated|update)(?:\s+rosters?)?$",
+]
+
+NEW_MEMBER_CONTEXT_PATTERNS = [
+    r"\bnew\s*members?\b",
+    r"\bassociate\s*members?\b",
+]
+
+INDIVIDUAL_FORM_CONTEXT_PATTERNS = [
+    r"\binput\s*forms?\b",
+    r"\bforms?\b",
+    r"\bsigned\b",
+    r"\bsignature\b",
+    r"\bapplication\b",
+    r"\bpaperwork\b",
+    r"\bpacket\b",
+]
+
+PERSON_NAME_NOISE_PATTERNS = [
+    r"\bnew\s*members?\b",
+    r"\bassociate\s*members?\b",
+    r"\binput\s*forms?\b",
+    r"\bforms?\b",
+    r"\bsigned\b",
+    r"\bsignature\b",
+    r"\bapplication\b",
+    r"\bpaperwork\b",
+    r"\bpacket\b",
+    r"\bcopy of rosters?\b",
+    r"\brosters?\b",
+    r"\braw data\b",
+    r"\braw rosters?\b",
+    r"\bmaster roster\b",
+    r"\bcouncil\b",
+    r"\bgreek life\b",
+    r"\ball greek\b",
+    r"\bfall\s+20\d{2}\b",
+    r"\bspring\s+20\d{2}\b",
+    r"\bifc\b",
+    r"\bphc\b",
+    r"\bnphc\b",
+    r"\bmcg\b",
+    r"\bfinal\b",
+    r"\binitial\b",
+    r"\brevised\b",
+    r"\bupdated\b",
 ]
 
 
@@ -434,10 +506,11 @@ def identity_key(row: ExtractedRow) -> Optional[Tuple[str, ...]]:
     return None
 
 
-def row_priority(row: ExtractedRow) -> Tuple[float, int, int, int, int, int, str, str]:
+def row_priority(row: ExtractedRow) -> Tuple[float, int, int, int, int, int, int, str, str]:
     return (
         roster_file_version_priority(row.source_file),
         roster_file_month_priority(row.source_file),
+        source_file_format_priority(row.source_file),
         STATUS_PRIORITY.get(row.status, 10),
         1 if row.banner_id else 0,
         1 if row.email else 0,
@@ -535,22 +608,155 @@ def is_excluded_chapter(chapter: str) -> bool:
     return normalized in {"Order of Omega", "Epsilon Lambda Alpha"}
 
 
+def is_generic_roster_context_name(value: str) -> bool:
+    text = re.sub(r"[_\-.]+", " ", clean_text(value)).strip().lower()
+    if not text:
+        return True
+    if SEMESTER_FOLDER_RE.fullmatch(text.title()):
+        return True
+    if re.fullmatch(r"(19|20)\d{2}", text):
+        return True
+    return any(re.fullmatch(pattern, text, flags=re.IGNORECASE) for pattern in GENERIC_ROSTER_CONTEXT_PATTERNS)
+
+
+def iter_source_context_candidates(path: Path, sheet_name: str = "") -> List[str]:
+    candidates: List[str] = []
+    if sheet_name:
+        candidates.append(sheet_name)
+    candidates.extend([path.stem, path.name])
+    for part in path.parts:
+        candidates.append(part)
+
+    unique_candidates: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = clean_text(candidate).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
+def source_context_indicates_new_member(path: Path, sheet_name: str = "") -> bool:
+    return any(
+        re.search(pattern, clean_text(candidate), flags=re.IGNORECASE)
+        for candidate in iter_source_context_candidates(path, sheet_name)
+        for pattern in NEW_MEMBER_CONTEXT_PATTERNS
+    )
+
+
+def source_context_indicates_individual_form(path: Path) -> bool:
+    return any(
+        re.search(pattern, clean_text(candidate), flags=re.IGNORECASE)
+        for candidate in iter_source_context_candidates(path)
+        for pattern in INDIVIDUAL_FORM_CONTEXT_PATTERNS
+    )
+
+
+def extract_person_name_from_label(value: str) -> Optional[Tuple[str, str]]:
+    cleaned = clean_text(value)
+    if not cleaned:
+        return None
+
+    for pattern in PERSON_NAME_NOISE_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[_\-.]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,-_")
+    if not cleaned:
+        return None
+
+    if "," in cleaned:
+        left, right = [part.strip() for part in cleaned.split(",", 1)]
+        left_tokens = re.findall(r"[A-Za-z]+", left)
+        right_tokens = re.findall(r"[A-Za-z]+", right)
+        if left_tokens and right_tokens:
+            first_name = right_tokens[0].title()
+            last_name = left_tokens[-1].title()
+            if first_name and last_name:
+                return first_name, last_name
+
+    tokens = [token.title() for token in re.findall(r"[A-Za-z]+", cleaned)]
+    if len(tokens) < 2 or len(tokens) > 5:
+        return None
+    if all(token.lower() in GREEK_LETTER_WORDS for token in tokens):
+        return None
+
+    return tokens[0], tokens[-1]
+
+
+def is_individual_new_member_form_pdf(path: Path) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    return extract_person_name_from_label(path.stem) is not None and (
+        source_context_indicates_new_member(path)
+        or source_context_indicates_individual_form(path)
+        or not any(re.search(pattern, clean_text(path.stem), flags=re.IGNORECASE) for pattern in GENERIC_ROSTER_CONTEXT_PATTERNS)
+    )
+
+
+def build_individual_new_member_form_lookup(paths: Iterable[Path], root: Optional[Path] = None) -> Dict[Tuple[str, str, str, str], List[str]]:
+    lookup: Dict[Tuple[str, str, str, str], List[str]] = defaultdict(list)
+    for path in paths:
+        if not is_individual_new_member_form_pdf(path):
+            continue
+        person = extract_person_name_from_label(path.stem)
+        if not person:
+            continue
+        academic_year, term = parse_term_from_path(path)
+        if term == "Unknown":
+            continue
+        first_name, last_name = person
+        lookup[(academic_year.lower(), term.lower(), first_name.lower(), last_name.lower())].append(source_file_label(path, root))
+    return dict(lookup)
+
+
+def should_upgrade_to_new_member_status(status: str, position: str, source_is_new_member: bool, has_form_evidence: bool) -> bool:
+    normalized_status = clean_text(normalize_status(status))
+    position_text = clean_text(position).lower()
+    explicit_position = "new member" in position_text
+    if normalized_status == "New Member":
+        return True
+    if normalized_status not in {"", "Active"}:
+        return False
+    return explicit_position or source_is_new_member or has_form_evidence
+
+
+def iter_chapter_context_candidates(path: Path, sheet_name: str) -> List[str]:
+    candidates: List[str] = []
+    if sheet_name and not is_placeholder_sheet_name(sheet_name):
+        candidates.append(sheet_name)
+    candidates.append(path.stem)
+    for parent in list(path.parents)[:4]:
+        if parent.name:
+            candidates.append(parent.name)
+
+    unique_candidates: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = clean_text(candidate).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_candidates.append(candidate)
+    return unique_candidates
+
+
 def chapter_from_filename(path: Path) -> str:
     stem = clean_text(path.stem)
     if not stem:
         return ""
 
-    if stem.lower() == "raw roster data":
+    if stem.lower() == "raw roster data" or is_generic_roster_context_name(stem):
         return "Unknown"
 
     return normalize_chapter_name(stem)
 
 
 def infer_chapter(path: Path, sheet_name: str) -> str:
-    if is_placeholder_sheet_name(sheet_name):
-        return chapter_from_filename(path)
-
-    for candidate in [sheet_name, path.stem, path.parent.name]:
+    for candidate in iter_chapter_context_candidates(path, sheet_name):
+        if is_generic_roster_context_name(candidate):
+            continue
         cleaned = normalize_chapter_name(candidate)
         if not cleaned:
             continue
@@ -704,7 +910,12 @@ def pdf_table_rows(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]
     return table_sources, issues
 
 
-def extract_rows_from_tabular_rows(path: Path, sheet_name: str, table_rows: List[Tuple[object, ...]]) -> Tuple[List[ExtractedRow], List[str]]:
+def extract_rows_from_tabular_rows(
+    path: Path,
+    sheet_name: str,
+    table_rows: List[Tuple[object, ...]],
+    new_member_form_lookup: Optional[Dict[Tuple[str, str, str, str], List[str]]] = None,
+) -> Tuple[List[ExtractedRow], List[str]]:
     rows: List[ExtractedRow] = []
     issues: List[str] = []
 
@@ -721,6 +932,7 @@ def extract_rows_from_tabular_rows(path: Path, sheet_name: str, table_rows: List
         issues.append(f"Status column not found after full scan in {path.name} | sheet '{sheet_name}'.")
 
     academic_year, term = parse_term_from_path(path)
+    source_is_new_member = source_context_indicates_new_member(path, sheet_name)
     default_chapter = infer_chapter(path, sheet_name)
     current_chapter_raw = sheet_name
     current_chapter = default_chapter
@@ -741,6 +953,11 @@ def extract_rows_from_tabular_rows(path: Path, sheet_name: str, table_rows: List
         position = get_cell(row, header_map.get("position"))
         chapter_raw = get_cell(row, header_map.get("chapter")) or current_chapter_raw or sheet_name
         chapter = normalize_chapter_name(chapter_raw) or current_chapter or default_chapter
+        form_key = (academic_year.lower(), term.lower(), first_name.lower(), last_name.lower())
+        has_form_evidence = bool(new_member_form_lookup and new_member_form_lookup.get(form_key))
+        if should_upgrade_to_new_member_status(status, position, source_is_new_member, has_form_evidence):
+            status = "New Member"
+            semester_joined = semester_joined or term
 
         core_values = [last_name, first_name, banner_id, email, status, semester_joined, position, chapter]
         if row_is_empty(core_values):
@@ -769,15 +986,24 @@ def extract_rows_from_tabular_rows(path: Path, sheet_name: str, table_rows: List
     return rows, issues
 
 
-def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[ExtractedRow], List[str]]:
+def extract_rows_from_workbook(
+    path: Path,
+    new_member_form_lookup: Optional[Dict[Tuple[str, str, str, str], List[str]]] = None,
+    verbose: bool = False,
+) -> Tuple[List[ExtractedRow], List[str]]:
     rows: List[ExtractedRow] = []
     issues: List[str] = []
+
+    if is_individual_new_member_form_pdf(path):
+        if verbose:
+            print(f"Cataloged new-member form {path}")
+        return rows, issues
 
     if path.suffix.lower() == ".pdf":
         table_sources, pdf_issues = pdf_table_rows(path)
         issues.extend(pdf_issues)
         for sheet_name, table_rows in table_sources:
-            extracted, table_issues = extract_rows_from_tabular_rows(path, sheet_name, table_rows)
+            extracted, table_issues = extract_rows_from_tabular_rows(path, sheet_name, table_rows, new_member_form_lookup)
             rows.extend(extracted)
             issues.extend(table_issues)
         if verbose:
@@ -795,7 +1021,7 @@ def extract_rows_from_workbook(path: Path, verbose: bool = False) -> Tuple[List[
 
         for ws in wb.worksheets:
             table_rows = [tuple(row) for row in ws.iter_rows(values_only=True)]
-            extracted, table_issues = extract_rows_from_tabular_rows(path, ws.title, table_rows)
+            extracted, table_issues = extract_rows_from_tabular_rows(path, ws.title, table_rows, new_member_form_lookup)
             rows.extend(extracted)
             issues.extend(table_issues)
     finally:
@@ -1137,6 +1363,7 @@ def build_unique_banner_rows(rows: List[ExtractedRow]) -> List[UniqueBannerRow]:
                 term_sort_key(item.academic_year, item.term),
                 roster_file_version_priority(item.source_file),
                 roster_file_month_priority(item.source_file),
+                source_file_format_priority(item.source_file),
                 STATUS_PRIORITY.get(item.status, 10),
                 1 if item.position else 0,
                 item.source_file.lower(),
@@ -1242,9 +1469,10 @@ def build_master_roster(
         raise FileNotFoundError(
             f"No roster files found under {input_root}. Supported types: {', '.join(sorted(ROSTER_SOURCE_EXTENSIONS))}"
         )
+    new_member_form_lookup = build_individual_new_member_form_lookup(files, input_root)
 
     for path in files:
-        extracted, file_issues = extract_rows_from_workbook(path, verbose=verbose)
+        extracted, file_issues = extract_rows_from_workbook(path, new_member_form_lookup=new_member_form_lookup, verbose=verbose)
         academic_year, term = parse_term_from_path(path)
         all_rows.extend(extracted)
         issues.extend(file_issues)

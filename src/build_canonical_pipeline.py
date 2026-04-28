@@ -31,6 +31,7 @@ from app.status_framework import build_outcome_resolution_fields
 from src.build_master_roster import (
     DEFAULT_INPUT_ROOT,
     SUPPORTED_EXTENSIONS,
+    build_individual_new_member_form_lookup,
     canonical_header,
     chapter_from_filename,
     detect_inline_chapter_label,
@@ -40,12 +41,16 @@ from src.build_master_roster import (
     find_status_column,
     get_cell,
     infer_chapter,
+    is_individual_new_member_form_pdf,
     is_placeholder_sheet_name,
     normalize_banner_id,
     normalize_chapter_name,
     normalize_status,
     pdf_table_rows,
+    source_file_format_priority,
     source_file_label,
+    source_context_indicates_new_member,
+    should_upgrade_to_new_member_status,
 )
 from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric
 
@@ -543,6 +548,8 @@ def roster_file_version_details(value: object) -> Tuple[str, float]:
         return "Revised", 2
     if has_updated:
         return "Updated", 2
+    if re.search(r"\binitial\b", text):
+        return "Initial", 1
     return "Regular", 1
 
 
@@ -1867,6 +1874,7 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
     working["_secondary_org"] = working["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
     working["_source_version_priority"] = coerce_numeric(working.get("roster_file_version_priority", pd.Series([1] * len(working), index=working.index))).fillna(1)
     working["_source_month_priority"] = coerce_numeric(working.get("roster_file_month_priority", pd.Series([0] * len(working), index=working.index))).fillna(0)
+    working["_source_format_priority"] = working.get("source_file", pd.Series([""] * len(working), index=working.index)).map(source_file_format_priority)
     working["_assignment_rank"] = working["chapter_assignment_source"].fillna("").astype(str).map(
         {
             "manual_override": 0,
@@ -1880,14 +1888,14 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
     ).fillna(9)
     preferred = (
         working.sort_values(
-            by=["_identity_key", "term_code", "_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_assignment_rank", "chapter", "source_file", "source_sheet"],
-            ascending=[True, True, True, True, False, False, True, True, True, True],
+            by=["_identity_key", "term_code", "_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_assignment_rank", "chapter", "source_file", "source_sheet"],
+            ascending=[True, True, True, True, False, False, False, True, True, True, True],
             na_position="last",
         )
         .drop_duplicates(subset=["_identity_key", "term_code"], keep="first")
         .reset_index(drop=True)
     )
-    return preferred.drop(columns=["_identity_key", "_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_assignment_rank"], errors="ignore").reset_index(drop=True)
+    return preferred.drop(columns=["_identity_key", "_chapter_missing", "_secondary_org", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_assignment_rank"], errors="ignore").reset_index(drop=True)
 
 
 def chapter_assignment_details(
@@ -1934,7 +1942,7 @@ def roster_status_bucket(raw_status: object, raw_position: object) -> str:
     status = normalize_status(clean_text(raw_status))
     status_text = status.upper()
     combined = f"{status} {clean_text(raw_position)}".upper()
-    if has_confirmed_graduation_text(status_text):
+    if has_explicit_roster_graduation_status(raw_status, status):
         return "Graduated"
     if "SUSPEND" in status_text:
         return "Suspended"
@@ -1951,6 +1959,14 @@ def roster_status_bucket(raw_status: object, raw_position: object) -> str:
     if "ACTIVE" in combined or "MEMBER" in combined or "COUNCIL" in combined:
         return "Active"
     return status or "Unknown"
+
+
+def has_explicit_roster_graduation_status(raw_status: object, normalized_status: object = "") -> bool:
+    raw_text = clean_text(raw_status).upper()
+    normalized_text = clean_text(normalized_status).upper()
+    if normalized_text == "GRADUATED":
+        return True
+    return raw_text in {"G", "GRAD", "GRADUATED"}
 
 
 def outcome_bucket_from_signals(status_bucket: str, academic_status_raw: str, snapshot_status_raw: str) -> Tuple[str, str]:
@@ -2130,6 +2146,8 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
     rows: List[dict] = []
     exceptions: List[dict] = []
     schema_columns = load_schema()["tables"]["roster_term"]
+    all_roster_paths = roster_files(roots)
+    new_member_form_lookup = build_individual_new_member_form_lookup(all_roster_paths)
 
     def process_roster_table(path: Path, source_label: str, sheet_name: str, table_rows: List[Tuple[object, ...]]) -> None:
         header_row_idx, header_map = find_header_row_in_rows(table_rows)
@@ -2149,6 +2167,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
         if "status" not in header_map and status_col_idx is not None:
             header_map["status"] = status_col_idx
         data_start_index = max(header_row_idx, status_row_idx or header_row_idx)
+        source_is_new_member = source_context_indicates_new_member(path, sheet_name)
 
         default_chapter = infer_chapter(path, sheet_name) or normalize_chapter_name(sheet_name or path.stem) or "Unknown"
         current_chapter_raw = sheet_name
@@ -2212,6 +2231,11 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                 current_chapter_source,
             )
             status_bucket = roster_status_bucket(status_raw, position_raw)
+            form_key = (str(term_year).lower(), term_label.lower(), first_name.lower(), last_name.lower())
+            has_form_evidence = bool(term_label and new_member_form_lookup.get(form_key))
+            if should_upgrade_to_new_member_status(status_raw, position_raw, source_is_new_member, has_form_evidence):
+                status_bucket = "New Member"
+                semester_joined_raw = semester_joined_raw or term_label
 
             rows.append(
                 {
@@ -2248,8 +2272,10 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                 }
             )
 
-    for path in roster_files(roots):
+    for path in all_roster_paths:
         source_label = source_label_for_roster_path(path, roots)
+        if is_individual_new_member_form_pdf(path):
+            continue
         if path.suffix.lower() == ".pdf":
             table_sources, pdf_issues = pdf_table_rows(path)
             for issue in pdf_issues:
@@ -3085,12 +3111,17 @@ def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: 
         if source_label == "roster" and "roster_file_month_priority" in ranked.columns
         else 0
     )
+    ranked["_source_format_priority"] = (
+        ranked.get("source_file", pd.Series([""] * len(ranked), index=ranked.index)).map(source_file_format_priority)
+        if source_label == "roster"
+        else 0
+    )
     ranked["_completeness"] = ranked.notna().sum(axis=1)
     ranked["_update_key"] = ranked["source_file"].map(update_key_from_name) if "source_file" in ranked.columns else [(0, 0, 0)] * len(ranked)
-    ranked = ranked.sort_values(by=effective_keys + ["_source_version_priority", "_source_month_priority", "_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False, False, False])
+    ranked = ranked.sort_values(by=effective_keys + ["_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False, False, False, False])
     duplicate_mask = ranked.duplicated(subset=effective_keys, keep="first")
     exceptions = ranked.loc[duplicate_mask].copy()
-    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_source_version_priority", "_source_month_priority", "_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
+    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
     if exceptions.empty:
         return deduped.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exception_rows = []
@@ -3151,6 +3182,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
         ranked["_secondary_org"] = ranked["chapter"].map(lambda value: normalize_chapter_name(clean_text(value)) in secondary_orgs).astype(int)
         ranked["_source_version_priority"] = coerce_numeric(ranked.get("roster_file_version_priority", pd.Series([1] * len(ranked), index=ranked.index))).fillna(1)
         ranked["_source_month_priority"] = coerce_numeric(ranked.get("roster_file_month_priority", pd.Series([0] * len(ranked), index=ranked.index))).fillna(0)
+        ranked["_source_format_priority"] = ranked.get("source_file", pd.Series([""] * len(ranked), index=ranked.index)).map(source_file_format_priority)
         ranked["_new_member"] = ranked["new_member_flag"].eq("Yes").astype(int)
         ranked["_known_id"] = ranked["student_id"].fillna("").astype(str).str.strip().ne("").astype(int)
         ranked["_status_priority"] = ranked["org_status_bucket"].map(
@@ -3165,7 +3197,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
                 "Active": 50,
             }
         ).fillna(0)
-        ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False, False, False])
+        ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False, False, False, False])
         chosen_row = ranked.iloc[0].copy()
         discarded_resigned_revoked = group.loc[group["org_status_bucket"].fillna("").astype(str).isin(["Resigned", "Revoked"])]
         if (
@@ -3912,8 +3944,10 @@ def build_current_active_fields(
     for column in ["source_file", "source_sheet", "chapter"]:
         if column not in active_latest.columns:
             active_latest[column] = ""
+    active_latest["_source_format_priority"] = active_latest["source_file"].map(source_file_format_priority)
     active_latest = active_latest.sort_values(
-        ["student_id", "source_file", "source_sheet", "chapter"],
+        ["student_id", "_source_format_priority", "source_file", "source_sheet", "chapter"],
+        ascending=[True, False, True, True, True],
         na_position="last",
     ).drop_duplicates(subset=["student_id"], keep="first")
 

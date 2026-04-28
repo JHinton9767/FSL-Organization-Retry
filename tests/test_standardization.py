@@ -1,7 +1,17 @@
+from pathlib import Path
+
 import pandas as pd
 
 from app.standardize import standardize_processed_summary
-from src.build_canonical_pipeline import build_current_active_fields
+from src.build_canonical_pipeline import build_current_active_fields, roster_file_version_details, roster_status_bucket
+from src.build_master_roster import (
+    build_individual_new_member_form_lookup,
+    chapter_from_filename,
+    infer_chapter,
+    is_individual_new_member_form_pdf,
+    should_upgrade_to_new_member_status,
+    source_context_indicates_new_member,
+)
 
 
 def test_processed_summary_assigns_core_groups() -> None:
@@ -153,3 +163,72 @@ def test_processed_summary_does_not_treat_single_letter_g_inside_longer_text_as_
     )
 
     assert standardized.loc[0, "latest_outcome_bucket"] != "Graduated"
+
+
+def test_infer_chapter_uses_parent_chapter_folder_before_council_or_final_folders() -> None:
+    path = Path(r"Copy of Rosters\Spring 2026\IFC\Final\Alpha Sigma Phi\roster.xlsx")
+
+    assert chapter_from_filename(path) == "Unknown"
+    assert infer_chapter(path, "Sheet1") == "Alpha Sigma Phi"
+
+
+def test_roster_file_version_details_reads_initial_and_final_from_folder_context() -> None:
+    initial_label, initial_priority = roster_file_version_details(r"Copy of Rosters\Fall 2025\PHC\Initial\chapter.xlsx")
+    final_label, final_priority = roster_file_version_details(r"Copy of Rosters\Fall 2025\PHC\Final\chapter.xlsx")
+
+    assert initial_label == "Initial"
+    assert initial_priority == 1
+    assert final_label == "Final"
+    assert final_priority == 3
+
+
+def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> None:
+    assert roster_status_bucket("G", "Member") == "Graduated"
+    assert roster_status_bucket("Graduated", "Member") == "Graduated"
+    assert roster_status_bucket("Good Standing", "Member") != "Graduated"
+
+
+def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:
+    summary = pd.DataFrame({"student_id": ["1"]})
+    roster = pd.DataFrame(
+        {
+            "student_id": ["1", "1"],
+            "term_code": ["2026SP", "2026SP"],
+            "org_status_bucket": ["Active", "Active"],
+            "chapter": ["Alpha Sigma Phi", "Alpha Sigma Phi"],
+            "source_file": ["Copy of Rosters/Spring 2026/IFC/Final/Alpha Sigma Phi/roster.pdf", "Copy of Rosters/Spring 2026/IFC/Final/Alpha Sigma Phi/roster.xlsx"],
+            "source_sheet": ["Page 1", "Members"],
+        }
+    )
+
+    result = build_current_active_fields(
+        summary,
+        roster,
+        pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
+        settings={"chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}]},
+    )
+
+    assert result.loc[0, "current_active_flag"] == "Yes"
+    assert result.loc[0, "current_active_source_file"].endswith(".xlsx")
+
+
+def test_source_context_indicates_new_member_for_new_member_titled_sheet() -> None:
+    path = Path(r"Copy of Rosters\Spring 2026\IFC\Alpha Sigma Phi\Raw Data.xlsx")
+
+    assert source_context_indicates_new_member(path, "New Members")
+    assert should_upgrade_to_new_member_status("Active", "", True, False)
+
+
+def test_infer_chapter_ignores_raw_data_and_council_context_without_named_chapter() -> None:
+    path = Path(r"Copy of Rosters\Spring 2026\IFC\Raw Data.xlsx")
+
+    assert chapter_from_filename(path) == "Unknown"
+    assert infer_chapter(path, "Raw Data") == ""
+
+
+def test_individual_person_form_pdf_builds_new_member_evidence() -> None:
+    path = Path(r"Copy of Rosters\Spring 2026\IFC\Alpha Sigma Phi\Forms\Jane Doe.pdf")
+    lookup = build_individual_new_member_form_lookup([path])
+
+    assert is_individual_new_member_form_pdf(path)
+    assert ("2026", "spring 2026", "jane", "doe") in lookup
