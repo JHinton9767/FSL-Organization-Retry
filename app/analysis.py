@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -40,6 +41,7 @@ DIMENSION_LABELS = {
 }
 
 PERSISTENCE_COUNCIL_OPTIONS = ["ALL", "IFC", "PHC", "NPHC", "MGC", "FRA", "SOR"]
+PERSISTENCE_TOTAL_RE = re.compile(r"^((?:19|20)\d{2})\s+total$", re.IGNORECASE)
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -478,6 +480,60 @@ def stakeholder_summary(ranked_table: pd.DataFrame, metric: MetricDefinition, po
     return notes
 
 
+def _persistence_total_start_year(value: object) -> int | None:
+    match = PERSISTENCE_TOTAL_RE.fullmatch(str(value).strip())
+    return int(match.group(1)) if match else None
+
+
+def _persistence_academic_year_start(term_label: object) -> int | None:
+    parsed = parse_term_label(term_label)
+    year = parsed["year"]
+    season = str(parsed["season"]).lower()
+    if year is None:
+        return None
+    if season == "fall":
+        return int(year)
+    if season == "spring":
+        return int(year) - 1
+    return None
+
+
+def _persistence_academic_year_label(start_year: int) -> str:
+    return f"{int(start_year)} Total"
+
+
+def persistence_cohort_sort_key(value: str) -> tuple[int, int, int, str]:
+    total_year = _persistence_total_start_year(value)
+    if total_year is not None:
+        return (total_year, 2, total_year + 1, str(value).strip().lower())
+
+    parsed = parse_term_label(value)
+    year = parsed["year"]
+    season = str(parsed["season"]).lower()
+    if year is None:
+        return (9999, 9, 9999, str(value).strip().lower())
+    if season == "fall":
+        return (int(year), 0, int(year), str(value).strip().lower())
+    if season == "spring":
+        return (int(year) - 1, 1, int(year), str(value).strip().lower())
+    return (int(year), 3, int(year), str(value).strip().lower())
+
+
+def persistence_checkpoint_sort_value(cohort_label: str, offset: int) -> int | None:
+    total_year = _persistence_total_start_year(cohort_label)
+    if total_year is not None:
+        return int(parse_term_label(f"Spring {int(total_year) + int(offset) + 1}")["sort_value"])
+
+    parsed = parse_term_label(cohort_label)
+    year = parsed["year"]
+    season = str(parsed["season"]).lower()
+    season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
+    season_code = season_codes.get(season, "")
+    if year is None or not season_code:
+        return None
+    return int(parse_term_label(f"{int(year) + int(offset)}{season_code}")["sort_value"])
+
+
 def persistence_cohort_options(summary: pd.DataFrame) -> list[str]:
     if summary.empty or "join_term" not in summary.columns:
         return []
@@ -491,7 +547,32 @@ def persistence_cohort_options(summary: pd.DataFrame) -> list[str]:
         .unique()
         .tolist()
     )
-    return sorted(values, key=lambda value: parse_term_label(value)["sort_value"])
+    sorted_terms = sorted(values, key=persistence_cohort_sort_key)
+    academic_year_seasons: dict[int, set[str]] = {}
+    for value in sorted_terms:
+        parsed = parse_term_label(value)
+        season = str(parsed["season"]).lower()
+        start_year = _persistence_academic_year_start(value)
+        if start_year is None or season not in {"fall", "spring"}:
+            continue
+        academic_year_seasons.setdefault(start_year, set()).add(season)
+
+    options: list[str] = []
+    emitted_totals: set[int] = set()
+    for value in sorted_terms:
+        options.append(value)
+        parsed = parse_term_label(value)
+        season = str(parsed["season"]).lower()
+        start_year = _persistence_academic_year_start(value)
+        if (
+            season == "spring"
+            and start_year is not None
+            and {"fall", "spring"}.issubset(academic_year_seasons.get(start_year, set()))
+            and start_year not in emitted_totals
+        ):
+            options.append(_persistence_academic_year_label(start_year))
+            emitted_totals.add(start_year)
+    return options
 
 
 def _normalized_council_series(frame: pd.DataFrame) -> pd.Series:
@@ -521,9 +602,18 @@ def filter_persistence_population(summary: pd.DataFrame, cohort_term: str, disti
     if summary.empty or "join_term" not in summary.columns:
         return pd.DataFrame(columns=summary.columns)
 
-    frame = summary.loc[
-        summary["join_term"].fillna("").astype(str).str.strip().eq(str(cohort_term).strip())
-    ].copy()
+    join_terms = summary["join_term"].fillna("").astype(str).str.strip()
+    cohort_label = str(cohort_term).strip()
+    total_start_year = _persistence_total_start_year(cohort_label)
+    if total_start_year is not None:
+        academic_year_start = join_terms.map(_persistence_academic_year_start)
+        season_series = join_terms.map(lambda value: str(parse_term_label(value)["season"]).lower())
+        frame = summary.loc[
+            academic_year_start.eq(total_start_year)
+            & season_series.isin({"fall", "spring"})
+        ].copy()
+    else:
+        frame = summary.loc[join_terms.eq(cohort_label)].copy()
     if frame.empty:
         return frame
 
@@ -572,12 +662,14 @@ def build_persistence_dashboard(
     if cohort.empty:
         return empty
 
+    total_start_year = _persistence_total_start_year(cohort_term)
     cohort_term_parts = parse_term_label(cohort_term)
     base_year = cohort_term_parts["year"]
     base_season = str(cohort_term_parts["season"]).lower()
     season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
     season_code = season_codes.get(base_season, "")
-    if base_year is None or not season_code:
+    is_total_cohort = total_start_year is not None
+    if not is_total_cohort and (base_year is None or not season_code):
         empty["meta"]["note"] = "The selected cohort term could not be parsed into milestone checkpoints."
         return empty
 
@@ -629,6 +721,17 @@ def build_persistence_dashboard(
         for term_sort, group in academic_rows.groupby("observed_term_sort", dropna=False)
         if pd.notna(term_sort)
     }
+    academic_rows["persistence_academic_year_start"] = academic_rows.get("observed_term", pd.Series("", index=academic_rows.index)).map(
+        _persistence_academic_year_start
+    )
+    academic_presence_by_academic_year = {
+        int(year_value): set(group["student_id"].tolist())
+        for year_value, group in academic_rows.loc[academic_rows["persistence_academic_year_start"].notna()].groupby(
+            "persistence_academic_year_start",
+            dropna=False,
+        )
+        if pd.notna(year_value)
+    }
     max_term_sort = int(pd.to_numeric(academic_rows["observed_term_sort"], errors="coerce").dropna().max()) if not academic_rows.empty else 0
 
     cohort_work = cohort.copy()
@@ -648,16 +751,24 @@ def build_persistence_dashboard(
     last_milestone_label = ""
 
     for offset in range(0, 7):
-        target_year = int(base_year) + offset
-        target_code = f"{target_year}{season_code}"
-        target_term = parse_term_label(target_code)
-        target_sort = int(target_term["sort_value"])
-        measurable = offset == 0 or (target_sort <= max_term_sort)
+        if is_total_cohort:
+            target_year = int(total_start_year) + offset
+            target_label = _persistence_academic_year_label(target_year)
+            target_sort = int(parse_term_label(f"Spring {target_year + 1}")["sort_value"])
+            measurable = offset == 0 or (target_sort <= max_term_sort)
+            display_label = target_label
+        else:
+            target_year = int(base_year) + offset
+            target_code = f"{target_year}{season_code}"
+            target_term = parse_term_label(target_code)
+            target_sort = int(target_term["sort_value"])
+            measurable = offset == 0 or (target_sort <= max_term_sort)
+            display_label = str(target_term["label"])
         if not measurable:
             continue
 
-        last_milestone_label = str(target_term["label"])
-        milestone_label = _milestone_label(str(target_term["label"]), offset)
+        last_milestone_label = display_label
+        milestone_label = _milestone_label(display_label, offset)
         if offset == 0:
             retained_count = student_count_total
             graduated_count = 0
@@ -670,7 +781,10 @@ def build_persistence_dashboard(
                 .str.strip()
                 .tolist()
             )
-            retained_students = academic_presence_by_term.get(target_sort, set()) - graduated_students
+            if is_total_cohort:
+                retained_students = academic_presence_by_academic_year.get(target_year, set()) - graduated_students
+            else:
+                retained_students = academic_presence_by_term.get(target_sort, set()) - graduated_students
             graduated_count = len(graduated_students)
             retained_count = len(retained_students)
             not_retained_count = max(student_count_total - retained_count - graduated_count, 0)
@@ -683,7 +797,7 @@ def build_persistence_dashboard(
         table_rows.append(
             {
                 "Milestone": f"{offset} Year" if offset else "Cohort Year",
-                "Term": str(target_term["label"]),
+                "Term": display_label,
                 "Retained": (retained_count / student_count_total) if student_count_total else np.nan,
                 "Retained Count": retained_count,
                 "Graduated": (graduated_count / student_count_total) if student_count_total else np.nan,
@@ -719,6 +833,10 @@ def build_persistence_dashboard(
             "distinction": distinction,
             "students": student_count_total,
             "max_milestone": last_milestone_label,
-            "note": "Retained counts show students observed academically in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved.",
+            "note": (
+                "Retained counts show students observed academically in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved."
+                if not is_total_cohort
+                else "Retained counts show students observed academically in either the fall or spring term of that academic year checkpoint. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Students not observed during that academic year remain in Not Retained / Unresolved."
+            ),
         },
     }

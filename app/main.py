@@ -18,7 +18,9 @@ from app.analysis import (
     build_scatter_frame,
     build_summary_time_series,
     filter_options,
+    persistence_checkpoint_sort_value,
     persistence_cohort_options,
+    persistence_cohort_sort_key,
     stakeholder_summary,
     summarize_metric_by_group,
     PERSISTENCE_COUNCIL_OPTIONS,
@@ -104,25 +106,15 @@ def _default_persistence_cohort(cohort_options: List[str], longitudinal: pd.Data
         return cohort_options[-1]
 
     max_observed_sort = int(observed_sort.max())
-    season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
     ranked_options: list[tuple[int, int, str]] = []
     for option in cohort_options:
-        parsed = parse_term_label(option)
-        base_year = parsed["year"]
-        base_season = str(parsed["season"]).lower()
-        season_code = season_codes.get(base_season, "")
-        if base_year is None or not season_code:
-            ranked_options.append((-1, int(parsed["sort_value"]), option))
-            continue
-
         best_offset = -1
         for offset in range(6, -1, -1):
-            target_code = f"{int(base_year) + offset}{season_code}"
-            target_sort = int(parse_term_label(target_code)["sort_value"])
-            if target_sort <= max_observed_sort:
+            target_sort = persistence_checkpoint_sort_value(option, offset)
+            if target_sort is not None and target_sort <= max_observed_sort:
                 best_offset = offset
                 break
-        ranked_options.append((best_offset, int(parsed["sort_value"]), option))
+        ranked_options.append((best_offset, persistence_cohort_sort_key(option), option))
 
     ranked_options.sort(key=lambda item: (item[0], item[1]))
     return ranked_options[-1][2]
