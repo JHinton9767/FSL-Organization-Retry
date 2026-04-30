@@ -12,7 +12,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
-from src.shared_utils import clean_text, coerce_numeric, extract_year_from_text
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN, clean_text, coerce_numeric, extract_year_from_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +78,7 @@ def outcome_score(outcome_bucket: str) -> Tuple[int, str]:
         "Suspended": (8, "Student has a suspension outcome, which makes term-level academic history especially useful."),
         "Transfer": (6, "Transfer-related history is more complex and benefits from fuller academic context."),
         "No Further Observation": (5, "Outcome is unresolved because the student disappears from the observed data."),
+        ROSTER_DISAPPEARED_UNKNOWN: (6, "Chapter-level roster coverage disappears, so fuller academic history can help recover what happened after the chapter stopped appearing."),
         "Active/Unknown": (3, "Outcome is still active or unresolved, so additional history may still matter."),
     }
     return mapping.get(bucket, (2, "Outcome is not clearly classified in the current data."))

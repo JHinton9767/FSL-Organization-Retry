@@ -5,6 +5,7 @@ from app.metrics_engine import ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL,
 from app.models import MetricDefinition
 from app.standardize import standardize_processed_summary
 from app.status_framework import build_outcome_resolution_fields
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN
 
 
 def test_processed_summary_builds_resolved_outcome_flags() -> None:
@@ -196,6 +197,24 @@ def test_alumni_or_undergraduate_text_does_not_create_graduation() -> None:
     assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
     assert result.loc[1, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
     assert bool(result.loc[1, "is_graduated"]) is False
+
+
+def test_roster_disappeared_unknown_is_not_treated_as_still_active() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "latest_outcome_bucket": [ROSTER_DISAPPEARED_UNKNOWN],
+            "latest_roster_status_bucket": ["Active"],
+            "active_flag": ["Yes"],
+            "outcome_evidence_source": ["Chapter roster disappeared from the currently active chapter list; no later explicit student outcome was observed."],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Truly Unknown / Unresolved"
+    assert bool(result.loc[0, "is_unknown_outcome"]) is True
+    assert bool(result.loc[0, "is_active_outcome"]) is False
 
 
 def test_group_summary_can_rank_on_resolved_only_denominator() -> None:

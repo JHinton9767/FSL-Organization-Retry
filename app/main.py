@@ -10,6 +10,7 @@ from app.analysis import (
     apply_longitudinal_filters,
     apply_summary_filters,
     available_dimensions,
+    build_persistence_dashboard,
     build_comparison_table,
     build_controlled_comparison,
     build_distribution_table,
@@ -17,10 +18,12 @@ from app.analysis import (
     build_scatter_frame,
     build_summary_time_series,
     filter_options,
+    persistence_cohort_options,
     stakeholder_summary,
     summarize_metric_by_group,
+    PERSISTENCE_COUNCIL_OPTIONS,
 )
-from app.charts import bar_chart, box_plot, histogram, line_chart, scatter_chart, stacked_bar_chart
+from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_milestone_chart, scatter_chart, stacked_bar_chart
 from app.config_loader import load_metric_catalog, load_settings, load_status_code_map
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
@@ -58,6 +61,143 @@ CURRENT_ACTIVE_DIMENSION_OVERRIDES = {
     "chapter_size_band": "current_active_chapter_size_band",
     "active_membership_group": "current_active_membership_group",
 }
+PERSISTENCE_DEFAULT_DISTINCTION = "ALL"
+
+
+def _persistence_header() -> None:
+    st.markdown(
+        """
+        <style>
+        .txst-persistence-wrap {margin-bottom: 1rem;}
+        .txst-persistence-title {color: #5C1418; font-size: 2.25rem; font-weight: 700; line-height: 1.1; margin-bottom: 0.15rem;}
+        .txst-persistence-subtitle {color: #5C1418; font-size: 1.35rem; font-style: italic; font-weight: 600; margin-bottom: 1rem;}
+        .txst-persistence-rule {display: grid; grid-template-columns: 24% 5% 12% 16% 14% 29%; height: 8px; overflow: hidden; border-radius: 999px; margin-bottom: 1.2rem;}
+        .txst-persistence-rule > span:nth-child(1) {background: #E3A617;}
+        .txst-persistence-rule > span:nth-child(2) {background: #F0D8DA;}
+        .txst-persistence-rule > span:nth-child(3) {background: #E53C5B;}
+        .txst-persistence-rule > span:nth-child(4) {background: #39A56A;}
+        .txst-persistence-rule > span:nth-child(5) {background: #8ED0E5;}
+        .txst-persistence-rule > span:nth-child(6) {background: #0B6C94;}
+        .txst-note {color: #4A4A4A; font-size: 0.96rem;}
+        </style>
+        <div class="txst-persistence-wrap">
+          <div class="txst-persistence-title">Persistence and Graduation</div>
+          <div class="txst-persistence-subtitle">Organization-Entry Cohorts</div>
+          <div class="txst-persistence-rule">
+            <span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _default_persistence_cohort(cohort_options: List[str], longitudinal: pd.DataFrame) -> str:
+    if not cohort_options:
+        return ""
+    if longitudinal.empty or "observed_term" not in longitudinal.columns:
+        return cohort_options[-1]
+
+    observed_sort = longitudinal["observed_term"].map(lambda value: parse_term_label(value)["sort_value"])
+    observed_sort = pd.to_numeric(observed_sort, errors="coerce").dropna()
+    if observed_sort.empty:
+        return cohort_options[-1]
+
+    max_observed_sort = int(observed_sort.max())
+    season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
+    ranked_options: list[tuple[int, int, str]] = []
+    for option in cohort_options:
+        parsed = parse_term_label(option)
+        base_year = parsed["year"]
+        base_season = str(parsed["season"]).lower()
+        season_code = season_codes.get(base_season, "")
+        if base_year is None or not season_code:
+            ranked_options.append((-1, int(parsed["sort_value"]), option))
+            continue
+
+        best_offset = -1
+        for offset in range(6, -1, -1):
+            target_code = f"{int(base_year) + offset}{season_code}"
+            target_sort = int(parse_term_label(target_code)["sort_value"])
+            if target_sort <= max_observed_sort:
+                best_offset = offset
+                break
+        ranked_options.append((best_offset, int(parsed["sort_value"]), option))
+
+    ranked_options.sort(key=lambda item: (item[0], item[1]))
+    return ranked_options[-1][2]
+
+
+def _render_persistence_and_graduation_view(bundle) -> None:
+    summary = bundle.summary.copy()
+    longitudinal = bundle.longitudinal.copy()
+    cohort_options = persistence_cohort_options(summary)
+
+    _persistence_header()
+    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using first observed organization-entry cohorts and confirmed graduation evidence only.")
+
+    if not cohort_options:
+        st.warning("No join-term cohorts were available for the persistence and graduation view.")
+        return
+
+    default_cohort = _default_persistence_cohort(cohort_options, longitudinal)
+    if "persistence_cohort_term" not in st.session_state or st.session_state["persistence_cohort_term"] not in cohort_options:
+        st.session_state["persistence_cohort_term"] = default_cohort or cohort_options[-1]
+    if "persistence_distinction" not in st.session_state:
+        st.session_state["persistence_distinction"] = PERSISTENCE_DEFAULT_DISTINCTION
+
+    filter_cols = st.columns([1.2, 1, 1.2])
+    with filter_cols[0]:
+        cohort_term = st.selectbox("Students entering in", options=cohort_options, key="persistence_cohort_term")
+    with filter_cols[1]:
+        distinction = st.selectbox("Council distinction", options=PERSISTENCE_COUNCIL_OPTIONS, key="persistence_distinction")
+    with filter_cols[2]:
+        st.markdown(
+            """
+            <div class="txst-note">
+            Filters use the configured chapter-to-council mapping and mapped organization type fields.
+            <strong>FRA</strong> and <strong>SOR</strong> come from mapped fraternity/sorority classifications, and <strong>MGC</strong> also accepts legacy <strong>MCG</strong> spellings when they appear in historical data.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    dashboard = build_persistence_dashboard(summary, longitudinal, cohort_term, distinction)
+    cohort_frame = dashboard["cohort"]
+    chart_frame = dashboard["chart_frame"]
+    table_frame = dashboard["table_frame"]
+    meta = dashboard["meta"]
+
+    if cohort_frame.empty:
+        st.warning("No students matched the selected cohort and council distinction.")
+        return
+
+    stat_cols = st.columns(4)
+    with stat_cols[0]:
+        st.metric("Cohort size", f"{int(meta['students']):,}")
+    with stat_cols[1]:
+        st.metric("Selected cohort", str(meta["cohort_term"]))
+    with stat_cols[2]:
+        st.metric("Council view", str(meta["distinction"]))
+    with stat_cols[3]:
+        st.metric("Latest measurable milestone", str(meta["max_milestone"] or "Unknown"))
+
+    title = f"Persistence and Graduation for {cohort_term}"
+    subtitle = (
+        f"{distinction} distinction | Explicit graduation evidence only | Gray segment = not retained or unresolved at that checkpoint"
+    )
+    chart = persistence_milestone_chart(chart_frame, title=title, subtitle=subtitle)
+    st.plotly_chart(chart, use_container_width=True)
+    _save_chart_downloads(chart, f"persistence_graduation_{safe_slug(cohort_term)}_{safe_slug(distinction)}")
+
+    if not table_frame.empty:
+        display_table = table_frame.copy()
+        for percent_col in ["Retained", "Graduated", "Not Retained / Unresolved"]:
+            display_table[percent_col] = display_table[percent_col].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
+        st.dataframe(display_table, use_container_width=True, hide_index=True)
+
+    st.caption(meta["note"])
+    st.caption("Caution: this page uses organization-entry cohorts rather than true first-time-in-college cohorts. It is designed to match the institutional presentation format as closely as the available FSL data allows.")
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
@@ -463,6 +603,17 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
                     ).sum()
                 ),
             },
+            {
+                "Measure": "Roster disappeared / unknown students",
+                "Student Count": int(
+                    summary.get("roster_disappeared_unknown_flag", pd.Series("", index=summary.index, dtype="object"))
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .eq("Yes")
+                    .sum()
+                ),
+            },
         ]
     )
     tables["Classification Audit"] = chapter_unresolved
@@ -559,226 +710,25 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
     return tables
 
 
-def main() -> None:
-    settings = load_settings()
-    metric_catalog = load_metric_catalog()
-    status_code_map = load_status_code_map()
-
-    source_statuses = scan_preloaded_sources()
-    versions = discover_dataset_versions()
-    version = select_default_dataset(versions)
-
-    st.sidebar.title("FSL Analytics")
-    st.sidebar.caption("Interactive chapter, cohort, and campus comparison workspace.")
-    st.sidebar.caption("The app reads pre-positioned local project files on startup.")
-
-    if version is None:
-        _render_startup_failure(
-            "No valid prepared dataset was found in the expected local project folders. "
-            "Run the external prep pipeline, place the finished files in their documented folders, and relaunch the app.",
-            source_statuses,
-        )
-        return
-
-    st.sidebar.caption(f"Auto-loaded dataset: {version.label}")
-
-    try:
-        bundle = load_analysis_bundle(
-            version=version,
-            metric_definitions=metric_catalog,
-            settings=settings,
-            status_code_map=status_code_map,
-        )
-    except Exception as exc:
-        _render_startup_failure(
-            "A prepared dataset was found, but it could not be loaded cleanly. "
-            "Check the generated files, rerun the external prep workflow if needed, and relaunch the app.",
-            source_statuses,
-            detail=f"**Load error:** `{exc}`",
-        )
-        return
-
-    metrics = available_metrics(bundle.metric_definitions, bundle.summary, bundle.longitudinal)
-    if not metrics:
-        st.title("FSL Academic Outcomes Analytics")
-        st.error("No metrics were available for the selected dataset.")
-        return
-
-    dimension_map = available_dimensions(bundle.summary)
-    if not dimension_map:
-        st.title("FSL Academic Outcomes Analytics")
-        st.error("No grouping dimensions were available for the selected dataset.")
-        return
-    _reset_state_for_dataset(version.key, metrics, dimension_map, bundle.summary, bundle.longitudinal, bundle.metadata)
-
-    with st.sidebar.expander("Presets", expanded=False):
-        preset_names = list_presets()
-        preset_name = st.selectbox("Load preset", options=[""] + preset_names)
-        if st.button("Apply preset", use_container_width=True, disabled=not preset_name):
-            _apply_preset(preset_name)
-            st.rerun()
-        save_name = st.text_input("Save current filters as")
-        if st.button("Save preset", use_container_width=True, disabled=not save_name):
-            payload = {
-                "metric_key": st.session_state.get("metric_key"),
-                "group_field": st.session_state.get("group_field"),
-                "compare_field": st.session_state.get("compare_field"),
-                "compare_values": st.session_state.get("compare_values", []),
-                "control_field": st.session_state.get("control_field", "None"),
-                "outcome_population_view": st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL),
-                "filters": _collect_filters(),
-            }
-            path = save_preset(save_name, payload)
-            st.success(f"Saved preset to {path.name}.")
-
-    with st.sidebar.expander("Analysis Setup", expanded=True):
-        metric_key = st.selectbox(
-            "Metric",
-            options=[metric.key for metric in metrics],
-            format_func=lambda key: metric_by_key(metrics, key).display_name,
-            key="metric_key",
-        )
-        metric = metric_by_key(metrics, metric_key)
-        analysis_summary = _analysis_summary_for_metric(bundle.summary, metric)
-        if metric.category.lower() == "graduation":
-            previous_metric = st.session_state.get("_auto_population_metric")
-            if previous_metric != metric_key and st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL) == ALL_STUDENTS_LABEL:
-                st.session_state["outcome_population_view"] = RESOLVED_OUTCOMES_ONLY_LABEL
-            st.session_state["_auto_population_metric"] = metric_key
-        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
-            st.session_state["outcome_population_view"] = ALL_STUDENTS_LABEL
-            st.session_state["_auto_population_metric"] = metric_key
-        group_field = st.selectbox(
-            "Aggregation level",
-            options=list(dimension_map.keys()),
-            format_func=lambda key: dimension_map[key],
-            key="group_field",
-        )
-        compare_field = st.selectbox(
-            "Compare groups by",
-            options=list(dimension_map.keys()),
-            format_func=lambda key: dimension_map[key],
-            key="compare_field",
-        )
-        compare_values = st.multiselect(
-            "Specific groups to compare",
-            options=filter_options(analysis_summary, compare_field),
-            key="compare_values",
-        )
-        control_options = ["None"] + [key for key in dimension_map.keys() if key != compare_field]
-        st.selectbox(
-            "Controlled comparison",
-            options=control_options,
-            format_func=lambda key: "No control" if key == "None" else dimension_map[key],
-            key="control_field",
-        )
-        st.selectbox(
-            "Metric population view",
-            options=[ALL_STUDENTS_LABEL] if metric.key == CURRENT_ACTIVE_METRIC_KEY else [ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
-            key="outcome_population_view",
-        )
-        if metric.category.lower() == "graduation":
-            st.caption("Graduation-focused views default to Resolved Outcomes Only so active and unresolved students do not dominate the ranking.")
-        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
-            st.caption("Current active counts are locked to the most recent roster only and are not recalculated from historical activeness.")
-        max_min_n = int(settings.get("max_min_sample_size", 50))
-        default_min_n = min(int(settings.get("default_min_sample_size", 5)), max_min_n)
-        st.slider("Minimum N", min_value=1, max_value=max_min_n, value=default_min_n, key="min_n")
-        population_options = ["FSL Only", "All Students"]
-        if bundle.metadata.get("available_campus_baseline"):
-            population_options.append("Campus Baseline Only")
-        st.selectbox("Population", options=population_options, key="population")
-
-    with st.sidebar.expander("Filters", expanded=False):
-        join_years = pd.to_numeric(analysis_summary.get("join_year", pd.Series(dtype=float)), errors="coerce").dropna()
-        if not join_years.empty:
-            st.slider(
-                "Join year range",
-                min_value=int(join_years.min()),
-                max_value=int(join_years.max()),
-                value=st.session_state.get("join_year_range", (int(join_years.min()), int(join_years.max()))),
-                key="join_year_range",
-            )
-        grad_years = pd.to_numeric(analysis_summary.get("graduation_year", pd.Series(dtype=float)), errors="coerce").dropna()
-        if not grad_years.empty:
-            st.slider(
-                "Graduation year range",
-                min_value=int(grad_years.min()),
-                max_value=int(grad_years.max()),
-                value=st.session_state.get("graduation_year_range", (int(grad_years.min()), int(grad_years.max()))),
-                key="graduation_year_range",
-            )
-
-        observed_years = pd.to_numeric(bundle.longitudinal.get("observed_year", pd.Series(dtype=float)), errors="coerce").dropna()
-        if not observed_years.empty:
-            st.slider(
-                "Observed year range",
-                min_value=int(observed_years.min()),
-                max_value=int(observed_years.max()),
-                value=st.session_state.get("observed_year_range", (int(observed_years.min()), int(observed_years.max()))),
-                key="observed_year_range",
-            )
-
-        filter_specs = [
-            ("chapters", "chapter", "Chapters"),
-            ("chapter_groups", "chapter_group", "Chapter groups"),
-            ("custom_groups", "custom_group", "Custom groups"),
-            ("councils", "council", "Councils"),
-            ("org_types", "org_type", "Fraternity / Sorority"),
-            ("families", "family", "Organization families"),
-            ("join_terms", "join_term", "Join terms"),
-            ("statuses", "status_group", "Latest statuses"),
-            ("resolved_outcome_groups", "outcome_resolution_group", "Outcome resolution"),
-            ("majors", "major_group", "Majors"),
-            ("pell_groups", "pell_group", "Pell groups"),
-            ("transfer_groups", "transfer_group", "Transfer groups"),
-            ("estimated_join_stages", "estimated_join_stage", "Estimated join stages"),
-            ("high_hours_groups", "high_hours_group", "Hours groups"),
-            ("active_groups", "active_membership_group", "Membership activity"),
-            ("chapter_size_bands", "chapter_size_band", "Chapter size bands"),
-            ("snapshot_groups", "snapshot_group", "Snapshot match status"),
-        ]
-        for state_key, column, label in filter_specs:
-            options = filter_options(analysis_summary, column)
-            if options:
-                st.multiselect(label, options=options, key=state_key)
-
-        observed_terms = filter_options(bundle.longitudinal, "observed_term")
-        if observed_terms:
-            st.multiselect("Observed terms", options=observed_terms, key="observed_terms")
-
-    filters = _collect_filters()
-    filtered_summary = apply_summary_filters(analysis_summary, filters)
-    metric_summary = _metric_frame_for_metric(filtered_summary, metric)
-    filtered_longitudinal = apply_longitudinal_filters(bundle.longitudinal, metric_summary, filters)
-
-    outcome_population_view = st.session_state["outcome_population_view"]
-    metric_views = compute_metric_views(metric_summary, metric)
-    group_summary = summarize_metric_by_group(
-        metric_summary,
-        metric,
-        group_field,
-        st.session_state["min_n"],
-        population_label=outcome_population_view,
-    )
-    comparison_table = build_comparison_table(
-        metric_summary,
-        metric,
-        compare_field,
-        compare_values,
-        st.session_state["min_n"],
-        population_label=outcome_population_view,
-    )
-    controlled_table = build_controlled_comparison(
-        metric_summary,
-        metric,
-        compare_field,
-        compare_values,
-        st.session_state["control_field"],
-        st.session_state["min_n"],
-        population_label=outcome_population_view,
-    ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-
+def _render_advanced_analytics(
+    bundle,
+    source_statuses: List[DataSourceStatus],
+    metric: MetricDefinition,
+    metrics: List[MetricDefinition],
+    settings: Dict[str, object],
+    dimension_map: Dict[str, str],
+    group_field: str,
+    compare_field: str,
+    compare_values: List[str],
+    outcome_population_view: str,
+    filtered_summary: pd.DataFrame,
+    metric_summary: pd.DataFrame,
+    filtered_longitudinal: pd.DataFrame,
+    group_summary: pd.DataFrame,
+    comparison_table: pd.DataFrame,
+    controlled_table: pd.DataFrame,
+    metric_views: dict[str, object],
+) -> None:
     st.title("Fraternity / Sorority Life Academic Outcomes Analytics")
     st.caption(f"Dataset: {bundle.version.label}")
     st.caption("Prepared files are loaded automatically from the local project folders at startup.")
@@ -797,6 +747,7 @@ def main() -> None:
             "Every major table now shows the full-population and resolved-only denominators side by side where practical."
         )
     population_transparency = _render_population_summary(metric, metric_views, filtered_summary if metric.key == CURRENT_ACTIVE_METRIC_KEY else metric_summary)
+    audit_tables = _audit_tables(filtered_summary, bundle)
 
     overview_tab, comparison_tab, ranking_tab, trend_tab, distribution_tab, audit_tab, export_tab, definition_tab = st.tabs(
         ["Overview", "Comparisons", "Rankings", "Trends", "Distributions", "Audit", "Data & Export", "Metric Definitions"]
@@ -1038,7 +989,6 @@ def main() -> None:
     with audit_tab:
         st.subheader("Data quality and denominator audit")
         st.caption("How to read this: these tables separate resolved outcomes, still-active students, and truly unknown students so denominator changes stay visible.")
-        audit_tables = _audit_tables(filtered_summary, bundle)
         for label, frame in audit_tables.items():
             if frame is None or frame.empty:
                 continue
@@ -1085,6 +1035,7 @@ def main() -> None:
                 "graduation_status_without_evidence",
                 "graduation_status_corrected_flag",
                 "graduation_status_correction_reason",
+                "roster_disappeared_unknown_flag",
                 "graduated_eventual",
                 "graduated_eventual_measurable",
                 "graduated_4yr",
@@ -1114,7 +1065,7 @@ def main() -> None:
             "Comparison Table": comparison_table,
             "Controlled Comparison": controlled_table,
             "Filtered Longitudinal": filtered_longitudinal,
-            "Audit Tables": pd.concat(_audit_tables(filtered_summary, bundle).values(), ignore_index=True) if _audit_tables(filtered_summary, bundle) else pd.DataFrame(),
+            "Audit Tables": pd.concat(audit_tables.values(), ignore_index=True) if audit_tables else pd.DataFrame(),
         }
         csv_col, xlsx_col = st.columns(2)
         with csv_col:
@@ -1178,6 +1129,252 @@ def main() -> None:
         if "snapshot_merge_qa" in bundle.tables:
             st.subheader("Snapshot merge QA table")
             st.dataframe(bundle.tables["snapshot_merge_qa"], use_container_width=True, hide_index=True)
+
+
+def main() -> None:
+    settings = load_settings()
+    metric_catalog = load_metric_catalog()
+    status_code_map = load_status_code_map()
+
+    source_statuses = scan_preloaded_sources()
+    versions = discover_dataset_versions()
+    version = select_default_dataset(versions)
+
+    st.sidebar.title("FSL Analytics")
+    st.sidebar.caption("Persistence and graduation landing page with advanced chapter, cohort, and campus analytics behind it.")
+    st.sidebar.caption("The app reads pre-positioned local project files on startup.")
+
+    if version is None:
+        _render_startup_failure(
+            "No valid prepared dataset was found in the expected local project folders. "
+            "Run the external prep pipeline, place the finished files in their documented folders, and relaunch the app.",
+            source_statuses,
+        )
+        return
+
+    st.sidebar.caption(f"Auto-loaded dataset: {version.label}")
+
+    try:
+        bundle = load_analysis_bundle(
+            version=version,
+            metric_definitions=metric_catalog,
+            settings=settings,
+            status_code_map=status_code_map,
+        )
+    except Exception as exc:
+        _render_startup_failure(
+            "A prepared dataset was found, but it could not be loaded cleanly. "
+            "Check the generated files, rerun the external prep workflow if needed, and relaunch the app.",
+            source_statuses,
+            detail=f"**Load error:** `{exc}`",
+        )
+        return
+
+    metrics = available_metrics(bundle.metric_definitions, bundle.summary, bundle.longitudinal)
+    if not metrics:
+        st.title("FSL Academic Outcomes Analytics")
+        st.error("No metrics were available for the selected dataset.")
+        return
+
+    dimension_map = available_dimensions(bundle.summary)
+    if not dimension_map:
+        st.title("FSL Academic Outcomes Analytics")
+        st.error("No grouping dimensions were available for the selected dataset.")
+        return
+    _reset_state_for_dataset(version.key, metrics, dimension_map, bundle.summary, bundle.longitudinal, bundle.metadata)
+
+    with st.sidebar.expander("Presets", expanded=False):
+        preset_names = list_presets()
+        preset_name = st.selectbox("Load preset", options=[""] + preset_names)
+        if st.button("Apply preset", use_container_width=True, disabled=not preset_name):
+            _apply_preset(preset_name)
+            st.rerun()
+        save_name = st.text_input("Save current filters as")
+        if st.button("Save preset", use_container_width=True, disabled=not save_name):
+            payload = {
+                "metric_key": st.session_state.get("metric_key"),
+                "group_field": st.session_state.get("group_field"),
+                "compare_field": st.session_state.get("compare_field"),
+                "compare_values": st.session_state.get("compare_values", []),
+                "control_field": st.session_state.get("control_field", "None"),
+                "outcome_population_view": st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL),
+                "filters": _collect_filters(),
+            }
+            path = save_preset(save_name, payload)
+            st.success(f"Saved preset to {path.name}.")
+
+    with st.sidebar.expander("Advanced Analysis Setup", expanded=False):
+        metric_key = st.selectbox(
+            "Metric",
+            options=[metric.key for metric in metrics],
+            format_func=lambda key: metric_by_key(metrics, key).display_name,
+            key="metric_key",
+        )
+        metric = metric_by_key(metrics, metric_key)
+        analysis_summary = _analysis_summary_for_metric(bundle.summary, metric)
+        if metric.category.lower() == "graduation":
+            previous_metric = st.session_state.get("_auto_population_metric")
+            if previous_metric != metric_key and st.session_state.get("outcome_population_view", ALL_STUDENTS_LABEL) == ALL_STUDENTS_LABEL:
+                st.session_state["outcome_population_view"] = RESOLVED_OUTCOMES_ONLY_LABEL
+            st.session_state["_auto_population_metric"] = metric_key
+        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
+            st.session_state["outcome_population_view"] = ALL_STUDENTS_LABEL
+            st.session_state["_auto_population_metric"] = metric_key
+        group_field = st.selectbox(
+            "Aggregation level",
+            options=list(dimension_map.keys()),
+            format_func=lambda key: dimension_map[key],
+            key="group_field",
+        )
+        compare_field = st.selectbox(
+            "Compare groups by",
+            options=list(dimension_map.keys()),
+            format_func=lambda key: dimension_map[key],
+            key="compare_field",
+        )
+        compare_values = st.multiselect(
+            "Specific groups to compare",
+            options=filter_options(analysis_summary, compare_field),
+            key="compare_values",
+        )
+        control_options = ["None"] + [key for key in dimension_map.keys() if key != compare_field]
+        st.selectbox(
+            "Controlled comparison",
+            options=control_options,
+            format_func=lambda key: "No control" if key == "None" else dimension_map[key],
+            key="control_field",
+        )
+        st.selectbox(
+            "Metric population view",
+            options=[ALL_STUDENTS_LABEL] if metric.key == CURRENT_ACTIVE_METRIC_KEY else [ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL],
+            key="outcome_population_view",
+        )
+        if metric.category.lower() == "graduation":
+            st.caption("Graduation-focused views default to Resolved Outcomes Only so active and unresolved students do not dominate the ranking.")
+        elif metric.key == CURRENT_ACTIVE_METRIC_KEY:
+            st.caption("Current active counts are locked to the most recent roster only and are not recalculated from historical activeness.")
+        max_min_n = int(settings.get("max_min_sample_size", 50))
+        default_min_n = min(int(settings.get("default_min_sample_size", 5)), max_min_n)
+        st.slider("Minimum N", min_value=1, max_value=max_min_n, value=default_min_n, key="min_n")
+        population_options = ["FSL Only", "All Students"]
+        if bundle.metadata.get("available_campus_baseline"):
+            population_options.append("Campus Baseline Only")
+        st.selectbox("Population", options=population_options, key="population")
+
+    with st.sidebar.expander("Filters", expanded=False):
+        join_years = pd.to_numeric(analysis_summary.get("join_year", pd.Series(dtype=float)), errors="coerce").dropna()
+        if not join_years.empty:
+            st.slider(
+                "Join year range",
+                min_value=int(join_years.min()),
+                max_value=int(join_years.max()),
+                value=st.session_state.get("join_year_range", (int(join_years.min()), int(join_years.max()))),
+                key="join_year_range",
+            )
+        grad_years = pd.to_numeric(analysis_summary.get("graduation_year", pd.Series(dtype=float)), errors="coerce").dropna()
+        if not grad_years.empty:
+            st.slider(
+                "Graduation year range",
+                min_value=int(grad_years.min()),
+                max_value=int(grad_years.max()),
+                value=st.session_state.get("graduation_year_range", (int(grad_years.min()), int(grad_years.max()))),
+                key="graduation_year_range",
+            )
+
+        observed_years = pd.to_numeric(bundle.longitudinal.get("observed_year", pd.Series(dtype=float)), errors="coerce").dropna()
+        if not observed_years.empty:
+            st.slider(
+                "Observed year range",
+                min_value=int(observed_years.min()),
+                max_value=int(observed_years.max()),
+                value=st.session_state.get("observed_year_range", (int(observed_years.min()), int(observed_years.max()))),
+                key="observed_year_range",
+            )
+
+        filter_specs = [
+            ("chapters", "chapter", "Chapters"),
+            ("chapter_groups", "chapter_group", "Chapter groups"),
+            ("custom_groups", "custom_group", "Custom groups"),
+            ("councils", "council", "Councils"),
+            ("org_types", "org_type", "Fraternity / Sorority"),
+            ("families", "family", "Organization families"),
+            ("join_terms", "join_term", "Join terms"),
+            ("statuses", "status_group", "Latest statuses"),
+            ("resolved_outcome_groups", "outcome_resolution_group", "Outcome resolution"),
+            ("majors", "major_group", "Majors"),
+            ("pell_groups", "pell_group", "Pell groups"),
+            ("transfer_groups", "transfer_group", "Transfer groups"),
+            ("estimated_join_stages", "estimated_join_stage", "Estimated join stages"),
+            ("high_hours_groups", "high_hours_group", "Hours groups"),
+            ("active_groups", "active_membership_group", "Membership activity"),
+            ("chapter_size_bands", "chapter_size_band", "Chapter size bands"),
+            ("snapshot_groups", "snapshot_group", "Snapshot match status"),
+        ]
+        for state_key, column, label in filter_specs:
+            options = filter_options(analysis_summary, column)
+            if options:
+                st.multiselect(label, options=options, key=state_key)
+
+        observed_terms = filter_options(bundle.longitudinal, "observed_term")
+        if observed_terms:
+            st.multiselect("Observed terms", options=observed_terms, key="observed_terms")
+
+    filters = _collect_filters()
+    filtered_summary = apply_summary_filters(analysis_summary, filters)
+    metric_summary = _metric_frame_for_metric(filtered_summary, metric)
+    filtered_longitudinal = apply_longitudinal_filters(bundle.longitudinal, metric_summary, filters)
+
+    outcome_population_view = st.session_state["outcome_population_view"]
+    metric_views = compute_metric_views(metric_summary, metric)
+    group_summary = summarize_metric_by_group(
+        metric_summary,
+        metric,
+        group_field,
+        st.session_state["min_n"],
+        population_label=outcome_population_view,
+    )
+    comparison_table = build_comparison_table(
+        metric_summary,
+        metric,
+        compare_field,
+        compare_values,
+        st.session_state["min_n"],
+        population_label=outcome_population_view,
+    )
+    controlled_table = build_controlled_comparison(
+        metric_summary,
+        metric,
+        compare_field,
+        compare_values,
+        st.session_state["control_field"],
+        st.session_state["min_n"],
+        population_label=outcome_population_view,
+    ) if st.session_state["control_field"] != "None" else pd.DataFrame()
+    landing_tab, advanced_tab = st.tabs(["Persistence & Graduation", "Advanced Analytics"])
+
+    with landing_tab:
+        _render_persistence_and_graduation_view(bundle)
+
+    with advanced_tab:
+        _render_advanced_analytics(
+            bundle=bundle,
+            source_statuses=source_statuses,
+            metric=metric,
+            metrics=metrics,
+            settings=settings,
+            dimension_map=dimension_map,
+            group_field=group_field,
+            compare_field=compare_field,
+            compare_values=compare_values,
+            outcome_population_view=outcome_population_view,
+            filtered_summary=filtered_summary,
+            metric_summary=metric_summary,
+            filtered_longitudinal=filtered_longitudinal,
+            group_summary=group_summary,
+            comparison_table=comparison_table,
+            controlled_table=controlled_table,
+            metric_views=metric_views,
+        )
 
 
 if __name__ == "__main__":

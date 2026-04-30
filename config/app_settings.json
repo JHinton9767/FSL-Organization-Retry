@@ -90,7 +90,11 @@
         "\\bUNMAPPED\\b",
         "\\bNO OUTCOME\\b",
         "\\bNO FURTHER OBSERVATION\\b",
-        "\\bACTIVE\\/UNKNOWN\\b"
+        "\\bACTIVE\\/UNKNOWN\\b",
+        "\\bROSTER DISAPPEARED\\/UNKNOWN\\b",
+        "\\bROSTER DISSAPEARED\\/UNKNOWN\\b",
+        "\\bROSTER DISAPPEARED\\b",
+        "\\bROSTER DISSAPEARED\\b"
       ],
       "Other / Unmapped": []
     },

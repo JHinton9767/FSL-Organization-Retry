@@ -6,6 +6,7 @@ from typing import Any, Dict
 import pandas as pd
 
 from app.io_utils import normalize_text
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN
 
 
 ALL_STUDENTS_LABEL = "All Students"
@@ -79,6 +80,10 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
             r"\bNO OUTCOME\b",
             r"\bNO FURTHER OBSERVATION\b",
             r"\bACTIVE\/UNKNOWN\b",
+            r"\bROSTER DISAPPEARED\/UNKNOWN\b",
+            r"\bROSTER DISSAPEARED\/UNKNOWN\b",
+            r"\bROSTER DISAPPEARED\b",
+            r"\bROSTER DISSAPEARED\b",
         ],
         OTHER_UNMAPPED_GROUP: [],
     },
@@ -256,10 +261,12 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
     active_hints = _bool_like_series(active_series)
     graduation_evidence = confirmed_graduation_evidence_mask(frame)
     graduation_claim = graduation_claim_mask(frame, merged)
+    roster_disappeared_unknown = outcome_series.fillna("").astype(str).str.strip().eq(ROSTER_DISAPPEARED_UNKNOWN)
     if "outcome_evidence_source" in frame.columns:
         active_hints = active_hints | frame["outcome_evidence_source"].fillna("").astype(str).str.contains("current or active signal only", case=False, na=False)
     if "latest_snapshot_student_status" in frame.columns:
         active_hints = active_hints | frame["latest_snapshot_student_status"].fillna("").astype(str).str.contains(r"active|current|enrolled", case=False, na=False)
+    active_hints = active_hints & ~roster_disappeared_unknown.fillna(False)
 
     groups = pd.Series(
         [
@@ -281,6 +288,7 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
         ).fillna(False).any(axis=1) & graduation_evidence
         groups = groups.where(~graduated_mask, GRADUATED_GROUP)
     groups = groups.where(~(groups.eq(GRADUATED_GROUP) & ~graduation_evidence), TRULY_UNKNOWN_GROUP)
+    groups = groups.where(~roster_disappeared_unknown.fillna(False), TRULY_UNKNOWN_GROUP)
 
     excluded_groups = set(merged["resolved_only_excluded_groups"])
     included = ~groups.isin(excluded_groups)

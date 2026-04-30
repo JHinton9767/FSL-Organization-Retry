@@ -18,6 +18,7 @@ from app.standardize import (
     standardize_processed_summary,
     standardize_snapshot_summary,
 )
+from src.shared_utils import apply_chapter_mapping_overrides
 from src.enhanced_bundle import DEFAULT_ENHANCED_ROOT, load_latest_bundle
 from src.greek_life_pipeline import (
     build_alias_lookup,
@@ -393,6 +394,15 @@ def load_analysis_bundle(
     if bundle_kind == "canonical":
         summary = tables["student_summary"].copy()
         longitudinal = tables.get("master_longitudinal", pd.DataFrame()).copy()
+        if not chapter_mapping.empty:
+            summary = apply_chapter_mapping_overrides(summary, chapter_mapping, chapter_column="chapter")
+            summary = apply_chapter_mapping_overrides(
+                summary,
+                chapter_mapping,
+                chapter_column="current_active_chapter",
+                output_prefix="current_active_",
+            )
+            notes.append("Applied configured chapter-to-council and org-type overrides to the canonical bundle.")
     elif bundle_kind == "current_snapshot":
         raw_summary = tables["snapshot_augmented_student_summary"].copy()
         raw_longitudinal = tables.get("master_longitudinal", pd.DataFrame())

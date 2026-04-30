@@ -11,7 +11,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
-from src.shared_utils import clean_text
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN, clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,7 +103,7 @@ def classify_population(summary: pd.DataFrame) -> pd.DataFrame:
         is_unknown = result["is_unknown_outcome"].map(bool_like)
     else:
         is_unknown = result["outcome_resolution_group"].eq(UNKNOWN_OUTCOME_GROUP) | result["latest_outcome_bucket"].isin(
-            ["No Further Observation", "Unknown", "Active/Unknown"]
+            ["No Further Observation", "Unknown", "Active/Unknown", ROSTER_DISAPPEARED_UNKNOWN]
         )
 
     if "is_active_outcome" in result.columns:

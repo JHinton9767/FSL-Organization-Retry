@@ -3,7 +3,13 @@ from pathlib import Path
 import pandas as pd
 
 from app.standardize import standardize_processed_summary
-from src.build_canonical_pipeline import build_current_active_fields, roster_file_version_details, roster_status_bucket
+from src.build_canonical_pipeline import (
+    build_current_active_fields,
+    roster_file_version_details,
+    roster_status_bucket,
+    should_mark_roster_disappeared_unknown,
+)
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN
 from src.build_master_roster import (
     build_individual_new_member_form_lookup,
     chapter_from_filename,
@@ -166,6 +172,55 @@ def test_processed_summary_does_not_treat_single_letter_g_inside_longer_text_as_
     assert standardized.loc[0, "latest_outcome_bucket"] != "Graduated"
 
 
+def test_processed_summary_matches_official_chapter_mapping_names_to_short_chapter_values() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "first_name": ["Alex"],
+            "last_name": ["Lee"],
+            "chapter": ["Alpha Phi Alpha"],
+            "join_term": ["Fall 2021"],
+            "latest_membership_status": ["ACTIVE"],
+            "major": ["Biology"],
+            "pell_flag": ["Yes"],
+            "cohort": ["FTFT"],
+            "total_earned": [45],
+            "avg_term_gpa": [3.1],
+            "latest_gpa_cum": [3.2],
+            "graduated": [False],
+            "graduated_4yr": [False],
+            "graduated_6yr": [False],
+            "first_term": ["Fall 2021"],
+            "first_term_sort": [20213],
+            "last_term_sort": [20223],
+        }
+    )
+
+    standardized = standardize_processed_summary(
+        summary=summary,
+        chapter_mapping=pd.DataFrame(
+            {
+                "chapter": ["Alpha Phi Alpha Fraternity, Inc."],
+                "chapter_group": ["Alpha Phi Alpha"],
+                "council": ["MGC"],
+                "org_type": ["Fraternity"],
+                "family": ["MGC"],
+                "custom_group": [""],
+            }
+        ),
+        settings={
+            "high_hours_threshold": 60,
+            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
+            "completeness_fields": ["student_id", "chapter", "join_term"],
+        },
+        status_code_map={"active": ["ACTIVE"], "transfer": [], "graduated": ["GRADUATED"], "inactive": [], "suspended": []},
+    )
+
+    assert standardized.loc[0, "council"] == "MGC"
+    assert standardized.loc[0, "org_type"] == "Fraternity"
+    assert standardized.loc[0, "family"] == "MGC"
+
+
 def test_infer_chapter_uses_parent_chapter_folder_before_council_or_final_folders() -> None:
     path = Path(r"Copy of Rosters\Spring 2026\IFC\Final\Alpha Sigma Phi\roster.xlsx")
 
@@ -211,6 +266,61 @@ def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:
 
     assert result.loc[0, "current_active_flag"] == "Yes"
     assert result.loc[0, "current_active_source_file"].endswith(".xlsx")
+
+
+def test_current_active_fields_match_short_chapter_to_official_mapping_name() -> None:
+    summary = pd.DataFrame({"student_id": ["1"]})
+    roster = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "term_code": ["2026SP"],
+            "org_status_bucket": ["Active"],
+            "chapter": ["Kappa Delta Chi"],
+            "source_file": ["Copy of Rosters/Spring 2026/NPHC/Final/Kappa Delta Chi/roster.xlsx"],
+            "source_sheet": ["Members"],
+        }
+    )
+    chapter_mapping = pd.DataFrame(
+        {
+            "chapter": ["Kappa Delta Chi, Sorority, Inc."],
+            "chapter_group": ["Kappa Delta Chi"],
+            "council": ["NPHC"],
+            "org_type": ["Sorority"],
+            "family": ["NPHC"],
+            "custom_group": [""],
+        }
+    )
+
+    result = build_current_active_fields(
+        summary,
+        roster,
+        chapter_mapping,
+        settings={"chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}]},
+    )
+
+    assert result.loc[0, "current_active_flag"] == "Yes"
+    assert result.loc[0, "current_active_council"] == "NPHC"
+    assert result.loc[0, "current_active_org_type"] == "Sorority"
+
+
+def test_roster_disappeared_unknown_applies_to_non_current_chapter_with_unresolved_outcome() -> None:
+    current_active_keys = {"alpha sigma phi", "chi omega"}
+    chapter_last_roster_sort = {"legacy chapter": 20223, "alpha sigma phi": 20263}
+
+    assert should_mark_roster_disappeared_unknown(
+        "Unknown",
+        "Legacy Chapter",
+        current_active_keys,
+        chapter_last_roster_sort,
+        20263,
+    )
+    assert not should_mark_roster_disappeared_unknown(
+        ROSTER_DISAPPEARED_UNKNOWN,
+        "Alpha Sigma Phi",
+        current_active_keys,
+        chapter_last_roster_sort,
+        20263,
+    )
 
 
 def test_source_context_indicates_new_member_for_new_member_titled_sheet() -> None:

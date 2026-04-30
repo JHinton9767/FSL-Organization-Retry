@@ -12,13 +12,13 @@ from openpyxl import Workbook
 
 from src.excel_utils import autosize_columns, style_header
 from src.enhanced_bundle import DEFAULT_ENHANCED_ROOT, load_latest_bundle
-from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric, mean_or_blank, yes_mask
+from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN, bucket_30_hours, clean_text, coerce_numeric, mean_or_blank, yes_mask
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SNAPSHOT_ROOT = ROOT / "data" / "inbox" / "academic"
 DEFAULT_OUTPUT_ROOT = ROOT / "output" / "current_snapshot_metrics"
-UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ""}
+UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ROSTER_DISAPPEARED_UNKNOWN, ""}
 SNAPSHOT_REQUIRED_COLUMNS = {"Student ID", "First Name", "Last Name"}
 
 SNAPSHOT_ALIAS_GROUPS = {
@@ -354,6 +354,8 @@ def merge_augmented_summary(summary: pd.DataFrame, longitudinal: pd.DataFrame, s
         existing = clean_text(row.get("Latest Known Outcome Bucket"))
         if existing not in UNRESOLVED_OUTCOMES:
             return existing
+        if existing == ROSTER_DISAPPEARED_UNKNOWN:
+            return existing
         snapshot_bucket = clean_text(row.get("Snapshot Explicit Outcome Bucket"))
         if snapshot_bucket in {"Suspended", "Transfer", "Dropped/Resigned/Revoked/Inactive"}:
             return snapshot_bucket
@@ -518,7 +520,7 @@ def build_qa_table(summary: pd.DataFrame, snapshot: pd.DataFrame) -> pd.DataFram
             [
                 "Unresolved outcomes before snapshot augmentation",
                 unresolved_before,
-                "Count of Active/Unknown, No Further Observation, Unknown, or blank outcomes in the original summary.",
+                "Count of Active/Unknown, No Further Observation, Roster Dissapeared/Unknown, Unknown, or blank outcomes in the original summary.",
             ],
             [
                 "Unresolved outcomes after snapshot augmentation",

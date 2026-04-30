@@ -5,6 +5,7 @@ from typing import Dict, Iterable, Optional
 import numpy as np
 import pandas as pd
 
+from app.io_utils import parse_term_label
 from app.metrics_engine import (
     ALL_STUDENTS_LABEL,
     RESOLVED_OUTCOMES_ONLY_LABEL,
@@ -37,6 +38,8 @@ DIMENSION_LABELS = {
     "snapshot_group": "Snapshot Match Status",
     "outcome_resolution_group": "Outcome Resolution Group",
 }
+
+PERSISTENCE_COUNCIL_OPTIONS = ["ALL", "IFC", "PHC", "NPHC", "MGC", "FRA", "SOR"]
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -473,3 +476,249 @@ def stakeholder_summary(ranked_table: pd.DataFrame, metric: MetricDefinition, po
         f"Lowest {metric.display_name.lower()} ({population_label.lower()}): {lowest['Group']} ({low_value}).",
     ]
     return notes
+
+
+def persistence_cohort_options(summary: pd.DataFrame) -> list[str]:
+    if summary.empty or "join_term" not in summary.columns:
+        return []
+    values = (
+        summary["join_term"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    return sorted(values, key=lambda value: parse_term_label(value)["sort_value"])
+
+
+def _normalized_council_series(frame: pd.DataFrame) -> pd.Series:
+    if "council" not in frame.columns:
+        return pd.Series("Unknown", index=frame.index, dtype="object")
+    return (
+        frame["council"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .replace({"MCG": "MGC", "": "Unknown"})
+    )
+
+
+def _normalized_org_type_series(frame: pd.DataFrame) -> pd.Series:
+    if "org_type" not in frame.columns:
+        return pd.Series("Unknown", index=frame.index, dtype="object")
+    lowered = frame["org_type"].fillna("").astype(str).str.strip().str.lower()
+    result = pd.Series("Unknown", index=frame.index, dtype="object")
+    result = result.where(~lowered.str.contains("fraternity", na=False), "FRA")
+    result = result.where(~lowered.str.contains("sorority", na=False), "SOR")
+    return result
+
+
+def filter_persistence_population(summary: pd.DataFrame, cohort_term: str, distinction: str = "ALL") -> pd.DataFrame:
+    if summary.empty or "join_term" not in summary.columns:
+        return pd.DataFrame(columns=summary.columns)
+
+    frame = summary.loc[
+        summary["join_term"].fillna("").astype(str).str.strip().eq(str(cohort_term).strip())
+    ].copy()
+    if frame.empty:
+        return frame
+
+    distinction_clean = str(distinction or "ALL").strip().upper()
+    council_series = _normalized_council_series(frame)
+    org_type_series = _normalized_org_type_series(frame)
+    frame["persistence_council_distinction"] = council_series
+    frame["persistence_orgtype_distinction"] = org_type_series
+
+    if distinction_clean == "ALL":
+        return frame.reset_index(drop=True)
+    if distinction_clean in {"FRA", "SOR"}:
+        return frame.loc[org_type_series.eq(distinction_clean)].reset_index(drop=True)
+    return frame.loc[council_series.eq(distinction_clean)].reset_index(drop=True)
+
+
+def _milestone_label(base_label: str, offset: int) -> str:
+    if offset == 0:
+        return f"Cohort Year<br>{base_label}"
+    if offset == 1:
+        return f"1 Year<br>{base_label}"
+    if offset in {4, 6}:
+        return f"{offset} Year<br>{base_label}"
+    return base_label.replace(" ", "<br>", 1)
+
+
+def build_persistence_dashboard(
+    summary: pd.DataFrame,
+    longitudinal: pd.DataFrame,
+    cohort_term: str,
+    distinction: str = "ALL",
+) -> dict[str, object]:
+    cohort = filter_persistence_population(summary, cohort_term, distinction)
+    empty = {
+        "cohort": cohort,
+        "chart_frame": pd.DataFrame(columns=["Milestone", "Milestone Sort", "Outcome", "Share", "Count", "Label"]),
+        "table_frame": pd.DataFrame(columns=["Milestone", "Term", "Retained", "Retained Count", "Graduated", "Graduated Count", "Not Retained / Unresolved", "Not Retained / Unresolved Count"]),
+        "meta": {
+            "cohort_term": cohort_term,
+            "distinction": distinction,
+            "students": int(len(cohort)),
+            "max_milestone": "",
+            "note": "No students matched the current cohort and distinction.",
+        },
+    }
+    if cohort.empty:
+        return empty
+
+    cohort_term_parts = parse_term_label(cohort_term)
+    base_year = cohort_term_parts["year"]
+    base_season = str(cohort_term_parts["season"]).lower()
+    season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
+    season_code = season_codes.get(base_season, "")
+    if base_year is None or not season_code:
+        empty["meta"]["note"] = "The selected cohort term could not be parsed into milestone checkpoints."
+        return empty
+
+    student_ids = (
+        cohort["student_id"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .tolist()
+    )
+    if not student_ids:
+        empty["meta"]["note"] = "The selected cohort does not contain usable student identifiers."
+        return empty
+
+    long_frame = longitudinal.copy()
+    if long_frame.empty or "student_id" not in long_frame.columns:
+        empty["meta"]["note"] = "Longitudinal academic data is not available for milestone calculations."
+        return empty
+
+    long_frame["student_id"] = long_frame["student_id"].fillna("").astype(str).str.strip()
+    long_frame = long_frame.loc[long_frame["student_id"].isin(student_ids)].copy()
+    if long_frame.empty:
+        empty["meta"]["note"] = "No longitudinal rows matched the selected cohort."
+        return empty
+
+    if "observed_term_sort" not in long_frame.columns:
+        if "observed_term" in long_frame.columns:
+            long_frame["observed_term_sort"] = long_frame["observed_term"].map(lambda value: parse_term_label(value)["sort_value"])
+        else:
+            long_frame["observed_term_sort"] = 999999
+
+    academic_mask = (
+        long_frame.get("academic_present", pd.Series(False, index=long_frame.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"yes", "true", "1"})
+    )
+    academic_rows = long_frame.loc[academic_mask].copy()
+    if academic_rows.empty:
+        empty["meta"]["note"] = "No academic-present longitudinal rows matched the selected cohort."
+        return empty
+
+    academic_presence_by_term = {
+        int(term_sort): set(group["student_id"].tolist())
+        for term_sort, group in academic_rows.groupby("observed_term_sort", dropna=False)
+        if pd.notna(term_sort)
+    }
+    max_term_sort = int(pd.to_numeric(academic_rows["observed_term_sort"], errors="coerce").dropna().max()) if not academic_rows.empty else 0
+
+    cohort_work = cohort.copy()
+    cohort_work["student_id"] = cohort_work["student_id"].fillna("").astype(str).str.strip()
+    cohort_work["graduation_sort"] = cohort_work.get("graduation_term", pd.Series("", index=cohort_work.index)).map(
+        lambda value: parse_term_label(value)["sort_value"] if str(value).strip() else 999999
+    )
+    if "graduation_term_code" in cohort_work.columns:
+        alt_sort = cohort_work["graduation_term_code"].map(lambda value: parse_term_label(value)["sort_value"] if str(value).strip() else 999999)
+        cohort_work["graduation_sort"] = cohort_work["graduation_sort"].where(cohort_work["graduation_sort"].lt(999999), alt_sort)
+    graduated_mask = cohort_work.get("is_graduated", pd.Series(False, index=cohort_work.index)).fillna(False).astype(bool)
+    cohort_work["graduation_sort"] = cohort_work["graduation_sort"].where(graduated_mask, 999999)
+
+    chart_rows: list[dict[str, object]] = []
+    table_rows: list[dict[str, object]] = []
+    student_count_total = int(cohort_work["student_id"].nunique())
+    last_milestone_label = ""
+
+    for offset in range(0, 7):
+        target_year = int(base_year) + offset
+        target_code = f"{target_year}{season_code}"
+        target_term = parse_term_label(target_code)
+        target_sort = int(target_term["sort_value"])
+        measurable = offset == 0 or (target_sort <= max_term_sort)
+        if not measurable:
+            continue
+
+        last_milestone_label = str(target_term["label"])
+        milestone_label = _milestone_label(str(target_term["label"]), offset)
+        if offset == 0:
+            retained_count = student_count_total
+            graduated_count = 0
+            not_retained_count = 0
+        else:
+            graduated_students = set(
+                cohort_work.loc[cohort_work["graduation_sort"].le(target_sort), "student_id"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+            retained_students = academic_presence_by_term.get(target_sort, set()) - graduated_students
+            graduated_count = len(graduated_students)
+            retained_count = len(retained_students)
+            not_retained_count = max(student_count_total - retained_count - graduated_count, 0)
+
+        milestone_counts = {
+            "Retained": retained_count,
+            "Graduated": graduated_count,
+            "Not Retained / Unresolved": not_retained_count,
+        }
+        table_rows.append(
+            {
+                "Milestone": f"{offset} Year" if offset else "Cohort Year",
+                "Term": str(target_term["label"]),
+                "Retained": (retained_count / student_count_total) if student_count_total else np.nan,
+                "Retained Count": retained_count,
+                "Graduated": (graduated_count / student_count_total) if student_count_total else np.nan,
+                "Graduated Count": graduated_count,
+                "Not Retained / Unresolved": (not_retained_count / student_count_total) if student_count_total else np.nan,
+                "Not Retained / Unresolved Count": not_retained_count,
+            }
+        )
+        for outcome, count in milestone_counts.items():
+            share = (count / student_count_total) if student_count_total else np.nan
+            label = ""
+            if count > 0 and share >= 0.085:
+                label = f"{outcome}<br>{share:.1%}<br>(n={count:,})"
+            chart_rows.append(
+                {
+                    "Milestone": milestone_label,
+                    "Milestone Sort": offset,
+                    "Outcome": outcome,
+                    "Share": share,
+                    "Count": count,
+                    "Label": label,
+                }
+            )
+
+    chart_frame = pd.DataFrame(chart_rows)
+    table_frame = pd.DataFrame(table_rows)
+    return {
+        "cohort": cohort_work.reset_index(drop=True),
+        "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
+        "table_frame": table_frame.reset_index(drop=True),
+        "meta": {
+            "cohort_term": cohort_term,
+            "distinction": distinction,
+            "students": student_count_total,
+            "max_milestone": last_milestone_label,
+            "note": "Retained counts show students observed academically in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved.",
+        },
+    }

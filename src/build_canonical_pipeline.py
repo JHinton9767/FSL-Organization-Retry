@@ -52,7 +52,15 @@ from src.build_master_roster import (
     source_context_indicates_new_member,
     should_upgrade_to_new_member_status,
 )
-from src.shared_utils import bucket_30_hours, clean_text, coerce_numeric
+from src.shared_utils import (
+    apply_chapter_mapping_overrides,
+    bucket_30_hours,
+    chapter_key_series,
+    clean_text,
+    coerce_numeric,
+    normalize_chapter_key,
+    ROSTER_DISAPPEARED_UNKNOWN,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -92,7 +100,7 @@ MONTH_PATTERNS = [
 ]
 SEASON_ORDER = {"WI": 0, "SP": 1, "SU": 2, "FA": 3}
 SEASON_NAME = {"WI": "Winter", "SP": "Spring", "SU": "Summer", "FA": "Fall"}
-UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ""}
+UNRESOLVED_OUTCOMES = {"Active/Unknown", "No Further Observation", "Unknown", ROSTER_DISAPPEARED_UNKNOWN, ""}
 
 SNAPSHOT_ALIAS_GROUPS = {
     "Student ID": {"student id", "banner id", "banner", "student number", "PLID", "plid"},
@@ -1291,9 +1299,15 @@ def compute_pipeline_gpa_benchmarks(master: pd.DataFrame, chapter_mapping: pd.Da
 
     mapping = chapter_mapping.copy()
     if not mapping.empty and "chapter" in mapping.columns:
-        mapping["chapter"] = mapping["chapter"].fillna("").astype(str).str.strip()
+        mapping["_chapter_key"] = chapter_key_series(mapping["chapter"])
+        mapping = mapping.loc[mapping["_chapter_key"].ne("")].copy()
         mapping["org_type"] = mapping.get("org_type", "").astype(str) if "org_type" in mapping.columns else ""
-        base = base.merge(mapping[["chapter", "org_type"]].drop_duplicates(subset=["chapter"]), on="chapter", how="left")
+        base["_chapter_key"] = chapter_key_series(base["chapter"])
+        base = base.merge(
+            mapping[["_chapter_key", "org_type"]].drop_duplicates(subset=["_chapter_key"]),
+            on="_chapter_key",
+            how="left",
+        ).drop(columns=["_chapter_key"])
     else:
         base["org_type"] = ""
 
@@ -3494,6 +3508,24 @@ def explicit_exit_reason(latest_outcome_bucket: str, latest_status_bucket: str) 
     return ""
 
 
+def should_mark_roster_disappeared_unknown(
+    latest_outcome_bucket: str,
+    latest_chapter: str,
+    current_active_chapter_keys: set[str],
+    chapter_last_roster_sort: Dict[str, int],
+    latest_roster_term_sort: int,
+) -> bool:
+    if clean_text(latest_outcome_bucket) not in UNRESOLVED_OUTCOMES:
+        return False
+    chapter_key = normalize_chapter_key(latest_chapter)
+    if not chapter_key or chapter_key in current_active_chapter_keys:
+        return False
+    last_seen_sort = chapter_last_roster_sort.get(chapter_key)
+    if last_seen_sort is None:
+        return False
+    return int(last_seen_sort) < int(latest_roster_term_sort)
+
+
 def build_student_summary(
     master: pd.DataFrame,
     snapshot: pd.DataFrame,
@@ -3522,6 +3554,39 @@ def build_student_summary(
             .agg(lambda values: " ".join(value for value in values if clean_text(value)))
             .to_dict()
         )
+    roster_present_master = sorted_master.loc[sorted_master["roster_present"].eq("Yes")].copy()
+    current_active_chapter_keys: set[str] = set()
+    if not chapter_mapping.empty and "chapter" in chapter_mapping.columns:
+        current_active_chapter_keys.update(
+            value
+            for value in chapter_key_series(chapter_mapping["chapter"]).tolist()
+            if clean_text(value)
+        )
+    latest_roster_term_sort = 0
+    chapter_last_roster_sort: Dict[str, int] = {}
+    if not roster_present_master.empty:
+        roster_term_sorts = coerce_numeric(roster_present_master["observed_term_sort"]).dropna()
+        if not roster_term_sorts.empty:
+            latest_roster_term_sort = int(roster_term_sorts.max())
+        roster_present_master["_chapter_key"] = chapter_key_series(roster_present_master["chapter"])
+        chapter_last_roster_sort = (
+            roster_present_master.loc[roster_present_master["_chapter_key"].ne("")]
+            .groupby("_chapter_key", dropna=False)["observed_term_sort"]
+            .max()
+            .dropna()
+            .astype(int)
+            .to_dict()
+        )
+        latest_active_roster = roster_present_master.loc[
+            coerce_numeric(roster_present_master["observed_term_sort"]).eq(latest_roster_term_sort)
+            & roster_present_master["org_status_bucket"].fillna("").astype(str).isin(["Active", "New Member"])
+        ].copy()
+        if not latest_active_roster.empty:
+            current_active_chapter_keys.update(
+                value
+                for value in latest_active_roster["_chapter_key"].tolist()
+                if clean_text(value)
+            )
 
     for student_id, group in sorted_master.groupby("student_id", dropna=False, sort=False):
         ordered = group.sort_values("observed_term_sort")
@@ -3572,14 +3637,28 @@ def build_student_summary(
                 )
             else:
                 graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
-        if latest_outcome_bucket == "Unknown":
+        latest_chapter_value = clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else ""
+        if should_mark_roster_disappeared_unknown(
+            latest_outcome_bucket,
+            latest_chapter_value,
+            current_active_chapter_keys,
+            chapter_last_roster_sort,
+            latest_roster_term_sort,
+        ):
+            latest_outcome_bucket = ROSTER_DISAPPEARED_UNKNOWN
+            evidence_source = "Chapter roster disappeared from the currently active chapter list; no later explicit student outcome was observed."
+        if latest_outcome_bucket in UNRESOLVED_OUTCOMES:
             outcome_exceptions.append(
                 {
                     "exception_type": "unresolved_outcome",
                     "source_file": "",
                     "student_id": student_id,
                     "term_code": clean_text(ordered["term_code"].iloc[-1]),
-                    "details": "No explicit outcome evidence; student remains unresolved.",
+                    "details": (
+                        "Chapter roster disappeared from the active chapter universe; student remains unresolved."
+                        if latest_outcome_bucket == ROSTER_DISAPPEARED_UNKNOWN
+                        else "No explicit outcome evidence; student remains unresolved."
+                    ),
                 }
             )
 
@@ -3690,6 +3769,7 @@ def build_student_summary(
                 "graduation_evidence_confirmed": "Yes" if graduation_confirmed else "No",
                 "graduation_status_corrected_flag": "Yes" if graduation_status_corrected else "No",
                 "graduation_status_correction_reason": graduation_status_correction_reason,
+                "roster_disappeared_unknown_flag": "Yes" if latest_outcome_bucket == ROSTER_DISAPPEARED_UNKNOWN else "No",
                 "latest_roster_status_bucket": latest_status_bucket or "Unknown",
                 "initial_roster_status_bucket": clean_text(roster_rows["org_status_bucket"].iloc[0]) if not roster_rows.empty else "Unknown",
                 "active_flag": "Yes" if latest_status_bucket in {"Active", "New Member"} else "No",
@@ -3774,11 +3854,7 @@ def build_student_summary(
     summary["major_group"] = summary["major"].replace("", "Unknown")
 
     if not chapter_mapping.empty:
-        mapping = chapter_mapping.copy()
-        mapping["_chapter_key"] = mapping["chapter"].fillna("").astype(str).str.strip().str.lower()
-        summary["_chapter_key"] = summary["chapter"].fillna("").astype(str).str.strip().str.lower()
-        summary = summary.merge(mapping[["_chapter_key", "chapter_group", "council", "org_type", "family", "custom_group"]], on="_chapter_key", how="left")
-        summary = summary.drop(columns=["_chapter_key"])
+        summary = apply_chapter_mapping_overrides(summary, chapter_mapping, chapter_column="chapter")
     for column, default in {
         "chapter_group": "Unassigned",
         "council": "Unknown",
@@ -3875,6 +3951,7 @@ def build_student_summary(
         "resolved_outcomes_only_flag",
         "data_completeness_rate",
         "latest_snapshot_student_status",
+        "roster_disappeared_unknown_flag",
     ]
     summary_columns = list(dict.fromkeys(summary_columns))
     return ensure_columns(summary, summary_columns), pd.DataFrame(qa_rows), pd.DataFrame(outcome_exceptions)
@@ -3965,16 +4042,12 @@ def build_current_active_fields(
     result["current_active_source_sheet"] = summary_ids.map(source_sheet_lookup).fillna("")
 
     if not chapter_mapping.empty:
-        mapping = chapter_mapping.copy()
-        mapping["_chapter_key"] = mapping["chapter"].fillna("").astype(str).str.strip().str.lower()
-        result["_chapter_key"] = result["current_active_chapter"].fillna("").astype(str).str.strip().str.lower()
-        mapped = result.merge(
-            mapping[["_chapter_key", "chapter_group", "council", "org_type", "family", "custom_group"]],
-            on="_chapter_key",
-            how="left",
-            suffixes=("", "_mapped"),
+        result = apply_chapter_mapping_overrides(
+            result,
+            chapter_mapping,
+            chapter_column="current_active_chapter",
+            output_prefix="current_active_",
         )
-        result = mapped.drop(columns=["_chapter_key"])
 
     mapped_defaults = {
         "current_active_chapter_group": "Unassigned",

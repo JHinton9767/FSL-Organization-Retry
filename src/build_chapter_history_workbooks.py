@@ -14,7 +14,16 @@ from openpyxl.styles import Font, PatternFill
 from src.excel_utils import autosize_columns, safe_filename, safe_sheet_name
 from src.build_master_roster import is_excluded_chapter
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
-from src.shared_utils import adjusted_grad_rate as adjusted_graduation_rate, clean_text, coerce_numeric, mean_or_blank, simple_rate as rate, unique_non_blank_count, yes_mask
+from src.shared_utils import (
+    ROSTER_DISAPPEARED_UNKNOWN,
+    adjusted_grad_rate as adjusted_graduation_rate,
+    clean_text,
+    coerce_numeric,
+    mean_or_blank,
+    simple_rate as rate,
+    unique_non_blank_count,
+    yes_mask,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -246,6 +255,7 @@ def build_outcome_rows(entry_students: pd.DataFrame) -> List[List[object]]:
         "Suspended",
         "Transfer",
         "Dropped/Resigned/Revoked/Inactive",
+        ROSTER_DISAPPEARED_UNKNOWN,
         "No Further Observation",
         "Active/Unknown",
         "Unknown",
@@ -521,7 +531,7 @@ def write_readme(result: ChapterBuildResult) -> None:
         "",
         "## Important note",
         "",
-        "Graduation rates in these workbooks exclude unresolved outcomes such as `Active/Unknown` and `No Further Observation` and count graduation only when confirmed evidence exists.",
+        "Graduation rates in these workbooks exclude unresolved outcomes such as `Active/Unknown`, `No Further Observation`, and `Roster Dissapeared/Unknown` and count graduation only when confirmed evidence exists.",
     ]
     result.readme_path.write_text("\n".join(lines), encoding="utf-8")
 

@@ -13,7 +13,17 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from src.canonical_bundle import DEFAULT_CANONICAL_ROOT, load_canonical_bundle
 from src.enhanced_bundle import SourceBundle
 from src.excel_utils import autosize_columns
-from src.shared_utils import adjusted_grad_rate, clean_text, coerce_numeric, count_text, decimal_text, percent_text, simple_rate, yes_mask
+from src.shared_utils import (
+    ROSTER_DISAPPEARED_UNKNOWN,
+    adjusted_grad_rate,
+    clean_text,
+    coerce_numeric,
+    count_text,
+    decimal_text,
+    percent_text,
+    simple_rate,
+    yes_mask,
+)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +34,7 @@ DEFAULT_TOP_CHAPTER_COUNT = 10
 
 TITLE_FILL = "1F4E79"
 HEADER_FILL = "DCE6F1"
-UNRESOLVED = {"Active/Unknown", "No Further Observation", "Unknown", ""}
+UNRESOLVED = {"Active/Unknown", "No Further Observation", "Unknown", ROSTER_DISAPPEARED_UNKNOWN, ""}
 
 
 @dataclass

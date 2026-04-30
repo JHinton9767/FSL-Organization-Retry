@@ -13,7 +13,7 @@ from app.io_utils import (
     parse_term_label,
 )
 from app.status_framework import build_outcome_resolution_fields
-from src.shared_utils import bucket_30_hours
+from src.shared_utils import apply_chapter_mapping_overrides, bucket_30_hours
 
 
 def _text(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -106,24 +106,7 @@ def _apply_chapter_mapping(frame: pd.DataFrame, chapter_column: str, chapter_map
         if column not in result.columns:
             result[column] = ""
 
-    if result.empty or chapter_mapping.empty:
-        return result
-
-    mapping = chapter_mapping.copy()
-    mapping["_chapter_key"] = mapping["chapter"].fillna("").astype(str).str.strip().str.lower()
-    result["_chapter_key"] = result[chapter_column].fillna("").astype(str).str.strip().str.lower()
-    merged = result.merge(
-        mapping[["_chapter_key", "chapter_group", "council", "org_type", "family", "custom_group"]],
-        on="_chapter_key",
-        how="left",
-        suffixes=("", "_mapped"),
-    )
-    for column in ["chapter_group", "council", "org_type", "family", "custom_group"]:
-        mapped = f"{column}_mapped"
-        if mapped in merged.columns:
-            merged[column] = merged[column].where(merged[column].fillna("").astype(str).str.strip().ne(""), merged[mapped])
-            merged = merged.drop(columns=[mapped])
-    return merged.drop(columns=["_chapter_key"])
+    return apply_chapter_mapping_overrides(result, chapter_mapping, chapter_column=chapter_column)
 
 
 def _finalize_summary(
