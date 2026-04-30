@@ -34,7 +34,7 @@ def test_persistence_cohort_options_include_academic_year_totals_after_matching_
 
     options = persistence_cohort_options(summary)
 
-    assert options == ["Fall 2015", "Spring 2016", "2015 Total", "Fall 2016", "Spring 2017", "2016 Total"]
+    assert options == ["Fall 2015", "Spring 2016", "Fall 2015 Total", "Fall 2016", "Spring 2017", "Fall 2016 Total"]
 
 
 def test_filter_persistence_population_supports_academic_year_total_cohorts() -> None:
@@ -47,8 +47,8 @@ def test_filter_persistence_population_supports_academic_year_total_cohorts() ->
         }
     )
 
-    total_students = filter_persistence_population(summary, "2015 Total", "ALL")
-    fraternity_total = filter_persistence_population(summary, "2015 Total", "FRA")
+    total_students = filter_persistence_population(summary, "Fall 2015 Total", "ALL")
+    fraternity_total = filter_persistence_population(summary, "Fall 2015 Total", "FRA")
 
     assert total_students["student_id"].tolist() == ["1", "2"]
     assert fraternity_total["student_id"].tolist() == ["1"]
@@ -110,12 +110,12 @@ def test_build_persistence_dashboard_supports_academic_year_total_checkpoints() 
         }
     )
 
-    dashboard = build_persistence_dashboard(summary, longitudinal, "2015 Total", "ALL")
+    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2015 Total", "ALL")
     table = dashboard["table_frame"]
     four_year = table.loc[table["Milestone"].eq("4 Year")].iloc[0]
 
     assert dashboard["meta"]["students"] == 3
-    assert four_year["Term"] == "2019 Total"
+    assert four_year["Term"] == "Fall 2019 Total"
     assert four_year["Graduated Count"] == 1
     assert four_year["Retained Count"] == 1
     assert four_year["Not Retained / Unresolved Count"] == 1

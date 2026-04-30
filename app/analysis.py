@@ -41,7 +41,7 @@ DIMENSION_LABELS = {
 }
 
 PERSISTENCE_COUNCIL_OPTIONS = ["ALL", "IFC", "PHC", "NPHC", "MGC", "FRA", "SOR"]
-PERSISTENCE_TOTAL_RE = re.compile(r"^((?:19|20)\d{2})\s+total$", re.IGNORECASE)
+PERSISTENCE_TOTAL_RE = re.compile(r"^(?:fall\s+)?((?:19|20)\d{2})\s+total$", re.IGNORECASE)
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -499,7 +499,7 @@ def _persistence_academic_year_start(term_label: object) -> int | None:
 
 
 def _persistence_academic_year_label(start_year: int) -> str:
-    return f"{int(start_year)} Total"
+    return f"Fall {int(start_year)} Total"
 
 
 def persistence_cohort_sort_key(value: str) -> tuple[int, int, int, str]:
