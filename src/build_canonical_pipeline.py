@@ -3217,7 +3217,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
             )
             note = f"Ignored same-term resigned/revoked roster row(s) from: {rsrv_chapters}."
             chosen_row["chapter_assignment_notes"] = f"{existing_notes} {note}".strip() if existing_notes else note
-        resolved_rows.append(chosen_row.drop(labels=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_new_member", "_known_id", "_status_priority", "_identity_key"]))
+        resolved_rows.append(chosen_row.drop(labels=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_new_member", "_known_id", "_status_priority", "_identity_key"]))
     resolved = pd.DataFrame(resolved_rows).reset_index(drop=True)
     return resolved, pd.DataFrame(exceptions)
 

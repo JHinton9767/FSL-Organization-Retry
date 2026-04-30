@@ -665,6 +665,8 @@ def extract_person_name_from_label(value: str) -> Optional[Tuple[str, str]]:
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,-_")
     if not cleaned:
         return None
+    if normalize_chapter_name(cleaned) not in {"", "Unknown"}:
+        return None
 
     if "," in cleaned:
         left, right = [part.strip() for part in cleaned.split(",", 1)]

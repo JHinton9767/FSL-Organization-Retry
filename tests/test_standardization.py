@@ -7,6 +7,7 @@ from src.build_canonical_pipeline import build_current_active_fields, roster_fil
 from src.build_master_roster import (
     build_individual_new_member_form_lookup,
     chapter_from_filename,
+    extract_person_name_from_label,
     infer_chapter,
     is_individual_new_member_form_pdf,
     should_upgrade_to_new_member_status,
@@ -232,3 +233,10 @@ def test_individual_person_form_pdf_builds_new_member_evidence() -> None:
 
     assert is_individual_new_member_form_pdf(path)
     assert ("2026", "spring 2026", "jane", "doe") in lookup
+
+
+def test_chapter_named_pdf_is_not_treated_as_person_form() -> None:
+    path = Path(r"Copy of Rosters\Spring 2026\IFC\Final\Kappa Alpha Order.pdf")
+
+    assert extract_person_name_from_label(path.stem) is None
+    assert not is_individual_new_member_form_pdf(path)
