@@ -42,6 +42,14 @@ DIMENSION_LABELS = {
 
 PERSISTENCE_COUNCIL_OPTIONS = ["ALL", "IFC", "PHC", "NPHC", "MGC", "FRA", "SOR"]
 PERSISTENCE_TOTAL_RE = re.compile(r"^(?:fall\s+)?((?:19|20)\d{2})\s+total$", re.IGNORECASE)
+CHAPTER_HEALTH_OUTCOME_ORDER = [
+    "Graduated",
+    "Resolved Non-Graduate Exit",
+    "Still Active",
+    "Roster Dissapeared/Unknown",
+    "Other Unknown",
+    "Other / Unmapped",
+]
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -84,6 +92,21 @@ def _label_or_unknown(value: object) -> str:
         return "Unknown"
     text = str(value).strip()
     return text or "Unknown"
+
+
+def _truthy_series(series: pd.Series | None, index: pd.Index) -> pd.Series:
+    if series is None:
+        return pd.Series(False, index=index, dtype="bool")
+    lowered = series.fillna("").astype(str).str.strip().str.lower()
+    return (lowered.eq("true") | lowered.eq("yes") | lowered.eq("1")).fillna(False)
+
+
+def _first_non_blank(series: pd.Series | None) -> str:
+    if series is None:
+        return ""
+    cleaned = series.fillna("").astype(str).str.strip()
+    usable = cleaned.loc[cleaned.ne("")]
+    return usable.iloc[0] if not usable.empty else ""
 
 
 def _metric_row(
@@ -480,6 +503,29 @@ def stakeholder_summary(ranked_table: pd.DataFrame, metric: MetricDefinition, po
     return notes
 
 
+def chapter_health_options(summary: pd.DataFrame, longitudinal: pd.DataFrame) -> list[str]:
+    values: set[str] = set()
+    for frame, columns in [
+        (summary, ["chapter", "initial_chapter", "latest_chapter", "current_active_chapter"]),
+        (longitudinal, ["chapter"]),
+    ]:
+        if frame.empty:
+            continue
+        for column in columns:
+            if column not in frame.columns:
+                continue
+            cleaned = (
+                frame[column]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+            )
+            values.update(value for value in cleaned.tolist() if str(value).strip().lower() != "unknown")
+    return sorted(values, key=lambda value: value.lower())
+
+
 def _persistence_total_start_year(value: object) -> int | None:
     match = PERSISTENCE_TOTAL_RE.fullmatch(str(value).strip())
     return int(match.group(1)) if match else None
@@ -839,4 +885,329 @@ def build_persistence_dashboard(
                 else "Retained counts show students observed academically in either the fall or spring term of that academic year checkpoint. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Students not observed during that academic year remain in Not Retained / Unresolved."
             ),
         },
+    }
+
+
+def build_chapter_health_dashboard(
+    summary: pd.DataFrame,
+    longitudinal: pd.DataFrame,
+    chapter_name: str,
+) -> dict[str, object]:
+    chapter_label = str(chapter_name).strip()
+    empty = {
+        "meta": {
+            "chapter": chapter_label,
+            "chapter_group": "",
+            "council": "",
+            "org_type": "",
+            "family": "",
+            "is_currently_active": False,
+            "latest_current_roster_term": "",
+            "last_observed_term": "",
+            "notes": "No students or longitudinal records matched the selected chapter.",
+        },
+        "kpis": {},
+        "yearly_trend": pd.DataFrame(),
+        "yearly_gpa_trend": pd.DataFrame(),
+        "outcome_breakdown": pd.DataFrame(),
+        "cohort_table": pd.DataFrame(),
+        "current_active_students": pd.DataFrame(),
+        "review_students": pd.DataFrame(),
+        "entry_students": pd.DataFrame(),
+        "chapter_rows": pd.DataFrame(),
+    }
+    if not chapter_label:
+        return empty
+
+    chapter_key = chapter_label.lower()
+    summary_work = summary.copy()
+    longitudinal_work = longitudinal.copy()
+
+    entry_students = summary_work.loc[
+        summary_work.get("initial_chapter", pd.Series("", index=summary_work.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
+    ].copy()
+
+    related_masks = []
+    for column in ["chapter", "initial_chapter", "latest_chapter", "current_active_chapter"]:
+        if column in summary_work.columns:
+            related_masks.append(summary_work[column].fillna("").astype(str).str.strip().str.lower().eq(chapter_key))
+    chapter_summary = summary_work.loc[pd.concat(related_masks, axis=1).any(axis=1)].copy() if related_masks else pd.DataFrame(columns=summary_work.columns)
+
+    chapter_rows = longitudinal_work.loc[
+        longitudinal_work.get("chapter", pd.Series("", index=longitudinal_work.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
+    ].copy()
+
+    if entry_students.empty and chapter_summary.empty and chapter_rows.empty:
+        return empty
+
+    current_active = chapter_summary.loc[
+        chapter_summary.get("current_active_chapter", pd.Series("", index=chapter_summary.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
+        & _truthy_series(chapter_summary.get("current_active_flag"), chapter_summary.index)
+    ].copy()
+
+    related_for_meta = current_active if not current_active.empty else chapter_summary
+    chapter_group = _first_non_blank(related_for_meta.get("chapter_group"))
+    council = _first_non_blank(related_for_meta.get("council"))
+    org_type = _first_non_blank(related_for_meta.get("org_type"))
+    family = _first_non_blank(related_for_meta.get("family"))
+    latest_current_roster_term = _first_non_blank(current_active.get("current_active_roster_term"))
+    last_observed_term = ""
+    if not chapter_rows.empty:
+        ordered_rows = chapter_rows.sort_values("observed_term_sort", na_position="last")
+        last_observed_term = _first_non_blank(pd.Series([ordered_rows.iloc[-1].get("observed_term", "")]))
+
+    entry_total = student_count(entry_students)
+    current_active_total = student_count(current_active)
+    ever_observed_total = student_count(chapter_rows if not chapter_rows.empty else chapter_summary)
+    resolved_entry = resolved_outcomes_only_frame(entry_students)
+    resolved_total = student_count(resolved_entry)
+    graduated_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_graduated"), entry_students.index)])
+    active_outcome_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_active_outcome"), entry_students.index)])
+    unknown_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_unknown_outcome"), entry_students.index)])
+    roster_disappeared_total = student_count(
+        entry_students.loc[entry_students.get("roster_disappeared_unknown_flag", pd.Series("", index=entry_students.index)).fillna("").astype(str).str.strip().eq("Yes")]
+    )
+    resolved_non_grad_total = student_count(
+        entry_students.loc[_truthy_series(entry_students.get("is_known_non_graduate_exit"), entry_students.index)]
+    )
+
+    measurable_next_fall = entry_students.loc[_truthy_series(entry_students.get("retained_next_fall_measurable"), entry_students.index)].copy()
+    measurable_next_fall_n = student_count(measurable_next_fall)
+    retained_next_fall_n = student_count(
+        measurable_next_fall.loc[_truthy_series(measurable_next_fall.get("retained_next_fall"), measurable_next_fall.index)]
+    )
+    resolved_grad_rate = (graduated_total / resolved_total) if resolved_total else np.nan
+    full_grad_rate = (graduated_total / entry_total) if entry_total else np.nan
+    next_fall_rate = (retained_next_fall_n / measurable_next_fall_n) if measurable_next_fall_n else np.nan
+
+    kpis = {
+        "current_active_members": current_active_total,
+        "students_ever_observed": ever_observed_total,
+        "students_entering_chapter": entry_total,
+        "resolved_graduation_rate": resolved_grad_rate,
+        "full_population_graduation_rate": full_grad_rate,
+        "next_fall_retention_rate": next_fall_rate,
+        "average_first_year_gpa": pd.to_numeric(entry_students.get("first_year_avg_term_gpa"), errors="coerce").mean(),
+        "average_cumulative_gpa": pd.to_numeric(entry_students.get("average_cumulative_gpa"), errors="coerce").mean(),
+        "resolved_students": resolved_total,
+        "still_active_outcomes": active_outcome_total,
+        "unknown_outcomes": unknown_total,
+        "roster_disappeared_unknown": roster_disappeared_total,
+        "resolved_non_graduate_exits": resolved_non_grad_total,
+    }
+
+    yearly_trend = pd.DataFrame()
+    yearly_gpa_trend = pd.DataFrame()
+    if not chapter_rows.empty and "observed_year" in chapter_rows.columns:
+        yearly_base = chapter_rows.loc[pd.to_numeric(chapter_rows["observed_year"], errors="coerce").notna()].copy()
+        if not yearly_base.empty:
+            yearly_base["observed_year"] = pd.to_numeric(yearly_base["observed_year"], errors="coerce").astype(int)
+            yearly_trend = (
+                yearly_base.groupby("observed_year", dropna=False)
+                .agg(
+                    distinct_students=("student_id", lambda values: values.fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()),
+                    roster_rows=("roster_present", lambda values: int(_truthy_series(values, values.index).sum())),
+                    academic_rows=("academic_present", lambda values: int(_truthy_series(values, values.index).sum())),
+                )
+                .reset_index()
+                .rename(
+                    columns={
+                        "observed_year": "Year",
+                        "distinct_students": "Distinct Students",
+                        "roster_rows": "Roster Rows",
+                        "academic_rows": "Academic Rows",
+                    }
+                )
+                .sort_values("Year")
+            )
+            gpa_frame = (
+                yearly_base.groupby("observed_year", dropna=False)
+                .agg(
+                    average_term_gpa=("term_gpa", lambda values: pd.to_numeric(values, errors="coerce").mean()),
+                    average_cumulative_gpa=("cumulative_gpa", lambda values: pd.to_numeric(values, errors="coerce").mean()),
+                )
+                .reset_index()
+                .rename(columns={"observed_year": "Year"})
+                .sort_values("Year")
+            )
+            yearly_gpa_trend = gpa_frame.melt(
+                id_vars=["Year"],
+                value_vars=["average_term_gpa", "average_cumulative_gpa"],
+                var_name="Metric",
+                value_name="Value",
+            )
+            yearly_gpa_trend["Metric"] = yearly_gpa_trend["Metric"].replace(
+                {
+                    "average_term_gpa": "Average Term GPA",
+                    "average_cumulative_gpa": "Average Cumulative GPA",
+                }
+            )
+
+    other_unknown_total = max(unknown_total - roster_disappeared_total, 0)
+    other_unmapped_total = max(
+        entry_total
+        - graduated_total
+        - resolved_non_grad_total
+        - active_outcome_total
+        - roster_disappeared_total
+        - other_unknown_total,
+        0,
+    )
+    outcome_breakdown = pd.DataFrame(
+        [
+            {"Outcome": "Graduated", "Students": graduated_total},
+            {"Outcome": "Resolved Non-Graduate Exit", "Students": resolved_non_grad_total},
+            {"Outcome": "Still Active", "Students": active_outcome_total},
+            {"Outcome": "Roster Dissapeared/Unknown", "Students": roster_disappeared_total},
+            {"Outcome": "Other Unknown", "Students": other_unknown_total},
+            {"Outcome": "Other / Unmapped", "Students": other_unmapped_total},
+        ]
+    )
+    outcome_breakdown = outcome_breakdown.loc[outcome_breakdown["Students"].gt(0)].copy()
+    if not outcome_breakdown.empty:
+        outcome_breakdown["Share"] = outcome_breakdown["Students"] / entry_total if entry_total else np.nan
+        outcome_breakdown["Order"] = outcome_breakdown["Outcome"].map(
+            {label: idx for idx, label in enumerate(CHAPTER_HEALTH_OUTCOME_ORDER)}
+        )
+        outcome_breakdown = outcome_breakdown.sort_values(["Order", "Outcome"]).drop(columns=["Order"]).reset_index(drop=True)
+
+    cohort_rows: list[dict[str, object]] = []
+    if not entry_students.empty and "join_term" in entry_students.columns:
+        for join_term, frame in entry_students.groupby("join_term", dropna=False):
+            frame = frame.copy()
+            cohort_students = student_count(frame)
+            cohort_resolved = resolved_outcomes_only_frame(frame)
+            cohort_resolved_n = student_count(cohort_resolved)
+            cohort_graduated_n = student_count(frame.loc[_truthy_series(frame.get("is_graduated"), frame.index)])
+            cohort_active_n = student_count(frame.loc[_truthy_series(frame.get("is_active_outcome"), frame.index)])
+            cohort_unknown_n = student_count(frame.loc[_truthy_series(frame.get("is_unknown_outcome"), frame.index)])
+            cohort_roster_disappeared_n = student_count(
+                frame.loc[frame.get("roster_disappeared_unknown_flag", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().eq("Yes")]
+            )
+            cohort_measurable = frame.loc[_truthy_series(frame.get("retained_next_fall_measurable"), frame.index)].copy()
+            cohort_measurable_n = student_count(cohort_measurable)
+            cohort_retained_n = student_count(
+                cohort_measurable.loc[_truthy_series(cohort_measurable.get("retained_next_fall"), cohort_measurable.index)]
+            )
+            cohort_rows.append(
+                {
+                    "Cohort": _label_or_unknown(join_term),
+                    "Students": cohort_students,
+                    "Resolved Students": cohort_resolved_n,
+                    "Graduated Students": cohort_graduated_n,
+                    "Still Active": cohort_active_n,
+                    "Unknown": cohort_unknown_n,
+                    "Roster Dissapeared/Unknown": cohort_roster_disappeared_n,
+                    "Resolved Graduation Rate": (cohort_graduated_n / cohort_resolved_n) if cohort_resolved_n else np.nan,
+                    "Full Population Graduation Rate": (cohort_graduated_n / cohort_students) if cohort_students else np.nan,
+                    "Next Fall Retention": (cohort_retained_n / cohort_measurable_n) if cohort_measurable_n else np.nan,
+                    "Average First-Year GPA": pd.to_numeric(frame.get("first_year_avg_term_gpa"), errors="coerce").mean(),
+                    "Average Cumulative GPA": pd.to_numeric(frame.get("average_cumulative_gpa"), errors="coerce").mean(),
+                }
+            )
+    cohort_table = pd.DataFrame(cohort_rows)
+    if not cohort_table.empty:
+        cohort_table["_cohort_sort"] = cohort_table["Cohort"].map(persistence_cohort_sort_key)
+        cohort_table = cohort_table.sort_values(["_cohort_sort", "Cohort"]).drop(columns=["_cohort_sort"]).reset_index(drop=True)
+
+    current_active_students = pd.DataFrame()
+    if not current_active.empty:
+        current_active_students = (
+            current_active.loc[
+                :,
+                [
+                    column
+                    for column in [
+                        "student_name",
+                        "student_id",
+                        "join_term",
+                        "current_active_roster_term",
+                        "latest_outcome_bucket",
+                        "data_completeness_rate",
+                    ]
+                    if column in current_active.columns
+                ],
+            ]
+            .rename(
+                columns={
+                    "student_name": "Student Name",
+                    "student_id": "Student ID",
+                    "join_term": "Join Term",
+                    "current_active_roster_term": "Current Active Roster Term",
+                    "latest_outcome_bucket": "Latest Outcome",
+                    "data_completeness_rate": "Data Completeness Rate",
+                }
+            )
+            .sort_values(["Student Name", "Student ID"], na_position="last")
+            .reset_index(drop=True)
+        )
+
+    review_students = pd.DataFrame()
+    if not entry_students.empty:
+        review_mask = (
+            _truthy_series(entry_students.get("is_unknown_outcome"), entry_students.index)
+            | entry_students.get("roster_disappeared_unknown_flag", pd.Series("", index=entry_students.index)).fillna("").astype(str).str.strip().eq("Yes")
+        )
+        review_students = (
+            entry_students.loc[review_mask, [
+                column
+                for column in [
+                    "student_name",
+                    "student_id",
+                    "join_term",
+                    "latest_outcome_bucket",
+                    "outcome_resolution_group",
+                    "outcome_evidence_source",
+                    "data_completeness_rate",
+                ]
+                if column in entry_students.columns
+            ]]
+            .rename(
+                columns={
+                    "student_name": "Student Name",
+                    "student_id": "Student ID",
+                    "join_term": "Join Term",
+                    "latest_outcome_bucket": "Latest Outcome",
+                    "outcome_resolution_group": "Outcome Resolution Group",
+                    "outcome_evidence_source": "Outcome Evidence Source",
+                    "data_completeness_rate": "Data Completeness Rate",
+                }
+            )
+        )
+        if not review_students.empty and "Join Term" in review_students.columns:
+            review_students["_join_sort"] = review_students["Join Term"].map(persistence_cohort_sort_key)
+            review_students = review_students.sort_values(["_join_sort", "Student Name"], na_position="last").drop(columns=["_join_sort"])
+        else:
+            review_students = review_students.sort_values(["Student Name"], na_position="last")
+        review_students = review_students.reset_index(drop=True)
+
+    note_parts = []
+    if current_active_total == 0:
+        note_parts.append("This chapter is not currently active on the latest roster.")
+    if roster_disappeared_total:
+        note_parts.append(f"{roster_disappeared_total:,} entry student(s) are currently classified as Roster Dissapeared/Unknown.")
+    if not note_parts:
+        note_parts.append("This chapter has current and historical health metrics available from the canonical bundle.")
+
+    return {
+        "meta": {
+            "chapter": chapter_label,
+            "chapter_group": chapter_group,
+            "council": council,
+            "org_type": org_type,
+            "family": family,
+            "is_currently_active": current_active_total > 0,
+            "latest_current_roster_term": latest_current_roster_term,
+            "last_observed_term": last_observed_term,
+            "notes": " ".join(note_parts),
+        },
+        "kpis": kpis,
+        "yearly_trend": yearly_trend,
+        "yearly_gpa_trend": yearly_gpa_trend,
+        "outcome_breakdown": outcome_breakdown,
+        "cohort_table": cohort_table,
+        "current_active_students": current_active_students,
+        "review_students": review_students,
+        "entry_students": entry_students,
+        "chapter_rows": chapter_rows,
     }

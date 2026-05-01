@@ -10,6 +10,7 @@ from app.analysis import (
     apply_longitudinal_filters,
     apply_summary_filters,
     available_dimensions,
+    build_chapter_health_dashboard,
     build_persistence_dashboard,
     build_comparison_table,
     build_controlled_comparison,
@@ -17,6 +18,7 @@ from app.analysis import (
     build_observed_term_series,
     build_scatter_frame,
     build_summary_time_series,
+    chapter_health_options,
     filter_options,
     persistence_checkpoint_sort_value,
     persistence_cohort_options,
@@ -190,6 +192,161 @@ def _render_persistence_and_graduation_view(bundle) -> None:
 
     st.caption(meta["note"])
     st.caption("Caution: this page uses organization-entry cohorts rather than true first-time-in-college cohorts. It is designed to match the institutional presentation format as closely as the available FSL data allows.")
+
+
+def _render_chapter_health_dashboard(bundle) -> None:
+    summary = bundle.summary.copy()
+    longitudinal = bundle.longitudinal.copy()
+    chapter_options = chapter_health_options(summary, longitudinal)
+
+    st.title("Chapter Health Dashboard")
+    st.caption("One chapter at a time, using historical and current canonical data together. This view keeps inactive and historical chapters available instead of limiting the dashboard to only currently active organizations.")
+
+    if not chapter_options:
+        st.warning("No chapter options were available in the loaded dataset.")
+        return
+
+    if "chapter_health_chapter" not in st.session_state or st.session_state["chapter_health_chapter"] not in chapter_options:
+        st.session_state["chapter_health_chapter"] = chapter_options[0]
+
+    selected_chapter = st.selectbox("Chapter", options=chapter_options, key="chapter_health_chapter")
+    dashboard = build_chapter_health_dashboard(summary, longitudinal, selected_chapter)
+    meta = dashboard["meta"]
+    kpis = dashboard["kpis"]
+
+    if not kpis:
+        st.warning("No chapter-level data matched the selected chapter.")
+        return
+
+    info_cols = st.columns(5)
+    with info_cols[0]:
+        st.metric("Council", meta["council"] or "Unknown")
+    with info_cols[1]:
+        st.metric("Type", meta["org_type"] or "Unknown")
+    with info_cols[2]:
+        st.metric("Current Status", "Active" if meta["is_currently_active"] else "Historical / Inactive")
+    with info_cols[3]:
+        st.metric("Latest Active Roster", meta["latest_current_roster_term"] or "Not current")
+    with info_cols[4]:
+        st.metric("Last Observed Term", meta["last_observed_term"] or "Unknown")
+
+    st.caption(meta["notes"])
+
+    top_kpi_cols = st.columns(4)
+    with top_kpi_cols[0]:
+        st.metric("Current active members", f"{int(kpis['current_active_members']):,}")
+    with top_kpi_cols[1]:
+        st.metric("Students ever observed", f"{int(kpis['students_ever_observed']):,}")
+    with top_kpi_cols[2]:
+        st.metric("Students entering chapter", f"{int(kpis['students_entering_chapter']):,}")
+    with top_kpi_cols[3]:
+        resolved_value = kpis["resolved_graduation_rate"]
+        st.metric("Resolved grad rate", "n/a" if pd.isna(resolved_value) else f"{resolved_value:.1%}")
+
+    second_kpi_cols = st.columns(4)
+    with second_kpi_cols[0]:
+        full_value = kpis["full_population_graduation_rate"]
+        st.metric("Full-pop grad rate", "n/a" if pd.isna(full_value) else f"{full_value:.1%}")
+    with second_kpi_cols[1]:
+        retention_value = kpis["next_fall_retention_rate"]
+        st.metric("Next-fall retention", "n/a" if pd.isna(retention_value) else f"{retention_value:.1%}")
+    with second_kpi_cols[2]:
+        gpa_value = kpis["average_first_year_gpa"]
+        st.metric("Avg first-year GPA", "n/a" if pd.isna(gpa_value) else f"{gpa_value:.2f}")
+    with second_kpi_cols[3]:
+        unresolved_label = f"{int(kpis['roster_disappeared_unknown']):,} / {int(kpis['unknown_outcomes']):,}"
+        st.metric("Roster disappeared / unknown", unresolved_label)
+
+    overview_tab, cohorts_tab, review_tab = st.tabs(["Overview", "Cohorts", "Review"])
+
+    with overview_tab:
+        trend_cols = st.columns(2)
+        with trend_cols[0]:
+            yearly_trend = dashboard["yearly_trend"]
+            if not yearly_trend.empty:
+                headcount_chart = line_chart(
+                    yearly_trend,
+                    x="Year",
+                    y="Distinct Students",
+                    color=None,
+                    title=f"Distinct students observed over time: {selected_chapter}",
+                )
+                st.plotly_chart(headcount_chart, use_container_width=True)
+                _save_chart_downloads(headcount_chart, f"chapter_health_headcount_{safe_slug(selected_chapter)}")
+            else:
+                st.caption("No yearly headcount trend is available for this chapter.")
+
+        with trend_cols[1]:
+            gpa_trend = dashboard["yearly_gpa_trend"]
+            if not gpa_trend.empty:
+                gpa_chart = line_chart(
+                    gpa_trend,
+                    x="Year",
+                    y="Value",
+                    color="Metric",
+                    title=f"GPA trend over time: {selected_chapter}",
+                )
+                st.plotly_chart(gpa_chart, use_container_width=True)
+                _save_chart_downloads(gpa_chart, f"chapter_health_gpa_{safe_slug(selected_chapter)}")
+            else:
+                st.caption("No GPA trend is available for this chapter.")
+
+        st.subheader("Latest outcome mix for students entering this chapter")
+        outcome_breakdown = dashboard["outcome_breakdown"]
+        if not outcome_breakdown.empty:
+            outcome_chart = bar_chart(
+                outcome_breakdown,
+                x="Outcome",
+                y="Share",
+                color=None,
+                title=f"Outcome mix for {selected_chapter}",
+                y_format="percent",
+            )
+            st.plotly_chart(outcome_chart, use_container_width=True)
+            _save_chart_downloads(outcome_chart, f"chapter_health_outcomes_{safe_slug(selected_chapter)}")
+            display_breakdown = outcome_breakdown.copy()
+            display_breakdown["Share"] = display_breakdown["Share"].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
+            st.dataframe(display_breakdown, use_container_width=True, hide_index=True)
+        else:
+            st.caption("No entry-student outcome breakdown is available for this chapter.")
+
+    with cohorts_tab:
+        st.subheader("Entry cohort health")
+        cohort_table = dashboard["cohort_table"]
+        if cohort_table.empty:
+            st.caption("No chapter-entry cohorts were available for this chapter.")
+        else:
+            display_cohorts = cohort_table.copy()
+            for percent_col in ["Resolved Graduation Rate", "Full Population Graduation Rate", "Next Fall Retention"]:
+                display_cohorts[percent_col] = display_cohorts[percent_col].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
+            for gpa_col in ["Average First-Year GPA", "Average Cumulative GPA"]:
+                display_cohorts[gpa_col] = display_cohorts[gpa_col].map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
+            st.dataframe(display_cohorts, use_container_width=True, hide_index=True)
+
+    with review_tab:
+        st.subheader("Current active members")
+        current_active_students = dashboard["current_active_students"]
+        if current_active_students.empty:
+            st.caption("This chapter does not currently appear as active on the latest roster.")
+        else:
+            display_active = current_active_students.copy()
+            if "Data Completeness Rate" in display_active.columns:
+                display_active["Data Completeness Rate"] = display_active["Data Completeness Rate"].map(
+                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
+                )
+            st.dataframe(display_active, use_container_width=True, hide_index=True)
+
+        st.subheader("Students needing review")
+        review_students = dashboard["review_students"]
+        if review_students.empty:
+            st.caption("No unresolved or roster-disappeared entry students are currently flagged for this chapter.")
+        else:
+            display_review = review_students.copy()
+            if "Data Completeness Rate" in display_review.columns:
+                display_review["Data Completeness Rate"] = display_review["Data Completeness Rate"].map(
+                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
+                )
+            st.dataframe(display_review, use_container_width=True, hide_index=True)
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
@@ -1342,10 +1499,13 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, advanced_tab = st.tabs(["Persistence & Graduation", "Advanced Analytics"])
+    landing_tab, chapter_health_tab, advanced_tab = st.tabs(["Persistence & Graduation", "Chapter Health", "Advanced Analytics"])
 
     with landing_tab:
         _render_persistence_and_graduation_view(bundle)
+
+    with chapter_health_tab:
+        _render_chapter_health_dashboard(bundle)
 
     with advanced_tab:
         _render_advanced_analytics(
