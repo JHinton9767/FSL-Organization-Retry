@@ -50,6 +50,8 @@ CHAPTER_HEALTH_OUTCOME_ORDER = [
     "Other Unknown",
     "Other / Unmapped",
 ]
+RISK_SEVERITY_ORDER = {"High": 0, "Medium": 1, "Monitor": 2}
+ADVISOR_PRIORITY_ORDER = {"High": 0, "Medium": 1, "Monitor": 2}
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -107,6 +109,197 @@ def _first_non_blank(series: pd.Series | None) -> str:
     cleaned = series.fillna("").astype(str).str.strip()
     usable = cleaned.loc[cleaned.ne("")]
     return usable.iloc[0] if not usable.empty else ""
+
+
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(np.nan, index=frame.index, dtype="float64")
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _share(numerator: float | int, denominator: float | int) -> float:
+    denominator_value = float(denominator or 0)
+    if denominator_value <= 0:
+        return float("nan")
+    return float(numerator) / denominator_value
+
+
+def _unique_student_count(values: pd.Series) -> int:
+    return int(
+        values.fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .nunique()
+    )
+
+
+def _sorted_risk_frame(rows: list[dict[str, object]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame["_severity_sort"] = frame["Severity"].map(RISK_SEVERITY_ORDER).fillna(99)
+    return frame.sort_values(["_severity_sort", "Flag"]).drop(columns=["_severity_sort"]).reset_index(drop=True)
+
+
+def _chapter_risk_flags(
+    *,
+    meta: dict[str, object],
+    kpis: dict[str, object],
+    yearly_trend: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    entry_total = int(kpis.get("students_entering_chapter", 0) or 0)
+    resolved_total = int(kpis.get("resolved_students", 0) or 0)
+    measurable_retention_total = int(kpis.get("measurable_next_fall_students", 0) or 0)
+    first_year_gpa_students = int(kpis.get("first_year_gpa_students", 0) or 0)
+    unknown_total = int(kpis.get("unknown_outcomes", 0) or 0)
+    roster_disappeared_total = int(kpis.get("roster_disappeared_unknown", 0) or 0)
+    current_active_total = int(kpis.get("current_active_members", 0) or 0)
+
+    unknown_share = _share(unknown_total, entry_total)
+    roster_disappeared_share = _share(roster_disappeared_total, entry_total)
+    resolved_grad_rate = kpis.get("resolved_graduation_rate")
+    next_fall_rate = kpis.get("next_fall_retention_rate")
+    average_first_year_gpa = kpis.get("average_first_year_gpa")
+    average_data_completeness = kpis.get("average_data_completeness_rate")
+
+    if not bool(meta.get("is_currently_active")):
+        rows.append(
+            {
+                "Severity": "High",
+                "Flag": "Chapter not currently active",
+                "Details": "The latest roster does not show this chapter as active, so current student outcomes are more likely to need manual follow-up.",
+            }
+        )
+
+    if entry_total >= 8 and pd.notna(unknown_share):
+        if unknown_total >= 5 or unknown_share >= 0.25:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "High unresolved outcome share",
+                    "Details": f"{unknown_total:,} of {entry_total:,} entry students ({unknown_share:.1%}) are still unknown or unresolved.",
+                }
+            )
+        elif unknown_total >= 3 or unknown_share >= 0.15:
+            rows.append(
+                {
+                    "Severity": "Medium",
+                    "Flag": "Meaningful unresolved outcome share",
+                    "Details": f"{unknown_total:,} of {entry_total:,} entry students ({unknown_share:.1%}) are still unknown or unresolved.",
+                }
+            )
+
+    if entry_total >= 8 and pd.notna(roster_disappeared_share):
+        if roster_disappeared_total >= 4 or roster_disappeared_share >= 0.15:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "Roster disappeared unknowns",
+                    "Details": f"{roster_disappeared_total:,} students ({roster_disappeared_share:.1%} of entry students) became unresolved after chapter roster coverage disappeared.",
+                }
+            )
+        elif roster_disappeared_total >= 2 or roster_disappeared_share >= 0.08:
+            rows.append(
+                {
+                    "Severity": "Medium",
+                    "Flag": "Roster continuity concern",
+                    "Details": f"{roster_disappeared_total:,} students are in the Roster Dissapeared/Unknown bucket for this chapter.",
+                }
+            )
+
+    if resolved_total >= 10 and pd.notna(resolved_grad_rate):
+        if float(resolved_grad_rate) < 0.45:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "Low resolved graduation rate",
+                    "Details": f"Resolved graduation rate is {float(resolved_grad_rate):.1%} across {resolved_total:,} resolved students.",
+                }
+            )
+        elif float(resolved_grad_rate) < 0.60:
+            rows.append(
+                {
+                    "Severity": "Medium",
+                    "Flag": "Resolved graduation rate below target",
+                    "Details": f"Resolved graduation rate is {float(resolved_grad_rate):.1%} across {resolved_total:,} resolved students.",
+                }
+            )
+
+    if measurable_retention_total >= 10 and pd.notna(next_fall_rate):
+        if float(next_fall_rate) < 0.55:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "Low next-fall retention",
+                    "Details": f"Next-fall retention is {float(next_fall_rate):.1%} across {measurable_retention_total:,} measurable students.",
+                }
+            )
+        elif float(next_fall_rate) < 0.70:
+            rows.append(
+                {
+                    "Severity": "Medium",
+                    "Flag": "Next-fall retention below target",
+                    "Details": f"Next-fall retention is {float(next_fall_rate):.1%} across {measurable_retention_total:,} measurable students.",
+                }
+            )
+
+    if first_year_gpa_students >= 8 and pd.notna(average_first_year_gpa):
+        if float(average_first_year_gpa) < 2.5:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "Low first-year GPA",
+                    "Details": f"Average first-year GPA is {float(average_first_year_gpa):.2f} across {first_year_gpa_students:,} students.",
+                }
+            )
+        elif float(average_first_year_gpa) < 2.8:
+            rows.append(
+                {
+                    "Severity": "Medium",
+                    "Flag": "First-year GPA below target",
+                    "Details": f"Average first-year GPA is {float(average_first_year_gpa):.2f} across {first_year_gpa_students:,} students.",
+                }
+            )
+
+    if entry_total >= 10 and pd.notna(average_data_completeness):
+        if float(average_data_completeness) < 0.60:
+            rows.append(
+                {
+                    "Severity": "High",
+                    "Flag": "Low data completeness",
+                    "Details": f"Average data completeness is {float(average_data_completeness):.0%}, which makes the chapter history harder to interpret confidently.",
+                }
+            )
+        elif float(average_data_completeness) < 0.80:
+            rows.append(
+                {
+                    "Severity": "Monitor",
+                    "Flag": "Moderate data completeness gap",
+                    "Details": f"Average data completeness is {float(average_data_completeness):.0%}.",
+                }
+            )
+
+    if not yearly_trend.empty and {"Year", "Distinct Students"}.issubset(yearly_trend.columns):
+        trend_base = yearly_trend.loc[pd.to_numeric(yearly_trend["Distinct Students"], errors="coerce").notna()].copy()
+        if len(trend_base) >= 2:
+            trend_base["Distinct Students"] = pd.to_numeric(trend_base["Distinct Students"], errors="coerce")
+            trend_base = trend_base.sort_values("Year")
+            latest_students = float(trend_base.iloc[-1]["Distinct Students"])
+            prior_peak = float(trend_base.iloc[:-1]["Distinct Students"].max())
+            if prior_peak >= 15 and latest_students <= (prior_peak * 0.65):
+                rows.append(
+                    {
+                        "Severity": "Monitor",
+                        "Flag": "Observed headcount is well below prior peak",
+                        "Details": f"Latest observed distinct-student count is {int(latest_students):,} versus a prior peak of {int(prior_peak):,}.",
+                    }
+                )
+
+    return _sorted_risk_frame(rows)
 
 
 def _metric_row(
@@ -911,6 +1104,7 @@ def build_chapter_health_dashboard(
         "yearly_gpa_trend": pd.DataFrame(),
         "outcome_breakdown": pd.DataFrame(),
         "cohort_table": pd.DataFrame(),
+        "risk_flags": pd.DataFrame(),
         "current_active_students": pd.DataFrame(),
         "review_students": pd.DataFrame(),
         "entry_students": pd.DataFrame(),
@@ -979,6 +1173,9 @@ def build_chapter_health_dashboard(
     resolved_grad_rate = (graduated_total / resolved_total) if resolved_total else np.nan
     full_grad_rate = (graduated_total / entry_total) if entry_total else np.nan
     next_fall_rate = (retained_next_fall_n / measurable_next_fall_n) if measurable_next_fall_n else np.nan
+    first_year_gpa_series = _numeric_series(entry_students, "first_year_avg_term_gpa")
+    cumulative_gpa_series = _numeric_series(entry_students, "average_cumulative_gpa")
+    completeness_series = _numeric_series(entry_students, "data_completeness_rate")
 
     kpis = {
         "current_active_members": current_active_total,
@@ -989,6 +1186,10 @@ def build_chapter_health_dashboard(
         "next_fall_retention_rate": next_fall_rate,
         "average_first_year_gpa": pd.to_numeric(entry_students.get("first_year_avg_term_gpa"), errors="coerce").mean(),
         "average_cumulative_gpa": pd.to_numeric(entry_students.get("average_cumulative_gpa"), errors="coerce").mean(),
+        "first_year_gpa_students": int(first_year_gpa_series.notna().sum()),
+        "cumulative_gpa_students": int(cumulative_gpa_series.notna().sum()),
+        "average_data_completeness_rate": completeness_series.mean(),
+        "measurable_next_fall_students": measurable_next_fall_n,
         "resolved_students": resolved_total,
         "still_active_outcomes": active_outcome_total,
         "unknown_outcomes": unknown_total,
@@ -1189,25 +1390,283 @@ def build_chapter_health_dashboard(
     if not note_parts:
         note_parts.append("This chapter has current and historical health metrics available from the canonical bundle.")
 
+    meta = {
+        "chapter": chapter_label,
+        "chapter_group": chapter_group,
+        "council": council,
+        "org_type": org_type,
+        "family": family,
+        "is_currently_active": current_active_total > 0,
+        "latest_current_roster_term": latest_current_roster_term,
+        "last_observed_term": last_observed_term,
+        "notes": " ".join(note_parts),
+    }
+    risk_flags = _chapter_risk_flags(meta=meta, kpis=kpis, yearly_trend=yearly_trend)
+
     return {
-        "meta": {
-            "chapter": chapter_label,
-            "chapter_group": chapter_group,
-            "council": council,
-            "org_type": org_type,
-            "family": family,
-            "is_currently_active": current_active_total > 0,
-            "latest_current_roster_term": latest_current_roster_term,
-            "last_observed_term": last_observed_term,
-            "notes": " ".join(note_parts),
-        },
+        "meta": meta,
         "kpis": kpis,
         "yearly_trend": yearly_trend,
         "yearly_gpa_trend": yearly_gpa_trend,
         "outcome_breakdown": outcome_breakdown,
         "cohort_table": cohort_table,
+        "risk_flags": risk_flags,
         "current_active_students": current_active_students,
         "review_students": review_students,
         "entry_students": entry_students,
         "chapter_rows": chapter_rows,
+    }
+
+
+def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]:
+    empty_queue = pd.DataFrame(
+        columns=[
+            "Priority",
+            "Risk Score",
+            "Student Name",
+            "Student ID",
+            "Current Chapter",
+            "Council",
+            "Join Term",
+            "Average Cumulative GPA",
+            "Average First-Year GPA",
+            "Data Completeness Rate",
+            "Latest Outcome",
+            "Risk Flags",
+        ]
+    )
+    empty_rollup = pd.DataFrame(
+        columns=[
+            "Current Chapter",
+            "Council",
+            "Current Active Students",
+            "Flagged Students",
+            "High Priority",
+            "Medium Priority",
+            "Monitor",
+            "Average Risk Score",
+        ]
+    )
+    empty = {
+        "queue": empty_queue,
+        "chapter_rollup": empty_rollup,
+        "meta": {
+            "current_active_students": 0,
+            "flagged_students": 0,
+            "high_priority_students": 0,
+            "medium_priority_students": 0,
+            "monitor_students": 0,
+        },
+    }
+    if summary.empty:
+        return empty
+
+    work = summary.copy()
+    active_mask = _truthy_series(work.get("current_active_flag"), work.index)
+    active = work.loc[active_mask].copy()
+    if active.empty:
+        return empty
+
+    active["current_chapter_label"] = active.get("current_active_chapter", pd.Series("", index=active.index)).where(
+        active.get("current_active_chapter", pd.Series("", index=active.index)).fillna("").astype(str).str.strip().ne(""),
+        active.get("latest_chapter", pd.Series("Unknown", index=active.index)),
+    )
+    active["current_council_label"] = active.get("current_active_council", pd.Series("", index=active.index)).where(
+        active.get("current_active_council", pd.Series("", index=active.index)).fillna("").astype(str).str.strip().ne(""),
+        active.get("council", pd.Series("Unknown", index=active.index)),
+    )
+    active["average_cumulative_gpa_num"] = _numeric_series(active, "average_cumulative_gpa")
+    active["first_year_avg_term_gpa_num"] = _numeric_series(active, "first_year_avg_term_gpa")
+    active["data_completeness_rate_num"] = _numeric_series(active, "data_completeness_rate")
+
+    active["flag_critical_cumulative_gpa"] = active["average_cumulative_gpa_num"].lt(2.0)
+    active["flag_low_cumulative_gpa"] = active["average_cumulative_gpa_num"].between(2.0, 2.49, inclusive="both")
+    active["flag_borderline_cumulative_gpa"] = active["average_cumulative_gpa_num"].between(2.5, 2.79, inclusive="both")
+    active["flag_low_first_year_gpa"] = active["first_year_avg_term_gpa_num"].lt(2.3)
+    active["flag_borderline_first_year_gpa"] = active["first_year_avg_term_gpa_num"].between(2.3, 2.69, inclusive="both")
+    active["flag_low_data_completeness"] = active["data_completeness_rate_num"].lt(0.60)
+    active["flag_borderline_data_completeness"] = active["data_completeness_rate_num"].between(0.60, 0.79, inclusive="both")
+    active["flag_unknown_outcome_mismatch"] = _truthy_series(active.get("is_unknown_outcome"), active.index) | active.get(
+        "latest_outcome_bucket",
+        pd.Series("", index=active.index),
+    ).fillna("").astype(str).str.contains("unknown|unresolved", case=False, na=False)
+    active["flag_missing_current_chapter"] = active["current_chapter_label"].fillna("").astype(str).str.strip().eq("")
+    active["flag_missing_council"] = active["current_council_label"].fillna("").astype(str).str.strip().eq("")
+
+    active["risk_score"] = (
+        active["flag_critical_cumulative_gpa"].astype(int) * 5
+        + active["flag_low_cumulative_gpa"].astype(int) * 4
+        + active["flag_borderline_cumulative_gpa"].astype(int) * 2
+        + active["flag_low_first_year_gpa"].astype(int) * 3
+        + active["flag_borderline_first_year_gpa"].astype(int) * 2
+        + active["flag_low_data_completeness"].astype(int) * 2
+        + active["flag_borderline_data_completeness"].astype(int) * 1
+        + active["flag_unknown_outcome_mismatch"].astype(int) * 2
+        + active["flag_missing_current_chapter"].astype(int) * 2
+        + active["flag_missing_council"].astype(int) * 1
+    )
+    active["risk_flag_count"] = (
+        active[
+            [
+                "flag_critical_cumulative_gpa",
+                "flag_low_cumulative_gpa",
+                "flag_borderline_cumulative_gpa",
+                "flag_low_first_year_gpa",
+                "flag_borderline_first_year_gpa",
+                "flag_low_data_completeness",
+                "flag_borderline_data_completeness",
+                "flag_unknown_outcome_mismatch",
+                "flag_missing_current_chapter",
+                "flag_missing_council",
+            ]
+        ]
+        .astype(int)
+        .sum(axis=1)
+    )
+    active["priority"] = np.select(
+        [
+            active["risk_score"].ge(6) | active["flag_critical_cumulative_gpa"],
+            active["risk_score"].ge(3),
+            active["risk_score"].gt(0),
+        ],
+        ["High", "Medium", "Monitor"],
+        default="",
+    )
+
+    flagged = active.loc[active["risk_score"].gt(0)].copy()
+    if flagged.empty:
+        return {
+            "queue": empty_queue,
+            "chapter_rollup": empty_rollup,
+            "meta": {
+                "current_active_students": int(student_count(active)),
+                "flagged_students": 0,
+                "high_priority_students": 0,
+                "medium_priority_students": 0,
+                "monitor_students": 0,
+            },
+        }
+
+    def _risk_reason_text(row: pd.Series) -> str:
+        reasons: list[str] = []
+        if bool(row["flag_critical_cumulative_gpa"]):
+            reasons.append("critical cumulative GPA")
+        elif bool(row["flag_low_cumulative_gpa"]):
+            reasons.append("low cumulative GPA")
+        elif bool(row["flag_borderline_cumulative_gpa"]):
+            reasons.append("borderline cumulative GPA")
+
+        if bool(row["flag_low_first_year_gpa"]):
+            reasons.append("low first-year GPA")
+        elif bool(row["flag_borderline_first_year_gpa"]):
+            reasons.append("borderline first-year GPA")
+
+        if bool(row["flag_low_data_completeness"]):
+            reasons.append("low data completeness")
+        elif bool(row["flag_borderline_data_completeness"]):
+            reasons.append("moderate data completeness gap")
+
+        if bool(row["flag_unknown_outcome_mismatch"]):
+            reasons.append("active/unknown outcome mismatch")
+        if bool(row["flag_missing_current_chapter"]):
+            reasons.append("missing current chapter")
+        if bool(row["flag_missing_council"]):
+            reasons.append("missing council assignment")
+        return ", ".join(reasons)
+
+    flagged["risk_flags_text"] = flagged.apply(_risk_reason_text, axis=1)
+    flagged["current_chapter_label"] = flagged["current_chapter_label"].map(_label_or_unknown)
+    flagged["current_council_label"] = flagged["current_council_label"].map(_label_or_unknown)
+
+    queue = (
+        flagged.loc[
+            :,
+            [
+                column
+                for column in [
+                    "priority",
+                    "risk_score",
+                    "student_name",
+                    "student_id",
+                    "current_chapter_label",
+                    "current_council_label",
+                    "join_term",
+                    "average_cumulative_gpa_num",
+                    "first_year_avg_term_gpa_num",
+                    "data_completeness_rate_num",
+                    "latest_outcome_bucket",
+                    "risk_flags_text",
+                ]
+                if column in flagged.columns
+            ],
+        ]
+        .rename(
+            columns={
+                "priority": "Priority",
+                "risk_score": "Risk Score",
+                "student_name": "Student Name",
+                "student_id": "Student ID",
+                "current_chapter_label": "Current Chapter",
+                "current_council_label": "Council",
+                "join_term": "Join Term",
+                "average_cumulative_gpa_num": "Average Cumulative GPA",
+                "first_year_avg_term_gpa_num": "Average First-Year GPA",
+                "data_completeness_rate_num": "Data Completeness Rate",
+                "latest_outcome_bucket": "Latest Outcome",
+                "risk_flags_text": "Risk Flags",
+            }
+        )
+    )
+    queue["_priority_sort"] = queue["Priority"].map(ADVISOR_PRIORITY_ORDER).fillna(99)
+    queue = queue.sort_values(
+        ["_priority_sort", "Risk Score", "Average Cumulative GPA", "Student Name"],
+        ascending=[True, False, True, True],
+        na_position="last",
+    ).drop(columns=["_priority_sort"]).reset_index(drop=True)
+
+    active_counts = (
+        active.assign(
+            current_chapter_label=active["current_chapter_label"].map(_label_or_unknown),
+            current_council_label=active["current_council_label"].map(_label_or_unknown),
+        )
+        .groupby(["current_chapter_label", "current_council_label"], dropna=False)
+        .agg(**{"Current Active Students": ("student_id", _unique_student_count)})
+        .reset_index()
+    )
+    flagged_rollup = (
+        flagged.groupby(["current_chapter_label", "current_council_label"], dropna=False)
+        .agg(
+            **{
+                "Flagged Students": ("student_id", _unique_student_count),
+                "High Priority": ("priority", lambda values: int(pd.Series(values).eq("High").sum())),
+                "Medium Priority": ("priority", lambda values: int(pd.Series(values).eq("Medium").sum())),
+                "Monitor": ("priority", lambda values: int(pd.Series(values).eq("Monitor").sum())),
+                "Average Risk Score": ("risk_score", "mean"),
+            }
+        )
+        .reset_index()
+    )
+    chapter_rollup = active_counts.merge(
+        flagged_rollup,
+        how="left",
+        on=["current_chapter_label", "current_council_label"],
+    ).rename(columns={"current_chapter_label": "Current Chapter", "current_council_label": "Council"})
+    for column in ["Flagged Students", "High Priority", "Medium Priority", "Monitor"]:
+        chapter_rollup[column] = chapter_rollup[column].fillna(0).astype(int)
+    chapter_rollup["Average Risk Score"] = pd.to_numeric(chapter_rollup["Average Risk Score"], errors="coerce")
+    chapter_rollup = chapter_rollup.sort_values(
+        ["High Priority", "Medium Priority", "Flagged Students", "Current Active Students", "Current Chapter"],
+        ascending=[False, False, False, False, True],
+    ).reset_index(drop=True)
+
+    return {
+        "queue": queue,
+        "chapter_rollup": chapter_rollup,
+        "meta": {
+            "current_active_students": int(student_count(active)),
+            "flagged_students": int(student_count(flagged)),
+            "high_priority_students": int(flagged["priority"].eq("High").sum()),
+            "medium_priority_students": int(flagged["priority"].eq("Medium").sum()),
+            "monitor_students": int(flagged["priority"].eq("Monitor").sum()),
+        },
     }

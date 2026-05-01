@@ -9,6 +9,7 @@ import streamlit as st
 from app.analysis import (
     apply_longitudinal_filters,
     apply_summary_filters,
+    build_advisor_intervention_queue,
     available_dimensions,
     build_chapter_health_dashboard,
     build_persistence_dashboard,
@@ -257,6 +258,30 @@ def _render_chapter_health_dashboard(bundle) -> None:
         unresolved_label = f"{int(kpis['roster_disappeared_unknown']):,} / {int(kpis['unknown_outcomes']):,}"
         st.metric("Roster disappeared / unknown", unresolved_label)
 
+    risk_flags = dashboard["risk_flags"]
+    st.subheader("Chapter risk flags")
+    if risk_flags.empty:
+        st.success("No chapter-level risk flags were triggered by the current advisor/risk heuristics.")
+    else:
+        severity_cols = st.columns(3)
+        with severity_cols[0]:
+            st.metric("High flags", f"{int(risk_flags['Severity'].eq('High').sum()):,}")
+        with severity_cols[1]:
+            st.metric("Medium flags", f"{int(risk_flags['Severity'].eq('Medium').sum()):,}")
+        with severity_cols[2]:
+            st.metric("Monitor flags", f"{int(risk_flags['Severity'].eq('Monitor').sum()):,}")
+
+        for row in risk_flags.itertuples(index=False):
+            message = f"{row.Flag}: {row.Details}"
+            if row.Severity == "High":
+                st.error(message)
+            elif row.Severity == "Medium":
+                st.warning(message)
+            else:
+                st.info(message)
+
+        st.dataframe(risk_flags, use_container_width=True, hide_index=True)
+
     overview_tab, cohorts_tab, review_tab = st.tabs(["Overview", "Cohorts", "Review"])
 
     with overview_tab:
@@ -347,6 +372,94 @@ def _render_chapter_health_dashboard(bundle) -> None:
                     lambda value: "" if pd.isna(value) else f"{value:.0%}"
                 )
             st.dataframe(display_review, use_container_width=True, hide_index=True)
+
+
+def _render_advisor_help_dashboard(bundle) -> None:
+    summary = bundle.summary.copy()
+
+    st.title("Advisor Help")
+    st.caption(
+        "This queue focuses on currently active members who may need outreach or cleanup follow-up soon. "
+        "Flags are heuristics built from current-active status, GPA, and data-quality signals, so they should guide conversations rather than replace advisor judgment."
+    )
+
+    dashboard = build_advisor_intervention_queue(summary)
+    queue = dashboard["queue"]
+    chapter_rollup = dashboard["chapter_rollup"]
+    meta = dashboard["meta"]
+
+    kpi_cols = st.columns(5)
+    with kpi_cols[0]:
+        st.metric("Current active students", f"{int(meta['current_active_students']):,}")
+    with kpi_cols[1]:
+        st.metric("Flagged students", f"{int(meta['flagged_students']):,}")
+    with kpi_cols[2]:
+        st.metric("High priority", f"{int(meta['high_priority_students']):,}")
+    with kpi_cols[3]:
+        st.metric("Medium priority", f"{int(meta['medium_priority_students']):,}")
+    with kpi_cols[4]:
+        st.metric("Monitor", f"{int(meta['monitor_students']):,}")
+
+    if queue.empty:
+        st.success("No currently active students were flagged by the current advisor-help heuristics.")
+        return
+
+    filter_cols = st.columns(3)
+    council_options = ["All"] + sorted(queue["Council"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
+    chapter_options = ["All"] + sorted(queue["Current Chapter"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
+    priority_options = ["High", "Medium", "Monitor"]
+
+    with filter_cols[0]:
+        selected_council = st.selectbox("Council", options=council_options, key="advisor_help_council")
+    with filter_cols[1]:
+        selected_chapter = st.selectbox("Chapter", options=chapter_options, key="advisor_help_chapter")
+    with filter_cols[2]:
+        selected_priorities = st.multiselect("Priority", options=priority_options, default=priority_options, key="advisor_help_priority")
+
+    queue_view = queue.copy()
+    if selected_council != "All":
+        queue_view = queue_view.loc[queue_view["Council"].eq(selected_council)].copy()
+    if selected_chapter != "All":
+        queue_view = queue_view.loc[queue_view["Current Chapter"].eq(selected_chapter)].copy()
+    if selected_priorities:
+        queue_view = queue_view.loc[queue_view["Priority"].isin(selected_priorities)].copy()
+    else:
+        queue_view = queue_view.iloc[0:0].copy()
+
+    rollup_view = chapter_rollup.copy()
+    if selected_council != "All":
+        rollup_view = rollup_view.loc[rollup_view["Council"].eq(selected_council)].copy()
+    if selected_chapter != "All":
+        rollup_view = rollup_view.loc[rollup_view["Current Chapter"].eq(selected_chapter)].copy()
+
+    chapter_tab, student_tab = st.tabs(["Chapter Summary", "Student Queue"])
+
+    with chapter_tab:
+        st.subheader("Where advisor flags are concentrated")
+        if rollup_view.empty:
+            st.caption("No chapter-level advisor flags matched the current filter.")
+        else:
+            display_rollup = rollup_view.copy()
+            if "Average Risk Score" in display_rollup.columns:
+                display_rollup["Average Risk Score"] = display_rollup["Average Risk Score"].map(
+                    lambda value: "" if pd.isna(value) else f"{value:.1f}"
+                )
+            st.dataframe(display_rollup, use_container_width=True, hide_index=True)
+
+    with student_tab:
+        st.subheader("Students needing outreach or cleanup follow-up")
+        if queue_view.empty:
+            st.caption("No active students matched the current advisor-help filters.")
+        else:
+            display_queue = queue_view.copy()
+            for gpa_col in ["Average Cumulative GPA", "Average First-Year GPA"]:
+                if gpa_col in display_queue.columns:
+                    display_queue[gpa_col] = display_queue[gpa_col].map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
+            if "Data Completeness Rate" in display_queue.columns:
+                display_queue["Data Completeness Rate"] = display_queue["Data Completeness Rate"].map(
+                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
+                )
+            st.dataframe(display_queue, use_container_width=True, hide_index=True)
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
@@ -1499,13 +1612,18 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, chapter_health_tab, advanced_tab = st.tabs(["Persistence & Graduation", "Chapter Health", "Advanced Analytics"])
+    landing_tab, chapter_health_tab, advisor_help_tab, advanced_tab = st.tabs(
+        ["Persistence & Graduation", "Chapter Health", "Advisor Help", "Advanced Analytics"]
+    )
 
     with landing_tab:
         _render_persistence_and_graduation_view(bundle)
 
     with chapter_health_tab:
         _render_chapter_health_dashboard(bundle)
+
+    with advisor_help_tab:
+        _render_advisor_help_dashboard(bundle)
 
     with advanced_tab:
         _render_advanced_analytics(
