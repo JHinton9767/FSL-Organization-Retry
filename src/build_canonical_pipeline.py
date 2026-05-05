@@ -595,8 +595,11 @@ def is_copy_of_grades_path(path: Path) -> bool:
     return any(clean_text(part).lower() == "copy of grades" for part in path.parts)
 
 
-def is_copy_of_grades_raw_data_path(path: Path) -> bool:
-    return is_copy_of_grades_path(path) and any("raw data" in clean_text(part).lower() for part in path.parts)
+def is_copy_of_grades_netid_only_path(path: Path) -> bool:
+    if not is_copy_of_grades_path(path):
+        return False
+    normalized_parts = [clean_text(part).lower() for part in path.parts]
+    return "2025" in normalized_parts and "fall 2025" in normalized_parts and "fsl raw data" in normalized_parts
 
 
 def academic_source_priority(source_file: object, term_source_basis: object = "") -> int:
@@ -2513,7 +2516,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     for path in academic_files(root):
         source_label = source_label_for_academic_path(path, root)
-        if is_copy_of_grades_raw_data_path(path):
+        if is_copy_of_grades_netid_only_path(path):
             continue
 
         if path.suffix.lower() == ".csv":
