@@ -79,6 +79,7 @@ TRANSCRIPT_TEXT_MANIFEST_PATH = ROOT / "config" / "transcript_text_manifest.csv"
 SCHEMA_PATH = ROOT / "config" / "canonical_schema.json"
 ROSTER_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv", ".pdf"})
 TABULAR_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv"})
+ACADEMIC_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv", ".pdf"})
 TEXT_SOURCE_EXTENSIONS = {".txt"}
 
 TERM_RE = re.compile(r"(Winter|Spring|Summer|Fall)\s+(19\d{2}|20\d{2})", re.IGNORECASE)
@@ -174,7 +175,7 @@ GRADE_COLUMN_ALIASES = {
     "Texas State GPA": {"texas state gpa", "institutional gpa", "txst gpa"},
     "Overall GPA": {"overall gpa"},
     "Transfer GPA": {"transfer gpa"},
-    "Term GPA": {"term gpa", "gpa"},
+    "Term GPA": {"term gpa", "semester gpa", "gpa"},
     "Term Passed Hours": {"term passed hours", "credits earned", "earned hours", "passed hours"},
     "TxState Cumulative GPA": {"txstate cumulative gpa", "texas state cumulative gpa", "institutional cumulative gpa"},
     "Overall Cumulative GPA": {"overall cumulative gpa"},
@@ -584,6 +585,178 @@ def parse_grade_term(path: Path, sheet_name: object) -> str:
         if term_code:
             return term_label
     return ""
+
+
+def source_label_for_academic_path(path: Path, root: Path) -> str:
+    return source_file_label(path, root)
+
+
+def is_copy_of_grades_path(path: Path) -> bool:
+    return any(clean_text(part).lower() == "copy of grades" for part in path.parts)
+
+
+def is_copy_of_grades_raw_data_path(path: Path) -> bool:
+    return is_copy_of_grades_path(path) and any("raw data" in clean_text(part).lower() for part in path.parts)
+
+
+def academic_source_priority(source_file: object, term_source_basis: object = "") -> int:
+    context = f"{clean_text(source_file)} {clean_text(term_source_basis)}".lower()
+    if "copy of grades" in context:
+        if "logi" in context:
+            return 40
+        return 35
+    if "transcript_text" in context:
+        return 25
+    return 10
+
+
+def grade_section_default_status(path: Path, sheet_name: str, section_context: str) -> str:
+    combined_context = " ".join([clean_text(section_context), clean_text(sheet_name), clean_text(path.stem)])
+    bucket = roster_status_bucket(combined_context, "")
+    if bucket in {"Active", "Inactive", "New Member", "Graduated", "Transfer", "Suspended", "Resigned", "Revoked"}:
+        return bucket
+    return ""
+
+
+def grade_term_source_basis(path: Path, sheet_name: str, section_context: str = "") -> str:
+    if is_copy_of_grades_path(path):
+        context = " ".join([clean_text(path.stem), clean_text(sheet_name), clean_text(section_context)]).lower()
+        if "logi" in context:
+            return "copy_of_grades_logi"
+        return "copy_of_grades_section"
+    return "filename_or_sheet"
+
+
+def academic_table_sources(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]]], List[dict]]:
+    issues: List[dict] = []
+    if path.suffix.lower() == ".pdf":
+        table_sources, pdf_issues = pdf_table_rows(path)
+        for issue in pdf_issues:
+            issues.append(
+                {
+                    "exception_type": "academic_pdf_issue",
+                    "source_file": path.name,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": issue,
+                }
+            )
+        return table_sources, issues
+
+    try:
+        workbook = load_workbook(path, data_only=True, read_only=True)
+    except Exception as exc:
+        issues.append(
+            {
+                "exception_type": "academic_open_error",
+                "source_file": path.name,
+                "student_id": "",
+                "term_code": "",
+                "details": clean_text(exc),
+            }
+        )
+        return [], issues
+
+    table_sources: List[Tuple[str, List[Tuple[object, ...]]]] = []
+    try:
+        for ws in workbook.worksheets:
+            table_sources.append((ws.title, [tuple(row) for row in ws.iter_rows(values_only=True)]))
+    finally:
+        workbook.close()
+    return table_sources, issues
+
+
+def extract_academic_rows_from_table_rows(
+    path: Path,
+    source_label: str,
+    sheet_name: str,
+    table_rows: List[Tuple[object, ...]],
+    term_code: str,
+    term_label: str,
+    term_year: object,
+    term_season: str,
+) -> Tuple[List[dict], List[dict]]:
+    rows: List[dict] = []
+    issues: List[dict] = []
+    if not table_rows:
+        return rows, issues
+
+    header_sections: List[Tuple[int, Dict[str, int]]] = []
+    for row_idx, candidate_row in enumerate(table_rows):
+        header_map = map_grade_headers(candidate_row)
+        if {"Last Name", "First Name"}.issubset(set(header_map)):
+            header_sections.append((row_idx, header_map))
+
+    if not header_sections:
+        issues.append(
+            {
+                "exception_type": "academic_header_not_found",
+                "source_file": source_label,
+                "student_id": "",
+                "term_code": term_code,
+                "details": f"No usable grade-style header row was found in {source_label}::{sheet_name}.",
+            }
+        )
+        return rows, issues
+
+    for section_index, (header_row_idx, header_map) in enumerate(header_sections):
+        next_header_row_idx = header_sections[section_index + 1][0] if section_index + 1 < len(header_sections) else len(table_rows)
+        context_rows = table_rows[max(0, header_row_idx - 2) : header_row_idx]
+        section_context = " ".join(
+            clean_text(cell)
+            for row in context_rows
+            for cell in row
+            if clean_text(cell)
+        )
+        default_status = grade_section_default_status(path, sheet_name, section_context)
+        term_source_basis = grade_term_source_basis(path, sheet_name, section_context)
+
+        for row in table_rows[header_row_idx + 1 : next_header_row_idx]:
+            first_name = clean_text(get_cell(row, header_map.get("First Name")))
+            last_name = clean_text(get_cell(row, header_map.get("Last Name")))
+            if not first_name and not last_name:
+                continue
+            if first_name.lower() == "first name" and last_name.lower() == "last name":
+                continue
+
+            banner_raw = clean_text(get_cell(row, header_map.get("Banner ID")))
+            explicit_status = clean_text(get_cell(row, header_map.get("Student Status")))
+            academic_status = explicit_status or default_status
+
+            rows.append(
+                {
+                    "student_id": normalize_banner_id(banner_raw),
+                    "student_id_raw": banner_raw,
+                    "identity_resolution_basis": "source_student_id" if banner_raw else "",
+                    "identity_resolution_notes": "",
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": normalize_email(get_cell(row, header_map.get("Email"))),
+                    "source_file": source_label,
+                    "source_sheet": sheet_name,
+                    "term_code": term_code,
+                    "term_label": term_label,
+                    "term_year": term_year,
+                    "term_season": term_season,
+                    "term_source_basis": term_source_basis,
+                    "academic_status_raw": academic_status,
+                    "major": clean_text(get_cell(row, header_map.get("Major"))),
+                    "term_gpa": get_cell(row, header_map.get("Term GPA")),
+                    "institutional_cumulative_gpa": get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")) or get_cell(row, header_map.get("Overall GPA")),
+                    "overall_cumulative_gpa": get_cell(row, header_map.get("Overall Cumulative GPA")) or get_cell(row, header_map.get("Overall GPA")) or get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")),
+                    "transfer_gpa": get_cell(row, header_map.get("Transfer GPA")),
+                    "attempted_hours_term": get_cell(row, header_map.get("Semester Hours")),
+                    "earned_hours_term": get_cell(row, header_map.get("Term Passed Hours")),
+                    "institutional_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
+                    "total_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
+                    "academic_standing_raw": clean_text(get_cell(row, header_map.get("Current Academic Standing"))),
+                    "academic_standing_bucket": standing_bucket(get_cell(row, header_map.get("Current Academic Standing"))),
+                    "graduation_term_code": parse_term_code(get_cell(row, header_map.get("Graduation Term")))[0],
+                    "graduation_term_label": parse_term_code(get_cell(row, header_map.get("Graduation Term")))[1],
+                }
+            )
+
+    return rows, issues
 
 
 def canonical_snapshot_header(value: object) -> str:
@@ -1407,7 +1580,7 @@ def roster_files(roots: Sequence[Path]) -> List[Path]:
 
 
 def academic_files(root: Path) -> List[Path]:
-    return [path for path in list_source_files(root) if not is_snapshot_filename(path)]
+    return [path for path in list_source_files(root, ACADEMIC_SOURCE_EXTENSIONS) if not is_snapshot_filename(path)]
 
 
 def snapshot_files(root: Path) -> List[Path]:
@@ -2339,6 +2512,10 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     schema_columns = load_schema()["tables"]["academic_term"]
 
     for path in academic_files(root):
+        source_label = source_label_for_academic_path(path, root)
+        if is_copy_of_grades_raw_data_path(path):
+            continue
+
         if path.suffix.lower() == ".csv":
             raw = pd.read_csv(path)
             raw.columns = [canonical_header(column) for column in raw.columns]
@@ -2353,10 +2530,10 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 exceptions.append(
                     {
                         "exception_type": "academic_term_unparsed",
-                        "source_file": path.name,
+                        "source_file": source_label,
                         "student_id": "",
                         "term_code": "",
-                        "details": f"Could not infer term for {path.name}",
+                        "details": f"Could not infer term for {source_label}",
                     }
                 )
             rename_map = {
@@ -2394,7 +2571,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
                         "first_name": clean_text(record.get("First Name", "")),
                         "last_name": clean_text(record.get("Last Name", "")),
                         "email": normalize_email(record.get("Email", "")),
-                        "source_file": path.name,
+                        "source_file": source_label,
                         "source_sheet": "csv",
                         "term_code": term_code,
                         "term_label": term_label,
@@ -2419,73 +2596,25 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 )
             continue
 
-        workbook = load_workbook(path, data_only=True, read_only=True)
-        try:
-            for ws in workbook.worksheets:
-                term_label = parse_grade_term(path, ws.title)
-                if not term_label:
-                    continue
-                term_code, term_label, term_year, term_season = parse_term_code(term_label)
-                sheet_rows = list(ws.iter_rows(values_only=True))
-                if not sheet_rows:
-                    continue
-                header_row_idx = None
-                header_map: Dict[str, int] = {}
-                best_score = 0
-                for idx, candidate_row in enumerate(sheet_rows[:25]):
-                    candidate_map = map_grade_headers(candidate_row)
-                    score = len(candidate_map)
-                    if {"Last Name", "First Name"}.issubset(set(candidate_map)):
-                        score += 2
-                    if "Banner ID" in candidate_map or "Email" in candidate_map:
-                        score += 1
-                    if score > best_score:
-                        best_score = score
-                        header_row_idx = idx
-                        header_map = candidate_map
-                required = {"Last Name", "First Name"}
-                if header_row_idx is None or not required.issubset(set(header_map)):
-                    continue
-                for row in sheet_rows[header_row_idx + 1:]:
-                    first_name = get_cell(row, header_map.get("First Name"))
-                    last_name = get_cell(row, header_map.get("Last Name"))
-                    if not first_name and not last_name:
-                        continue
-                    banner_raw = get_cell(row, header_map.get("Banner ID"))
-                    rows.append(
-                        {
-                            "student_id": normalize_banner_id(banner_raw),
-                            "student_id_raw": clean_text(banner_raw),
-                            "identity_resolution_basis": "source_student_id" if clean_text(banner_raw) else "",
-                            "identity_resolution_notes": "",
-                            "first_name": clean_text(first_name),
-                            "last_name": clean_text(last_name),
-                            "email": normalize_email(get_cell(row, header_map.get("Email"))),
-                            "source_file": path.name,
-                            "source_sheet": ws.title,
-                            "term_code": term_code,
-                            "term_label": term_label,
-                            "term_year": term_year,
-                            "term_season": term_season,
-                            "term_source_basis": "filename_or_sheet",
-                            "academic_status_raw": clean_text(get_cell(row, header_map.get("Student Status"))),
-                            "major": clean_text(get_cell(row, header_map.get("Major"))),
-                            "term_gpa": get_cell(row, header_map.get("Term GPA")),
-                            "institutional_cumulative_gpa": get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")),
-                            "overall_cumulative_gpa": get_cell(row, header_map.get("Overall Cumulative GPA")) or get_cell(row, header_map.get("Overall GPA")),
-                            "transfer_gpa": get_cell(row, header_map.get("Transfer GPA")),
-                            "attempted_hours_term": get_cell(row, header_map.get("Semester Hours")),
-                            "earned_hours_term": get_cell(row, header_map.get("Term Passed Hours")),
-                            "institutional_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
-                            "total_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
-                            "academic_standing_raw": clean_text(get_cell(row, header_map.get("Current Academic Standing"))),
-                            "academic_standing_bucket": standing_bucket(get_cell(row, header_map.get("Current Academic Standing"))),
-                            "graduation_term_code": "",
-                            "graduation_term_label": "",
-                        }
-                    )
-        finally:
-            workbook.close()
+        table_sources, table_issues = academic_table_sources(path)
+        exceptions.extend(table_issues)
+        for sheet_name, table_rows in table_sources:
+            term_label = parse_grade_term(path, sheet_name)
+            if not term_label:
+                continue
+            term_code, term_label, term_year, term_season = parse_term_code(term_label)
+            parsed_rows, parsed_issues = extract_academic_rows_from_table_rows(
+                path,
+                source_label,
+                sheet_name,
+                table_rows,
+                term_code,
+                term_label,
+                term_year,
+                term_season,
+            )
+            rows.extend(parsed_rows)
+            exceptions.extend(parsed_issues)
 
     academic = pd.DataFrame(rows)
     if academic.empty:
@@ -2562,6 +2691,87 @@ def build_identity_maps(
             exceptions.append({"exception_type": "ambiguous_name_match", "source_file": "", "student_id": "", "term_code": "", "details": f"Name {key[0]} {key[1]} matched multiple student IDs: {', '.join(sorted(ids))}"})
 
     return email_map, name_map, pd.DataFrame(exceptions)
+
+
+def build_roster_supplement_from_academic(academic: pd.DataFrame) -> pd.DataFrame:
+    schema_columns = load_schema()["tables"]["roster_term"]
+    if academic.empty:
+        return pd.DataFrame(columns=schema_columns)
+
+    copy_grades_mask = academic.get("term_source_basis", pd.Series("", index=academic.index)).fillna("").astype(str).str.startswith("copy_of_grades")
+    supplement_source = academic.loc[copy_grades_mask].copy()
+    if supplement_source.empty:
+        return pd.DataFrame(columns=schema_columns)
+
+    rows: List[dict] = []
+    for row in supplement_source.itertuples(index=False):
+        relative_path = Path(clean_text(getattr(row, "source_file", "")))
+        sheet_name = clean_text(getattr(row, "source_sheet", ""))
+        raw_status = clean_text(getattr(row, "academic_status_raw", ""))
+        source_is_new_member = source_context_indicates_new_member(relative_path, sheet_name)
+        status_bucket = roster_status_bucket(raw_status, "")
+        if should_upgrade_to_new_member_status(raw_status, "", source_is_new_member, False):
+            status_bucket = "New Member"
+
+        default_chapter = infer_chapter(relative_path, sheet_name) or normalize_chapter_name(sheet_name or relative_path.stem) or "Unknown"
+        if default_chapter and default_chapter != "Unknown":
+            if normalize_chapter_name(sheet_name) == default_chapter and not is_placeholder_sheet_name(sheet_name):
+                chapter_source = "inferred_from_sheet_name"
+            elif chapter_from_filename(relative_path) == default_chapter:
+                chapter_source = "inferred_from_file_name"
+            else:
+                chapter_source = "inferred_from_file_name"
+        else:
+            chapter_source = "unresolved"
+        chapter, chapter_assignment_source, chapter_assignment_confidence, chapter_assignment_notes = chapter_assignment_details(
+            relative_path,
+            sheet_name,
+            "",
+            sheet_name or relative_path.stem,
+            chapter_source,
+        )
+        if not chapter:
+            continue
+
+        rows.append(
+            {
+                "student_id": normalize_banner_id(getattr(row, "student_id_raw", "") or getattr(row, "student_id", "")),
+                "student_id_raw": clean_text(getattr(row, "student_id_raw", "")),
+                "identity_resolution_basis": clean_text(getattr(row, "identity_resolution_basis", "")),
+                "identity_resolution_notes": clean_text(getattr(row, "identity_resolution_notes", "")),
+                "first_name": clean_text(getattr(row, "first_name", "")),
+                "last_name": clean_text(getattr(row, "last_name", "")),
+                "email": normalize_email(getattr(row, "email", "")),
+                "source_file": clean_text(getattr(row, "source_file", "")),
+                "source_sheet": sheet_name,
+                "roster_file_version": "Academic Grades",
+                "roster_file_version_priority": 5,
+                "roster_file_month": "",
+                "roster_file_month_priority": 0,
+                "term_code": clean_text(getattr(row, "term_code", "")),
+                "term_label": clean_text(getattr(row, "term_label", "")),
+                "term_year": getattr(row, "term_year", pd.NA),
+                "term_season": clean_text(getattr(row, "term_season", "")),
+                "term_source_basis": clean_text(getattr(row, "term_source_basis", "")) or "copy_of_grades_roster_supplement",
+                "chapter": chapter,
+                "chapter_raw": chapter,
+                "chapter_assignment_source": chapter_assignment_source,
+                "chapter_assignment_confidence": chapter_assignment_confidence,
+                "chapter_assignment_notes": chapter_assignment_notes or "Synthesized from Copy of Grades academic report.",
+                "org_status_raw": raw_status,
+                "org_status_bucket": status_bucket,
+                "org_position_raw": "",
+                "semester_joined_raw": clean_text(getattr(row, "term_label", "")) if status_bucket == "New Member" else "",
+                "new_member_flag": "Yes" if status_bucket == "New Member" else "No",
+                "org_entry_term_code": "",
+                "org_entry_term_basis": "",
+            }
+        )
+
+    supplement = pd.DataFrame(rows)
+    if supplement.empty:
+        return pd.DataFrame(columns=schema_columns)
+    return ensure_columns(supplement, schema_columns)
 
 
 def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map: Dict[Tuple[str, str], str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -3028,6 +3238,11 @@ def prepare_canonical_sources(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
 
+    academic_roster_supplement = build_roster_supplement_from_academic(academic_term)
+    if not academic_roster_supplement.empty:
+        roster_term = pd.concat([roster_term, academic_roster_supplement], ignore_index=True)
+        roster_term = ensure_columns(roster_term, load_schema()["tables"]["roster_term"])
+
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
@@ -3125,17 +3340,28 @@ def dedupe_table(frame: pd.DataFrame, unique_keys: Sequence[str], source_label: 
         if source_label == "roster" and "roster_file_month_priority" in ranked.columns
         else 0
     )
+    ranked["_source_origin_priority"] = (
+        ranked.apply(lambda row: academic_source_priority(row.get("source_file", ""), row.get("term_source_basis", "")), axis=1)
+        if source_label == "academic"
+        else 0
+    )
     ranked["_source_format_priority"] = (
         ranked.get("source_file", pd.Series([""] * len(ranked), index=ranked.index)).map(source_file_format_priority)
-        if source_label == "roster"
+        if source_label in {"roster", "academic"}
         else 0
     )
     ranked["_completeness"] = ranked.notna().sum(axis=1)
     ranked["_update_key"] = ranked["source_file"].map(update_key_from_name) if "source_file" in ranked.columns else [(0, 0, 0)] * len(ranked)
-    ranked = ranked.sort_values(by=effective_keys + ["_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"], ascending=[True] * len(effective_keys) + [False, False, False, False, False])
+    ranked = ranked.sort_values(
+        by=effective_keys + ["_source_origin_priority", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"],
+        ascending=[True] * len(effective_keys) + [False, False, False, False, False, False],
+    )
     duplicate_mask = ranked.duplicated(subset=effective_keys, keep="first")
     exceptions = ranked.loc[duplicate_mask].copy()
-    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(columns=["_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"] + (["_identity_key"] if "_identity_key" in ranked.columns else []))
+    deduped = ranked.drop_duplicates(subset=effective_keys, keep="first").drop(
+        columns=["_source_origin_priority", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_completeness", "_update_key"]
+        + (["_identity_key"] if "_identity_key" in ranked.columns else [])
+    )
     if exceptions.empty:
         return deduped.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
     exception_rows = []

@@ -67,6 +67,103 @@ CURRENT_ACTIVE_DIMENSION_OVERRIDES = {
     "active_membership_group": "current_active_membership_group",
 }
 PERSISTENCE_DEFAULT_DISTINCTION = "ALL"
+FILTER_LIST_STATE_KEYS = [
+    "chapters",
+    "chapter_groups",
+    "custom_groups",
+    "councils",
+    "org_types",
+    "families",
+    "join_terms",
+    "statuses",
+    "resolved_outcome_groups",
+    "majors",
+    "pell_groups",
+    "transfer_groups",
+    "estimated_join_stages",
+    "high_hours_groups",
+    "active_groups",
+    "chapter_size_bands",
+    "snapshot_groups",
+    "observed_terms",
+]
+
+
+def _display_metric_value(value: object, format_code: str, missing: str = "n/a") -> str:
+    if value is None or pd.isna(value):
+        return missing
+    return format_metric_value(value, format_code)
+
+
+def _format_display_frame(
+    frame: pd.DataFrame,
+    *,
+    percent_cols: list[str] | tuple[str, ...] = (),
+    one_decimal_cols: list[str] | tuple[str, ...] = (),
+    decimal_cols: list[str] | tuple[str, ...] = (),
+    integer_cols: list[str] | tuple[str, ...] = (),
+) -> pd.DataFrame:
+    display = frame.copy()
+    for column in percent_cols:
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
+    for column in one_decimal_cols:
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.1f}")
+    for column in decimal_cols:
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
+    for column in integer_cols:
+        if column in display.columns:
+            display[column] = display[column].map(lambda value: "" if pd.isna(value) else f"{int(value):,}")
+    return display
+
+
+def _unique_text_options(frame: pd.DataFrame, column: str) -> list[str]:
+    if column not in frame.columns:
+        return []
+    return sorted(
+        frame[column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+
+def _source_status_rows(statuses: List[DataSourceStatus]) -> list[dict[str, object]]:
+    rows = []
+    for status in statuses:
+        rows.append(
+            {
+                "Source": status.label,
+                "Available": "Yes" if status.available else "No",
+                "Selected Path": str(status.selected_path) if status.selected_path else str(status.root_path),
+                "Warnings": " | ".join(status.warnings) if status.warnings else "",
+            }
+        )
+    return rows
+
+
+def _source_file_status_rows(statuses: List[DataSourceStatus]) -> list[dict[str, object]]:
+    rows = []
+    for status in statuses:
+        for file_status in status.files:
+            rows.append(
+                {
+                    "Source": status.label,
+                    "File": file_status.label,
+                    "Required": "Yes" if file_status.required else "No",
+                    "Exists": "Yes" if file_status.exists else "No",
+                    "Last Modified": file_status.last_modified,
+                    "Path": str(file_status.path),
+                    "Warning": file_status.warning,
+                }
+            )
+    return rows
 
 
 def _persistence_header() -> None:
@@ -186,10 +283,11 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     _save_chart_downloads(chart, f"persistence_graduation_{safe_slug(cohort_term)}_{safe_slug(distinction)}")
 
     if not table_frame.empty:
-        display_table = table_frame.copy()
-        for percent_col in ["Retained", "Graduated", "Not Retained / Unresolved"]:
-            display_table[percent_col] = display_table[percent_col].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
-        st.dataframe(display_table, use_container_width=True, hide_index=True)
+        st.dataframe(
+            _format_display_frame(table_frame, percent_cols=["Retained", "Graduated", "Not Retained / Unresolved"]),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.caption(meta["note"])
     st.caption("Caution: this page uses organization-entry cohorts rather than true first-time-in-college cohorts. It is designed to match the institutional presentation format as closely as the available FSL data allows.")
@@ -241,19 +339,15 @@ def _render_chapter_health_dashboard(bundle) -> None:
     with top_kpi_cols[2]:
         st.metric("Students entering chapter", f"{int(kpis['students_entering_chapter']):,}")
     with top_kpi_cols[3]:
-        resolved_value = kpis["resolved_graduation_rate"]
-        st.metric("Resolved grad rate", "n/a" if pd.isna(resolved_value) else f"{resolved_value:.1%}")
+        st.metric("Resolved grad rate", _display_metric_value(kpis["resolved_graduation_rate"], "percent"))
 
     second_kpi_cols = st.columns(4)
     with second_kpi_cols[0]:
-        full_value = kpis["full_population_graduation_rate"]
-        st.metric("Full-pop grad rate", "n/a" if pd.isna(full_value) else f"{full_value:.1%}")
+        st.metric("Full-pop grad rate", _display_metric_value(kpis["full_population_graduation_rate"], "percent"))
     with second_kpi_cols[1]:
-        retention_value = kpis["next_fall_retention_rate"]
-        st.metric("Next-fall retention", "n/a" if pd.isna(retention_value) else f"{retention_value:.1%}")
+        st.metric("Next-fall retention", _display_metric_value(kpis["next_fall_retention_rate"], "percent"))
     with second_kpi_cols[2]:
-        gpa_value = kpis["average_first_year_gpa"]
-        st.metric("Avg first-year GPA", "n/a" if pd.isna(gpa_value) else f"{gpa_value:.2f}")
+        st.metric("Avg first-year GPA", _display_metric_value(kpis["average_first_year_gpa"], "decimal"))
     with second_kpi_cols[3]:
         unresolved_label = f"{int(kpis['roster_disappeared_unknown']):,} / {int(kpis['unknown_outcomes']):,}"
         st.metric("Roster disappeared / unknown", unresolved_label)
@@ -329,9 +423,7 @@ def _render_chapter_health_dashboard(bundle) -> None:
             )
             st.plotly_chart(outcome_chart, use_container_width=True)
             _save_chart_downloads(outcome_chart, f"chapter_health_outcomes_{safe_slug(selected_chapter)}")
-            display_breakdown = outcome_breakdown.copy()
-            display_breakdown["Share"] = display_breakdown["Share"].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
-            st.dataframe(display_breakdown, use_container_width=True, hide_index=True)
+            st.dataframe(_format_display_frame(outcome_breakdown, percent_cols=["Share"]), use_container_width=True, hide_index=True)
         else:
             st.caption("No entry-student outcome breakdown is available for this chapter.")
 
@@ -341,12 +433,15 @@ def _render_chapter_health_dashboard(bundle) -> None:
         if cohort_table.empty:
             st.caption("No chapter-entry cohorts were available for this chapter.")
         else:
-            display_cohorts = cohort_table.copy()
-            for percent_col in ["Resolved Graduation Rate", "Full Population Graduation Rate", "Next Fall Retention"]:
-                display_cohorts[percent_col] = display_cohorts[percent_col].map(lambda value: "" if pd.isna(value) else f"{value:.1%}")
-            for gpa_col in ["Average First-Year GPA", "Average Cumulative GPA"]:
-                display_cohorts[gpa_col] = display_cohorts[gpa_col].map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
-            st.dataframe(display_cohorts, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _format_display_frame(
+                    cohort_table,
+                    percent_cols=["Resolved Graduation Rate", "Full Population Graduation Rate", "Next Fall Retention"],
+                    decimal_cols=["Average First-Year GPA", "Average Cumulative GPA"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with review_tab:
         st.subheader("Current active members")
@@ -354,24 +449,22 @@ def _render_chapter_health_dashboard(bundle) -> None:
         if current_active_students.empty:
             st.caption("This chapter does not currently appear as active on the latest roster.")
         else:
-            display_active = current_active_students.copy()
-            if "Data Completeness Rate" in display_active.columns:
-                display_active["Data Completeness Rate"] = display_active["Data Completeness Rate"].map(
-                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
-                )
-            st.dataframe(display_active, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _format_display_frame(current_active_students, percent_cols=["Data Completeness Rate"]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
         st.subheader("Students needing review")
         review_students = dashboard["review_students"]
         if review_students.empty:
             st.caption("No unresolved or roster-disappeared entry students are currently flagged for this chapter.")
         else:
-            display_review = review_students.copy()
-            if "Data Completeness Rate" in display_review.columns:
-                display_review["Data Completeness Rate"] = display_review["Data Completeness Rate"].map(
-                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
-                )
-            st.dataframe(display_review, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _format_display_frame(review_students, percent_cols=["Data Completeness Rate"]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def _render_advisor_help_dashboard(bundle) -> None:
@@ -405,8 +498,8 @@ def _render_advisor_help_dashboard(bundle) -> None:
         return
 
     filter_cols = st.columns(3)
-    council_options = ["All"] + sorted(queue["Council"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
-    chapter_options = ["All"] + sorted(queue["Current Chapter"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist())
+    council_options = ["All"] + _unique_text_options(queue, "Council")
+    chapter_options = ["All"] + _unique_text_options(queue, "Current Chapter")
     priority_options = ["High", "Medium", "Monitor"]
 
     with filter_cols[0]:
@@ -439,27 +532,26 @@ def _render_advisor_help_dashboard(bundle) -> None:
         if rollup_view.empty:
             st.caption("No chapter-level advisor flags matched the current filter.")
         else:
-            display_rollup = rollup_view.copy()
-            if "Average Risk Score" in display_rollup.columns:
-                display_rollup["Average Risk Score"] = display_rollup["Average Risk Score"].map(
-                    lambda value: "" if pd.isna(value) else f"{value:.1f}"
-                )
-            st.dataframe(display_rollup, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _format_display_frame(rollup_view, one_decimal_cols=["Average Risk Score"]),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with student_tab:
         st.subheader("Students needing outreach or cleanup follow-up")
         if queue_view.empty:
             st.caption("No active students matched the current advisor-help filters.")
         else:
-            display_queue = queue_view.copy()
-            for gpa_col in ["Average Cumulative GPA", "Average First-Year GPA"]:
-                if gpa_col in display_queue.columns:
-                    display_queue[gpa_col] = display_queue[gpa_col].map(lambda value: "" if pd.isna(value) else f"{value:.2f}")
-            if "Data Completeness Rate" in display_queue.columns:
-                display_queue["Data Completeness Rate"] = display_queue["Data Completeness Rate"].map(
-                    lambda value: "" if pd.isna(value) else f"{value:.0%}"
-                )
-            st.dataframe(display_queue, use_container_width=True, hide_index=True)
+            st.dataframe(
+                _format_display_frame(
+                    queue_view,
+                    percent_cols=["Data Completeness Rate"],
+                    decimal_cols=["Average Cumulative GPA", "Average First-Year GPA"],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
@@ -508,26 +600,7 @@ def _reset_state_for_dataset(version_key: str, metrics: List[MetricDefinition], 
     obs_max = int(numeric_observed_years.max()) if not numeric_observed_years.empty else join_max
     st.session_state["observed_year_range"] = (obs_min, obs_max)
 
-    for key in [
-        "chapters",
-        "chapter_groups",
-        "custom_groups",
-        "councils",
-        "org_types",
-        "families",
-        "join_terms",
-        "statuses",
-        "resolved_outcome_groups",
-        "majors",
-        "pell_groups",
-        "transfer_groups",
-        "estimated_join_stages",
-        "high_hours_groups",
-        "active_groups",
-        "chapter_size_bands",
-        "snapshot_groups",
-        "observed_terms",
-    ]:
+    for key in FILTER_LIST_STATE_KEYS:
         st.session_state[key] = []
 
     if not metadata.get("available_campus_baseline"):
@@ -540,24 +613,7 @@ def _collect_filters() -> Dict[str, object]:
         "join_year_range": st.session_state.get("join_year_range"),
         "graduation_year_range": st.session_state.get("graduation_year_range"),
         "observed_year_range": st.session_state.get("observed_year_range"),
-        "chapters": st.session_state.get("chapters", []),
-        "chapter_groups": st.session_state.get("chapter_groups", []),
-        "custom_groups": st.session_state.get("custom_groups", []),
-        "councils": st.session_state.get("councils", []),
-        "org_types": st.session_state.get("org_types", []),
-        "families": st.session_state.get("families", []),
-        "join_terms": st.session_state.get("join_terms", []),
-        "statuses": st.session_state.get("statuses", []),
-        "resolved_outcome_groups": st.session_state.get("resolved_outcome_groups", []),
-        "majors": st.session_state.get("majors", []),
-        "pell_groups": st.session_state.get("pell_groups", []),
-        "transfer_groups": st.session_state.get("transfer_groups", []),
-        "estimated_join_stages": st.session_state.get("estimated_join_stages", []),
-        "high_hours_groups": st.session_state.get("high_hours_groups", []),
-        "active_groups": st.session_state.get("active_groups", []),
-        "chapter_size_bands": st.session_state.get("chapter_size_bands", []),
-        "snapshot_groups": st.session_state.get("snapshot_groups", []),
-        "observed_terms": st.session_state.get("observed_terms", []),
+        **{key: st.session_state.get(key, []) for key in FILTER_LIST_STATE_KEYS},
     }
 
 
@@ -594,35 +650,13 @@ def _save_chart_downloads(figure, key_prefix: str) -> None:
 
 
 def _render_source_scan(statuses: List[DataSourceStatus]) -> None:
-    rows = []
-    for status in statuses:
-        rows.append(
-            {
-                "Source": status.label,
-                "Available": "Yes" if status.available else "No",
-                "Selected Path": str(status.selected_path) if status.selected_path else str(status.root_path),
-                "Warnings": " | ".join(status.warnings) if status.warnings else "",
-            }
-        )
+    rows = _source_status_rows(statuses)
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def _render_source_file_status(statuses: List[DataSourceStatus]) -> None:
-    rows = []
-    for status in statuses:
-        for file_status in status.files:
-            rows.append(
-                {
-                    "Source": status.label,
-                    "File": file_status.label,
-                    "Required": "Yes" if file_status.required else "No",
-                    "Exists": "Yes" if file_status.exists else "No",
-                    "Last Modified": file_status.last_modified,
-                    "Path": str(file_status.path),
-                    "Warning": file_status.warning,
-                }
-            )
+    rows = _source_file_status_rows(statuses)
     if rows:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 

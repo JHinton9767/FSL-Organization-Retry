@@ -52,6 +52,30 @@ CHAPTER_HEALTH_OUTCOME_ORDER = [
 ]
 RISK_SEVERITY_ORDER = {"High": 0, "Medium": 1, "Monitor": 2}
 ADVISOR_PRIORITY_ORDER = {"High": 0, "Medium": 1, "Monitor": 2}
+ADVISOR_QUEUE_RENAME_MAP = {
+    "priority": "Priority",
+    "risk_score": "Risk Score",
+    "student_name": "Student Name",
+    "student_id": "Student ID",
+    "current_chapter_label": "Current Chapter",
+    "current_council_label": "Council",
+    "join_term": "Join Term",
+    "average_cumulative_gpa_num": "Average Cumulative GPA",
+    "first_year_avg_term_gpa_num": "Average First-Year GPA",
+    "data_completeness_rate_num": "Data Completeness Rate",
+    "latest_outcome_bucket": "Latest Outcome",
+    "risk_flags_text": "Risk Flags",
+}
+ADVISOR_ROLLUP_COLUMNS = [
+    "Current Chapter",
+    "Council",
+    "Current Active Students",
+    "Flagged Students",
+    "High Priority",
+    "Medium Priority",
+    "Monitor",
+    "Average Risk Score",
+]
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -101,6 +125,63 @@ def _truthy_series(series: pd.Series | None, index: pd.Index) -> pd.Series:
         return pd.Series(False, index=index, dtype="bool")
     lowered = series.fillna("").astype(str).str.strip().str.lower()
     return (lowered.eq("true") | lowered.eq("yes") | lowered.eq("1")).fillna(False)
+
+
+def _text_series(series: pd.Series | None, index: pd.Index) -> pd.Series:
+    if series is None:
+        return pd.Series("", index=index, dtype="object")
+    return series.fillna("").astype(str).str.strip()
+
+
+def _frame_text_series(frame: pd.DataFrame, column: str, default: str = "") -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(default, index=frame.index, dtype="object")
+    return _text_series(frame[column], frame.index)
+
+
+def _lower_text_series(series: pd.Series | None, index: pd.Index) -> pd.Series:
+    return _text_series(series, index).str.lower()
+
+
+def _chapter_match_mask(frame: pd.DataFrame, column: str, chapter_key: str) -> pd.Series:
+    return _lower_text_series(frame.get(column), frame.index).eq(chapter_key)
+
+
+def _truthy_filter(frame: pd.DataFrame, column: str) -> pd.DataFrame:
+    return frame.loc[_truthy_series(frame.get(column), frame.index)].copy()
+
+
+def _truthy_student_count(frame: pd.DataFrame, column: str) -> int:
+    return student_count(_truthy_filter(frame, column))
+
+
+def _selected_table(
+    frame: pd.DataFrame,
+    rename_map: dict[str, str],
+    sort_by: list[str] | None = None,
+) -> pd.DataFrame:
+    present_columns = [column for column in rename_map if column in frame.columns]
+    if not present_columns:
+        return pd.DataFrame(columns=list(rename_map.values()))
+    result = frame.loc[:, present_columns].rename(columns={column: rename_map[column] for column in present_columns})
+    if sort_by:
+        present_sort = [column for column in sort_by if column in result.columns]
+        if present_sort:
+            result = result.sort_values(present_sort, na_position="last")
+    return result.reset_index(drop=True)
+
+
+def _sort_join_term_table(frame: pd.DataFrame, join_term_column: str = "Join Term", name_column: str = "Student Name") -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    if join_term_column in frame.columns:
+        frame = frame.copy()
+        frame["_join_sort"] = frame[join_term_column].map(persistence_cohort_sort_key)
+        sort_columns = ["_join_sort"] + ([name_column] if name_column in frame.columns else [])
+        return frame.sort_values(sort_columns, na_position="last").drop(columns=["_join_sort"]).reset_index(drop=True)
+    if name_column in frame.columns:
+        return frame.sort_values([name_column], na_position="last").reset_index(drop=True)
+    return frame.reset_index(drop=True)
 
 
 def _first_non_blank(series: pd.Series | None) -> str:
@@ -707,14 +788,7 @@ def chapter_health_options(summary: pd.DataFrame, longitudinal: pd.DataFrame) ->
         for column in columns:
             if column not in frame.columns:
                 continue
-            cleaned = (
-                frame[column]
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .replace("", pd.NA)
-                .dropna()
-            )
+            cleaned = _frame_text_series(frame, column).replace("", pd.NA).dropna()
             values.update(value for value in cleaned.tolist() if str(value).strip().lower() != "unknown")
     return sorted(values, key=lambda value: value.lower())
 
@@ -1117,25 +1191,21 @@ def build_chapter_health_dashboard(
     summary_work = summary.copy()
     longitudinal_work = longitudinal.copy()
 
-    entry_students = summary_work.loc[
-        summary_work.get("initial_chapter", pd.Series("", index=summary_work.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
-    ].copy()
+    entry_students = summary_work.loc[_chapter_match_mask(summary_work, "initial_chapter", chapter_key)].copy()
 
     related_masks = []
     for column in ["chapter", "initial_chapter", "latest_chapter", "current_active_chapter"]:
         if column in summary_work.columns:
-            related_masks.append(summary_work[column].fillna("").astype(str).str.strip().str.lower().eq(chapter_key))
+            related_masks.append(_chapter_match_mask(summary_work, column, chapter_key))
     chapter_summary = summary_work.loc[pd.concat(related_masks, axis=1).any(axis=1)].copy() if related_masks else pd.DataFrame(columns=summary_work.columns)
 
-    chapter_rows = longitudinal_work.loc[
-        longitudinal_work.get("chapter", pd.Series("", index=longitudinal_work.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
-    ].copy()
+    chapter_rows = longitudinal_work.loc[_chapter_match_mask(longitudinal_work, "chapter", chapter_key)].copy()
 
     if entry_students.empty and chapter_summary.empty and chapter_rows.empty:
         return empty
 
     current_active = chapter_summary.loc[
-        chapter_summary.get("current_active_chapter", pd.Series("", index=chapter_summary.index)).fillna("").astype(str).str.strip().str.lower().eq(chapter_key)
+        _chapter_match_mask(chapter_summary, "current_active_chapter", chapter_key)
         & _truthy_series(chapter_summary.get("current_active_flag"), chapter_summary.index)
     ].copy()
 
@@ -1155,21 +1225,15 @@ def build_chapter_health_dashboard(
     ever_observed_total = student_count(chapter_rows if not chapter_rows.empty else chapter_summary)
     resolved_entry = resolved_outcomes_only_frame(entry_students)
     resolved_total = student_count(resolved_entry)
-    graduated_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_graduated"), entry_students.index)])
-    active_outcome_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_active_outcome"), entry_students.index)])
-    unknown_total = student_count(entry_students.loc[_truthy_series(entry_students.get("is_unknown_outcome"), entry_students.index)])
-    roster_disappeared_total = student_count(
-        entry_students.loc[entry_students.get("roster_disappeared_unknown_flag", pd.Series("", index=entry_students.index)).fillna("").astype(str).str.strip().eq("Yes")]
-    )
-    resolved_non_grad_total = student_count(
-        entry_students.loc[_truthy_series(entry_students.get("is_known_non_graduate_exit"), entry_students.index)]
-    )
+    graduated_total = _truthy_student_count(entry_students, "is_graduated")
+    active_outcome_total = _truthy_student_count(entry_students, "is_active_outcome")
+    unknown_total = _truthy_student_count(entry_students, "is_unknown_outcome")
+    roster_disappeared_total = _truthy_student_count(entry_students, "roster_disappeared_unknown_flag")
+    resolved_non_grad_total = _truthy_student_count(entry_students, "is_known_non_graduate_exit")
 
-    measurable_next_fall = entry_students.loc[_truthy_series(entry_students.get("retained_next_fall_measurable"), entry_students.index)].copy()
+    measurable_next_fall = _truthy_filter(entry_students, "retained_next_fall_measurable")
     measurable_next_fall_n = student_count(measurable_next_fall)
-    retained_next_fall_n = student_count(
-        measurable_next_fall.loc[_truthy_series(measurable_next_fall.get("retained_next_fall"), measurable_next_fall.index)]
-    )
+    retained_next_fall_n = _truthy_student_count(measurable_next_fall, "retained_next_fall")
     resolved_grad_rate = (graduated_total / resolved_total) if resolved_total else np.nan
     full_grad_rate = (graduated_total / entry_total) if entry_total else np.nan
     next_fall_rate = (retained_next_fall_n / measurable_next_fall_n) if measurable_next_fall_n else np.nan
@@ -1184,8 +1248,8 @@ def build_chapter_health_dashboard(
         "resolved_graduation_rate": resolved_grad_rate,
         "full_population_graduation_rate": full_grad_rate,
         "next_fall_retention_rate": next_fall_rate,
-        "average_first_year_gpa": pd.to_numeric(entry_students.get("first_year_avg_term_gpa"), errors="coerce").mean(),
-        "average_cumulative_gpa": pd.to_numeric(entry_students.get("average_cumulative_gpa"), errors="coerce").mean(),
+        "average_first_year_gpa": first_year_gpa_series.mean(),
+        "average_cumulative_gpa": cumulative_gpa_series.mean(),
         "first_year_gpa_students": int(first_year_gpa_series.notna().sum()),
         "cumulative_gpa_students": int(cumulative_gpa_series.notna().sum()),
         "average_data_completeness_rate": completeness_series.mean(),
@@ -1279,17 +1343,15 @@ def build_chapter_health_dashboard(
             cohort_students = student_count(frame)
             cohort_resolved = resolved_outcomes_only_frame(frame)
             cohort_resolved_n = student_count(cohort_resolved)
-            cohort_graduated_n = student_count(frame.loc[_truthy_series(frame.get("is_graduated"), frame.index)])
-            cohort_active_n = student_count(frame.loc[_truthy_series(frame.get("is_active_outcome"), frame.index)])
-            cohort_unknown_n = student_count(frame.loc[_truthy_series(frame.get("is_unknown_outcome"), frame.index)])
-            cohort_roster_disappeared_n = student_count(
-                frame.loc[frame.get("roster_disappeared_unknown_flag", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().eq("Yes")]
-            )
-            cohort_measurable = frame.loc[_truthy_series(frame.get("retained_next_fall_measurable"), frame.index)].copy()
+            cohort_graduated_n = _truthy_student_count(frame, "is_graduated")
+            cohort_active_n = _truthy_student_count(frame, "is_active_outcome")
+            cohort_unknown_n = _truthy_student_count(frame, "is_unknown_outcome")
+            cohort_roster_disappeared_n = _truthy_student_count(frame, "roster_disappeared_unknown_flag")
+            cohort_measurable = _truthy_filter(frame, "retained_next_fall_measurable")
             cohort_measurable_n = student_count(cohort_measurable)
-            cohort_retained_n = student_count(
-                cohort_measurable.loc[_truthy_series(cohort_measurable.get("retained_next_fall"), cohort_measurable.index)]
-            )
+            cohort_retained_n = _truthy_student_count(cohort_measurable, "retained_next_fall")
+            cohort_first_year_gpa = _numeric_series(frame, "first_year_avg_term_gpa")
+            cohort_cumulative_gpa = _numeric_series(frame, "average_cumulative_gpa")
             cohort_rows.append(
                 {
                     "Cohort": _label_or_unknown(join_term),
@@ -1302,8 +1364,8 @@ def build_chapter_health_dashboard(
                     "Resolved Graduation Rate": (cohort_graduated_n / cohort_resolved_n) if cohort_resolved_n else np.nan,
                     "Full Population Graduation Rate": (cohort_graduated_n / cohort_students) if cohort_students else np.nan,
                     "Next Fall Retention": (cohort_retained_n / cohort_measurable_n) if cohort_measurable_n else np.nan,
-                    "Average First-Year GPA": pd.to_numeric(frame.get("first_year_avg_term_gpa"), errors="coerce").mean(),
-                    "Average Cumulative GPA": pd.to_numeric(frame.get("average_cumulative_gpa"), errors="coerce").mean(),
+                    "Average First-Year GPA": cohort_first_year_gpa.mean(),
+                    "Average Cumulative GPA": cohort_cumulative_gpa.mean(),
                 }
             )
     cohort_table = pd.DataFrame(cohort_rows)
@@ -1313,74 +1375,38 @@ def build_chapter_health_dashboard(
 
     current_active_students = pd.DataFrame()
     if not current_active.empty:
-        current_active_students = (
-            current_active.loc[
-                :,
-                [
-                    column
-                    for column in [
-                        "student_name",
-                        "student_id",
-                        "join_term",
-                        "current_active_roster_term",
-                        "latest_outcome_bucket",
-                        "data_completeness_rate",
-                    ]
-                    if column in current_active.columns
-                ],
-            ]
-            .rename(
-                columns={
-                    "student_name": "Student Name",
-                    "student_id": "Student ID",
-                    "join_term": "Join Term",
-                    "current_active_roster_term": "Current Active Roster Term",
-                    "latest_outcome_bucket": "Latest Outcome",
-                    "data_completeness_rate": "Data Completeness Rate",
-                }
-            )
-            .sort_values(["Student Name", "Student ID"], na_position="last")
-            .reset_index(drop=True)
+        current_active_students = _selected_table(
+            current_active,
+            {
+                "student_name": "Student Name",
+                "student_id": "Student ID",
+                "join_term": "Join Term",
+                "current_active_roster_term": "Current Active Roster Term",
+                "latest_outcome_bucket": "Latest Outcome",
+                "data_completeness_rate": "Data Completeness Rate",
+            },
+            sort_by=["Student Name", "Student ID"],
         )
 
     review_students = pd.DataFrame()
     if not entry_students.empty:
         review_mask = (
             _truthy_series(entry_students.get("is_unknown_outcome"), entry_students.index)
-            | entry_students.get("roster_disappeared_unknown_flag", pd.Series("", index=entry_students.index)).fillna("").astype(str).str.strip().eq("Yes")
+            | _truthy_series(entry_students.get("roster_disappeared_unknown_flag"), entry_students.index)
         )
-        review_students = (
-            entry_students.loc[review_mask, [
-                column
-                for column in [
-                    "student_name",
-                    "student_id",
-                    "join_term",
-                    "latest_outcome_bucket",
-                    "outcome_resolution_group",
-                    "outcome_evidence_source",
-                    "data_completeness_rate",
-                ]
-                if column in entry_students.columns
-            ]]
-            .rename(
-                columns={
-                    "student_name": "Student Name",
-                    "student_id": "Student ID",
-                    "join_term": "Join Term",
-                    "latest_outcome_bucket": "Latest Outcome",
-                    "outcome_resolution_group": "Outcome Resolution Group",
-                    "outcome_evidence_source": "Outcome Evidence Source",
-                    "data_completeness_rate": "Data Completeness Rate",
-                }
-            )
+        review_students = _selected_table(
+            entry_students.loc[review_mask].copy(),
+            {
+                "student_name": "Student Name",
+                "student_id": "Student ID",
+                "join_term": "Join Term",
+                "latest_outcome_bucket": "Latest Outcome",
+                "outcome_resolution_group": "Outcome Resolution Group",
+                "outcome_evidence_source": "Outcome Evidence Source",
+                "data_completeness_rate": "Data Completeness Rate",
+            },
         )
-        if not review_students.empty and "Join Term" in review_students.columns:
-            review_students["_join_sort"] = review_students["Join Term"].map(persistence_cohort_sort_key)
-            review_students = review_students.sort_values(["_join_sort", "Student Name"], na_position="last").drop(columns=["_join_sort"])
-        else:
-            review_students = review_students.sort_values(["Student Name"], na_position="last")
-        review_students = review_students.reset_index(drop=True)
+        review_students = _sort_join_term_table(review_students)
 
     note_parts = []
     if current_active_total == 0:
@@ -1419,34 +1445,8 @@ def build_chapter_health_dashboard(
 
 
 def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]:
-    empty_queue = pd.DataFrame(
-        columns=[
-            "Priority",
-            "Risk Score",
-            "Student Name",
-            "Student ID",
-            "Current Chapter",
-            "Council",
-            "Join Term",
-            "Average Cumulative GPA",
-            "Average First-Year GPA",
-            "Data Completeness Rate",
-            "Latest Outcome",
-            "Risk Flags",
-        ]
-    )
-    empty_rollup = pd.DataFrame(
-        columns=[
-            "Current Chapter",
-            "Council",
-            "Current Active Students",
-            "Flagged Students",
-            "High Priority",
-            "Medium Priority",
-            "Monitor",
-            "Average Risk Score",
-        ]
-    )
+    empty_queue = pd.DataFrame(columns=list(ADVISOR_QUEUE_RENAME_MAP.values()))
+    empty_rollup = pd.DataFrame(columns=ADVISOR_ROLLUP_COLUMNS)
     empty = {
         "queue": empty_queue,
         "chapter_rollup": empty_rollup,
@@ -1467,14 +1467,12 @@ def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]
     if active.empty:
         return empty
 
-    active["current_chapter_label"] = active.get("current_active_chapter", pd.Series("", index=active.index)).where(
-        active.get("current_active_chapter", pd.Series("", index=active.index)).fillna("").astype(str).str.strip().ne(""),
-        active.get("latest_chapter", pd.Series("Unknown", index=active.index)),
-    )
-    active["current_council_label"] = active.get("current_active_council", pd.Series("", index=active.index)).where(
-        active.get("current_active_council", pd.Series("", index=active.index)).fillna("").astype(str).str.strip().ne(""),
-        active.get("council", pd.Series("Unknown", index=active.index)),
-    )
+    current_active_chapter = _frame_text_series(active, "current_active_chapter")
+    latest_chapter = _frame_text_series(active, "latest_chapter", default="Unknown")
+    current_active_council = _frame_text_series(active, "current_active_council")
+    latest_council = _frame_text_series(active, "council", default="Unknown")
+    active["current_chapter_label"] = current_active_chapter.where(current_active_chapter.ne(""), latest_chapter)
+    active["current_council_label"] = current_active_council.where(current_active_council.ne(""), latest_council)
     active["average_cumulative_gpa_num"] = _numeric_series(active, "average_cumulative_gpa")
     active["first_year_avg_term_gpa_num"] = _numeric_series(active, "first_year_avg_term_gpa")
     active["data_completeness_rate_num"] = _numeric_series(active, "data_completeness_rate")
@@ -1486,12 +1484,11 @@ def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]
     active["flag_borderline_first_year_gpa"] = active["first_year_avg_term_gpa_num"].between(2.3, 2.69, inclusive="both")
     active["flag_low_data_completeness"] = active["data_completeness_rate_num"].lt(0.60)
     active["flag_borderline_data_completeness"] = active["data_completeness_rate_num"].between(0.60, 0.79, inclusive="both")
-    active["flag_unknown_outcome_mismatch"] = _truthy_series(active.get("is_unknown_outcome"), active.index) | active.get(
-        "latest_outcome_bucket",
-        pd.Series("", index=active.index),
-    ).fillna("").astype(str).str.contains("unknown|unresolved", case=False, na=False)
-    active["flag_missing_current_chapter"] = active["current_chapter_label"].fillna("").astype(str).str.strip().eq("")
-    active["flag_missing_council"] = active["current_council_label"].fillna("").astype(str).str.strip().eq("")
+    active["flag_unknown_outcome_mismatch"] = _truthy_series(active.get("is_unknown_outcome"), active.index) | _frame_text_series(
+        active, "latest_outcome_bucket"
+    ).str.contains("unknown|unresolved", case=False, na=False)
+    active["flag_missing_current_chapter"] = _frame_text_series(active, "current_chapter_label").eq("")
+    active["flag_missing_council"] = _frame_text_series(active, "current_council_label").eq("")
 
     active["risk_score"] = (
         active["flag_critical_cumulative_gpa"].astype(int) * 5
@@ -1578,45 +1575,7 @@ def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]
     flagged["current_chapter_label"] = flagged["current_chapter_label"].map(_label_or_unknown)
     flagged["current_council_label"] = flagged["current_council_label"].map(_label_or_unknown)
 
-    queue = (
-        flagged.loc[
-            :,
-            [
-                column
-                for column in [
-                    "priority",
-                    "risk_score",
-                    "student_name",
-                    "student_id",
-                    "current_chapter_label",
-                    "current_council_label",
-                    "join_term",
-                    "average_cumulative_gpa_num",
-                    "first_year_avg_term_gpa_num",
-                    "data_completeness_rate_num",
-                    "latest_outcome_bucket",
-                    "risk_flags_text",
-                ]
-                if column in flagged.columns
-            ],
-        ]
-        .rename(
-            columns={
-                "priority": "Priority",
-                "risk_score": "Risk Score",
-                "student_name": "Student Name",
-                "student_id": "Student ID",
-                "current_chapter_label": "Current Chapter",
-                "current_council_label": "Council",
-                "join_term": "Join Term",
-                "average_cumulative_gpa_num": "Average Cumulative GPA",
-                "first_year_avg_term_gpa_num": "Average First-Year GPA",
-                "data_completeness_rate_num": "Data Completeness Rate",
-                "latest_outcome_bucket": "Latest Outcome",
-                "risk_flags_text": "Risk Flags",
-            }
-        )
-    )
+    queue = _selected_table(flagged, ADVISOR_QUEUE_RENAME_MAP)
     queue["_priority_sort"] = queue["Priority"].map(ADVISOR_PRIORITY_ORDER).fillna(99)
     queue = queue.sort_values(
         ["_priority_sort", "Risk Score", "Average Cumulative GPA", "Student Name"],
