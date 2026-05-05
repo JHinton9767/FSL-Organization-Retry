@@ -145,3 +145,22 @@ def test_dedupe_table_prefers_copy_of_grades_academic_rows() -> None:
     assert len(exceptions.index) == 1
     assert deduped.iloc[0]["source_file"].startswith("Copy of Grades")
     assert deduped.iloc[0]["term_gpa"] == 3.1
+
+
+def test_load_academic_term_table_reads_utf16_csv_exports(tmp_path: Path) -> None:
+    root = tmp_path
+    csv_path = root / "2024" / "Fall 2024" / "IFC" / "Alpha Sigma Phi grades.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text(
+        "Banner ID,Last Name,First Name,Student Status,Semester Hours,Term GPA,Overall GPA\n"
+        "A05233818,Smith,Alex,Active,15,3.1,3.2\n",
+        encoding="utf-16",
+    )
+
+    academic, exceptions = load_academic_term_table(root)
+
+    assert exceptions.empty
+    assert len(academic.index) == 1
+    assert academic.iloc[0]["student_id"] == "A05233818"
+    assert academic.iloc[0]["term_code"] == "2024FA"
+    assert academic.iloc[0]["term_gpa"] == 3.1

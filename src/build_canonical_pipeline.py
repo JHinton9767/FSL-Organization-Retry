@@ -325,6 +325,21 @@ def read_cached_frame(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def read_source_csv(path: Path) -> pd.DataFrame:
+    encodings = ["utf-8-sig", "utf-8", "utf-16", "utf-16-le", "utf-16-be", "latin1"]
+    last_error: Optional[Exception] = None
+    for encoding in encodings:
+        try:
+            return pd.read_csv(path, encoding=encoding, engine="python", sep=None)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
+        except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return pd.DataFrame()
+
+
 def write_cache_manifest(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -1620,7 +1635,7 @@ def ensure_transcript_text_manifest_template(path: Path = TRANSCRIPT_TEXT_MANIFE
 def load_transcript_text_manifest(path: Path = TRANSCRIPT_TEXT_MANIFEST_PATH) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=["source_file", "student_id", "first_name", "last_name", "notes"])
-    frame = pd.read_csv(path)
+    frame = read_source_csv(path)
     frame.columns = [canonical_header(column) for column in frame.columns]
     rename_map = {
         "source file": "source_file",
@@ -2238,7 +2253,7 @@ def load_snapshot_table(root: Path) -> pd.DataFrame:
     frames: List[pd.DataFrame] = []
     for path in snapshot_files(root):
         if path.suffix.lower() == ".csv":
-            frame = pd.read_csv(path)
+            frame = read_source_csv(path)
             frame.columns = [canonical_snapshot_header(column) for column in frame.columns]
         else:
             selected: Optional[pd.DataFrame] = None
@@ -2281,7 +2296,7 @@ def load_graduation_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     for path in graduation_files(root):
         try:
             if path.suffix.lower() == ".csv":
-                frame = pd.read_csv(path)
+                frame = read_source_csv(path)
                 frame.columns = [canonical_graduation_header(column) for column in frame.columns]
                 frames = [frame]
             else:
@@ -2520,7 +2535,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
             continue
 
         if path.suffix.lower() == ".csv":
-            raw = pd.read_csv(path)
+            raw = read_source_csv(path)
             raw.columns = [canonical_header(column) for column in raw.columns]
             inferred_term = ""
             for candidate in path_term_candidates(path):
