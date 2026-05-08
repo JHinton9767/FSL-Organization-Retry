@@ -4,6 +4,9 @@ data/inbox/current_snapshot/*
 !data/inbox/current_snapshot/.gitkeep
 data/inbox/rosters/*
 !data/inbox/rosters/.gitkeep
+data/inbox/transcript_text/**/*.txt
+!data/inbox/transcript_text/README.md
+!data/inbox/transcript_text/Transcripts/.gitkeep
 data/raw/
 data/processed/
 output/

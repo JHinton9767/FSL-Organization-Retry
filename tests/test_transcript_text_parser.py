@@ -99,3 +99,40 @@ def test_transcript_text_parser_ignores_pre_enrollment_section(tmp_path: Path) -
     assert len(transcript_academic) == 1
     assert transcript_audit.iloc[0]["warning_count"] == 0
     assert transcript_audit.iloc[0]["unmatched_lines"] == ""
+
+
+def test_transcript_text_parser_reads_inline_summary_values(tmp_path: Path) -> None:
+    transcript_dir = tmp_path / "transcript_text"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    transcript_file = transcript_dir / "A02223333_Doe_Jane.txt"
+    transcript_file.write_text(
+        "\n".join(
+            [
+                "Spring 2024",
+                "1 MC3117|LEC FREELANCING FOR MEDIA PROF. A",
+                "3 MC3375|LEC ELEC. MEDIA AS ENTERTAINMENT B",
+                "Term at a glance:",
+                "Credits: 4",
+                "Credit Comp %: 100%",
+                "Term GPA: 3.31",
+                "Cum GPA: 2.97",
+                "Academic Standing: Good Standing",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    transcript_terms, transcript_courses, transcript_audit, transcript_issues, transcript_academic = build_transcript_text_cache_bundle(
+        transcript_dir,
+        pd.DataFrame(columns=["source_file", "student_id", "first_name", "last_name", "notes"]),
+    )
+
+    assert transcript_issues.empty
+    assert len(transcript_terms) == 1
+    assert len(transcript_courses) == 2
+    assert transcript_audit.iloc[0]["parse_status"] == "parsed"
+    assert transcript_terms.iloc[0]["summary_credits_earned"] == 4
+    assert transcript_terms.iloc[0]["summary_credit_completion_pct"] == 100
+    assert transcript_terms.iloc[0]["summary_term_gpa"] == 3.31
+    assert transcript_terms.iloc[0]["summary_cumulative_gpa"] == 2.97
+    assert transcript_academic.iloc[0]["academic_standing_raw"] == "Good Standing"

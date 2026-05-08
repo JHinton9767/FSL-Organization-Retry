@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from app.config_loader import ensure_manual_transcript_files, load_manual_roster_corrections, save_manual_roster_corrections
 from app.data_loader import _validate_loaded_tables
 
 
@@ -26,3 +27,60 @@ def test_canonical_loader_validation_accepts_required_tables() -> None:
 def test_canonical_loader_rejects_noncanonical_dataset_types() -> None:
     with pytest.raises(ValueError, match="Unsupported dataset type"):
         _validate_loaded_tables("processed", {})
+
+
+def test_manual_roster_corrections_default_student_join_term(tmp_path) -> None:
+    path = tmp_path / "manual_roster_corrections.csv"
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "last_name": ["Doe"],
+            "first_name": ["Jane"],
+            "student_join_term": [""],
+            "organization_join_term": ["Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": [""],
+            "final_status_term": ["Fall 2026"],
+            "final_status": ["Inactive"],
+        }
+    )
+
+    save_manual_roster_corrections(corrections, path)
+    loaded = load_manual_roster_corrections(path)
+
+    assert loaded.loc[0, "student_join_term"] == "Spring 2026"
+    assert list(loaded.columns) == [
+        "student_id",
+        "last_name",
+        "first_name",
+        "student_join_term",
+        "organization_join_term",
+        "organization_name",
+        "leaving_organization_term",
+        "final_status_term",
+        "final_status",
+    ]
+
+
+def test_manual_roster_corrections_create_transcript_template(tmp_path) -> None:
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "last_name": ["Doe"],
+            "first_name": ["Jane"],
+            "student_join_term": [""],
+            "organization_join_term": ["Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": ["Spring 2026"],
+            "final_status_term": ["Fall 2026"],
+            "final_status": ["Inactive"],
+        }
+    )
+
+    created = ensure_manual_transcript_files(corrections, tmp_path / "Transcripts")
+
+    assert len(created) == 1
+    assert created[0].name == "A00000001_Doe_Jane.txt"
+    text = created[0].read_text(encoding="utf-8")
+    assert "Organization Join Term: Spring 2026" in text
+    assert "--- TRANSCRIPT TEXT ---" in text

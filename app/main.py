@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from typing import Dict, List
 
 import pandas as pd
@@ -32,13 +33,15 @@ from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_m
 from app.config_loader import (
     MANUAL_ROSTER_CORRECTION_COLUMNS,
     MANUAL_ROSTER_CORRECTIONS_PATH,
+    MANUAL_TRANSCRIPTS_PATH,
+    ensure_manual_transcript_files,
     load_manual_roster_corrections,
     load_metric_catalog,
     load_settings,
     load_status_code_map,
     save_manual_roster_corrections,
 )
-from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
+from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
 from app.data_loader import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
@@ -565,12 +568,14 @@ def _render_advisor_help_dashboard(bundle) -> None:
 def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
     final_status_term = row.get("graduation_term", "") or row.get("last_observed_academic_term", "") or row.get("last_observed_org_term", "")
     final_status = row.get("latest_outcome_bucket", "") or row.get("status_group", "") or row.get("latest_roster_status_bucket", "")
+    organization_join_term = row.get("join_term", "") or row.get("join_term_code", "")
+    student_join_term = row.get("school_entry_term", "") or row.get("school_entry_term_code", "") or organization_join_term
     return {
         "student_id": row.get("student_id", ""),
         "last_name": row.get("last_name", ""),
         "first_name": row.get("first_name", ""),
-        "student_join_term": row.get("school_entry_term", "") or row.get("school_entry_term_code", ""),
-        "organization_join_term": row.get("join_term", "") or row.get("join_term_code", ""),
+        "student_join_term": student_join_term,
+        "organization_join_term": organization_join_term,
         "organization_name": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
         "leaving_organization_term": row.get("last_observed_org_term", "") or row.get("last_observed_org_term_code", ""),
         "final_status_term": final_status_term,
@@ -662,6 +667,14 @@ def _render_manual_review_panel(bundle) -> None:
         st.write("- **Two-column default:** show resolved-only graduation rate as the main ranking and full-cohort conservative rate plus unknown share beside it. This is my recommendation for showing Greek Life fairly without hiding data quality.")
 
 
+def _open_local_text_file(path) -> str:
+    try:
+        os.startfile(path)  # type: ignore[attr-defined]
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
 def _render_manual_corrections_editor(bundle) -> None:
     st.title("Manual Roster Corrections")
     st.caption(
@@ -683,6 +696,8 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     st.info(
         "Search for a student first. The top edit row will auto-fill from the current canonical data so you can adjust it instead of starting from a blank row. "
+        "If Student Join Term is blank, it defaults to Organization Join Term when saved. "
+        "When a correction row is saved, the app creates a matching transcript text file in the Transcripts folder and opens newly created files for pasting. "
         "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV."
     )
 
@@ -741,7 +756,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "student_id": st.column_config.TextColumn("Student ID"),
                     "last_name": st.column_config.TextColumn("Last Name"),
                     "first_name": st.column_config.TextColumn("First Name"),
-                    "student_join_term": st.column_config.TextColumn("Student Join Term"),
+                    "student_join_term": st.column_config.TextColumn("Student Join Term", help="Optional. If blank, this defaults to Organization Join Term."),
                     "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
                     "organization_name": st.column_config.TextColumn("Organization Name"),
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
@@ -753,7 +768,18 @@ def _render_manual_corrections_editor(bundle) -> None:
 
         if saved:
             saved_path = save_manual_roster_corrections(edited)
+            saved_corrections = load_manual_roster_corrections()
+            created_transcripts = ensure_manual_transcript_files(saved_corrections)
+            open_errors = {path: error for path in created_transcripts if (error := _open_local_text_file(path))}
             st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")
+            if created_transcripts:
+                st.info(
+                    f"Created {len(created_transcripts):,} transcript text file(s) in {MANUAL_TRANSCRIPTS_PATH}. "
+                    "New files were opened when the local operating system allowed it."
+                )
+                st.dataframe(pd.DataFrame({"Transcript File": [str(path) for path in created_transcripts]}), use_container_width=True, hide_index=True)
+            if open_errors:
+                st.warning("Some transcript files were created but could not be opened automatically: " + "; ".join(f"{path.name}: {error}" for path, error in open_errors.items()))
 
         if not corrections.empty:
             st.download_button(
@@ -1601,6 +1627,12 @@ def _render_advanced_analytics(
                 mime="text/csv",
             )
         with xlsx_col:
+            oversized_frames = {name: len(frame) for name, frame in export_frames.items() if frame is not None and len(frame) > EXCEL_MAX_DATA_ROWS}
+            if oversized_frames:
+                st.caption(
+                    "Large tables will be split across numbered workbook sheets because Excel has a 1,048,576-row limit per sheet. "
+                    "See the `Export Manifest` sheet for the row ranges."
+                )
             st.download_button(
                 "Download current workbook",
                 data=frames_to_excel_bytes(export_frames),

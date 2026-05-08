@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -21,6 +22,8 @@ DEFAULT_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.csv"
 EXAMPLE_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.example.csv"
 MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
 MANUAL_ROSTER_CORRECTIONS_PATH = CONFIG_DIR / "manual_roster_corrections.csv"
+TRANSCRIPT_TEXT_ROOT = ROOT / "data" / "inbox" / "transcript_text"
+MANUAL_TRANSCRIPTS_PATH = TRANSCRIPT_TEXT_ROOT / "Transcripts"
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -238,6 +241,13 @@ def empty_manual_roster_corrections() -> pd.DataFrame:
     return pd.DataFrame(columns=MANUAL_ROSTER_CORRECTION_COLUMNS)
 
 
+def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
+    if {"student_join_term", "organization_join_term"}.issubset(frame.columns):
+        missing_student_join = frame["student_join_term"].fillna("").astype(str).str.strip().eq("")
+        frame.loc[missing_student_join, "student_join_term"] = frame.loc[missing_student_join, "organization_join_term"]
+    return frame
+
+
 def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
     if not candidate.exists():
@@ -275,6 +285,7 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     standardized = standardized.fillna("").astype(str)
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         standardized[column] = standardized[column].str.strip()
+    standardized = _default_student_join_term(standardized)
 
     delete_source = next((column for column in renamed.columns if column in {"delete_row", "delete row", "x", "delete"}), None)
     delete_mask = (
@@ -318,6 +329,7 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
         cleaned = cleaned[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
         for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
             cleaned[column] = cleaned[column].str.strip()
+        cleaned = _default_student_join_term(cleaned)
         has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
         has_action = (
             cleaned["organization_join_term"].ne("")
@@ -329,6 +341,74 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
         cleaned = cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
     cleaned.to_csv(candidate, index=False)
     return candidate
+
+
+def _manual_transcript_filename_part(value: object, fallback: str) -> str:
+    text = normalize_text(value) or fallback
+    text = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+    return text or fallback
+
+
+def manual_transcript_path_for_correction(row: pd.Series, folder: Optional[Path] = None) -> Path:
+    target_folder = folder or MANUAL_TRANSCRIPTS_PATH
+    student_id = _manual_transcript_filename_part(row.get("student_id", ""), "NoStudentID")
+    last_name = _manual_transcript_filename_part(row.get("last_name", ""), "UnknownLast")
+    first_name = _manual_transcript_filename_part(row.get("first_name", ""), "UnknownFirst")
+    return target_folder / f"{student_id}_{last_name}_{first_name}.txt"
+
+
+def manual_transcript_template(row: pd.Series) -> str:
+    return "\n".join(
+        [
+            f"Student ID: {normalize_text(row.get('student_id', ''))}",
+            f"Name: {normalize_text(row.get('first_name', ''))} {normalize_text(row.get('last_name', ''))}".strip(),
+            f"Student Join Term: {normalize_text(row.get('student_join_term', ''))}",
+            f"Organization Join Term: {normalize_text(row.get('organization_join_term', ''))}",
+            f"Organization Name: {normalize_text(row.get('organization_name', ''))}",
+            f"Leaving Organization Term: {normalize_text(row.get('leaving_organization_term', ''))}",
+            f"Final Status Term: {normalize_text(row.get('final_status_term', ''))}",
+            f"Final Status: {normalize_text(row.get('final_status', ''))}",
+            "",
+            "Paste transcript text below. Use term headers such as Spring 2024, then course rows, then the Term at a glance block.",
+            "Transcript text is academic evidence only; it does not create a graduation outcome unless graduation is explicitly stated.",
+            "",
+            "--- TRANSCRIPT TEXT ---",
+            "",
+        ]
+    )
+
+
+def ensure_manual_transcript_files(corrections: pd.DataFrame, folder: Optional[Path] = None) -> List[Path]:
+    if corrections is None or corrections.empty:
+        return []
+
+    target_folder = folder or MANUAL_TRANSCRIPTS_PATH
+    target_folder.mkdir(parents=True, exist_ok=True)
+
+    frame = corrections.copy()
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+    frame = frame[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        frame[column] = frame[column].str.strip()
+    frame = _default_student_join_term(frame)
+
+    created: List[Path] = []
+    seen: set[Path] = set()
+    for _, row in frame.iterrows():
+        has_identity = bool(normalize_text(row.get("student_id", "")) or normalize_text(row.get("first_name", "")) or normalize_text(row.get("last_name", "")))
+        if not has_identity:
+            continue
+        path = manual_transcript_path_for_correction(row, target_folder)
+        if path in seen:
+            continue
+        seen.add(path)
+        if path.exists():
+            continue
+        path.write_text(manual_transcript_template(row), encoding="utf-8")
+        created.append(path)
+    return created
 
 
 def stringify_notes(values: List[str]) -> List[str]:

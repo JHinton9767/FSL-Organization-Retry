@@ -160,6 +160,7 @@ Graduation metrics are calculated at the unique-student level so repeated term r
 Transcript-style text files are now supported from:
 
 - `data/inbox/transcript_text/`
+- app-created manual correction transcript templates in `data/inbox/transcript_text/Transcripts/`
 
 The canonical pipeline scans `.txt` files in that folder and writes:
 
@@ -181,6 +182,8 @@ Supported transcript patterns include:
 - `Cum GPA`
 - `Academic Standing`
 - optional transfer markers such as `[TR]`
+
+Summary values can be pasted either on the next line, such as `Credits:` followed by `13`, or on the same line, such as `Credits: 13`.
 
 Student matching for transcript text runs in this order:
 
@@ -291,9 +294,10 @@ Manual roster correction behavior:
 3. `organization_join_term` anchors the corrected organization-entry term and can create a manual New Member row
 4. `organization_name` changes the chapter assignment for matched roster rows
 5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
-6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`
+6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`; if `student_join_term` is blank, it defaults to `organization_join_term`
 7. `final_status_term` and `final_status` can create or update the final manual status row
-8. the app shows an `x` helper column for deleting saved correction rows, but the CSV itself stays in the nine-column format above
+8. saving correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
+9. the app shows an `x` helper column for deleting saved correction rows, but the CSV itself stays in the nine-column format above
 
 ## Exception outputs
 
@@ -357,6 +361,8 @@ The old standalone spreadsheet builders have been retired in favor of the app vi
 - full academic record priority list -> Advisor Help intervention queue
 - unresolved outcome year report -> Audit tab and unresolved outcome exports
 - executive report -> Persistence & Graduation landing page, comparisons, rankings, and app workbook export
+
+The app export workbook automatically splits any table larger than Excel's single-sheet row limit into numbered sheets and includes an `Export Manifest` sheet with row ranges.
 
 `data/processed/*.csv` is not an app source; rebuild through `py run_canonical_pipeline.py`.
 

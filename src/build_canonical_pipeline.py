@@ -1784,6 +1784,13 @@ def extract_transcript_summary_pairs(lines: List[str]) -> Dict[str, str]:
         if not label:
             idx += 1
             continue
+        if ":" in label and not label.endswith(":"):
+            key, value = label.split(":", 1)
+            key = clean_text(key).lower()
+            if key:
+                pairs[key] = clean_text(value)
+            idx += 1
+            continue
         if label.endswith(":"):
             value = ""
             look_ahead = idx + 1
@@ -3196,8 +3203,8 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
         matched_student_org = student_mask if organization_name else student_mask & organization_mask
         note_text = "Applied from config/manual_roster_corrections.csv."
 
-        student_join_term = _manual_term_code(getattr(correction, "student_join_term", ""))
         organization_join_term = _manual_term_code(getattr(correction, "organization_join_term", ""))
+        student_join_term = _manual_term_code(getattr(correction, "student_join_term", "")) or organization_join_term
         leaving_organization_term = _manual_term_code(getattr(correction, "leaving_organization_term", ""))
         final_status_term = _manual_term_code(getattr(correction, "final_status_term", ""))
         final_status = clean_text(getattr(correction, "final_status", ""))
