@@ -34,16 +34,18 @@ from app.config_loader import (
     MANUAL_ROSTER_CORRECTION_COLUMNS,
     MANUAL_ROSTER_CORRECTIONS_PATH,
     MANUAL_TRANSCRIPTS_PATH,
+    build_manual_corrections_package,
     ensure_manual_transcript_files,
     load_manual_roster_corrections,
     load_metric_catalog,
     load_settings,
     load_status_code_map,
+    prepare_manual_corrections_workspace,
     save_manual_roster_corrections,
 )
 from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
-from app.data_loader import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
+from app.data_loader import discover_dataset_versions, load_analysis_bundle, load_manual_corrections_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
     ALL_STUDENTS_LABEL,
     RESOLVED_OUTCOMES_ONLY_LABEL,
@@ -675,7 +677,33 @@ def _open_local_text_file(path) -> str:
         return str(exc)
 
 
+def _requested_app_mode() -> str:
+    env_mode = os.environ.get("FSL_APP_MODE", "")
+    query_mode = ""
+    try:
+        query_value = st.query_params.get("mode", "")
+        if isinstance(query_value, list):
+            query_mode = str(query_value[0]) if query_value else ""
+        else:
+            query_mode = str(query_value)
+    except Exception:
+        query_mode = ""
+    return (env_mode or query_mode).strip().lower()
+
+
+def _manual_workspace_summary() -> pd.DataFrame:
+    workspace = prepare_manual_corrections_workspace()
+    return pd.DataFrame(
+        [
+            {"Item": "Correction CSV", "Path": str(workspace["corrections_path"])},
+            {"Item": "Transcript Paste-In Folder", "Path": str(workspace["transcript_folder"])},
+            {"Item": "Canonical Latest Folder", "Path": str(MANUAL_ROSTER_CORRECTIONS_PATH.parent.parent / "output" / "canonical" / "latest")},
+        ]
+    )
+
+
 def _render_manual_corrections_editor(bundle) -> None:
+    workspace = prepare_manual_corrections_workspace()
     st.title("Manual Roster Corrections")
     st.caption(
         "Store roster fixes without touching raw Excel or PDF files. Corrections are saved to "
@@ -693,6 +721,34 @@ def _render_manual_corrections_editor(bundle) -> None:
         st.metric("Correction file", MANUAL_ROSTER_CORRECTIONS_PATH.name)
     with info_cols[2]:
         st.metric("Applies on", "Next canonical run")
+
+    with st.expander("Helper quick start", expanded=True):
+        st.write("1. Search for the student by Banner ID, name, or chapter.")
+        st.write("2. Review the auto-filled top row, then fill in the final status fields you know.")
+        st.write("3. Save corrections. A matching transcript `.txt` file will be created and opened if it does not already exist.")
+        st.write("4. Paste transcript text into the opened file if you have it.")
+        st.write("5. Use **Download helper package** to send back your correction CSV and transcript text files.")
+        st.dataframe(_manual_workspace_summary(), use_container_width=True, hide_index=True)
+
+        action_cols = st.columns(3)
+        with action_cols[0]:
+            if st.button("Open correction CSV folder", use_container_width=True):
+                error = _open_local_text_file(workspace["corrections_path"].parent)
+                if error:
+                    st.warning(f"Could not open folder automatically: {error}")
+        with action_cols[1]:
+            if st.button("Open transcript folder", use_container_width=True):
+                error = _open_local_text_file(workspace["transcript_folder"])
+                if error:
+                    st.warning(f"Could not open folder automatically: {error}")
+        with action_cols[2]:
+            st.download_button(
+                "Download helper package",
+                data=build_manual_corrections_package(),
+                file_name="manual_corrections_package.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
 
     st.info(
         "Search for a student first. The top edit row will auto-fill from the current canonical data so you can adjust it instead of starting from a blank row. "
@@ -780,6 +836,14 @@ def _render_manual_corrections_editor(bundle) -> None:
                 st.dataframe(pd.DataFrame({"Transcript File": [str(path) for path in created_transcripts]}), use_container_width=True, hide_index=True)
             if open_errors:
                 st.warning("Some transcript files were created but could not be opened automatically: " + "; ".join(f"{path.name}: {error}" for path, error in open_errors.items()))
+            st.download_button(
+                "Download updated helper package",
+                data=build_manual_corrections_package(),
+                file_name="manual_corrections_package.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="download_updated_manual_package",
+            )
 
         if not corrections.empty:
             st.download_button(
@@ -1704,14 +1768,22 @@ def main() -> None:
         return
 
     st.sidebar.caption(f"Auto-loaded dataset: {version.label}")
+    app_mode = _requested_app_mode()
 
     try:
-        bundle = load_analysis_bundle(
-            version=version,
-            metric_definitions=metric_catalog,
-            settings=settings,
-            status_code_map=status_code_map,
-        )
+        if app_mode in {"manual", "corrections", "manual_corrections", "helper"}:
+            bundle = load_manual_corrections_bundle(
+                version=version,
+                metric_definitions=metric_catalog,
+                settings=settings,
+            )
+        else:
+            bundle = load_analysis_bundle(
+                version=version,
+                metric_definitions=metric_catalog,
+                settings=settings,
+                status_code_map=status_code_map,
+            )
     except Exception as exc:
         _render_startup_failure(
             "A prepared dataset was found, but it could not be loaded cleanly. "
@@ -1719,6 +1791,14 @@ def main() -> None:
             source_statuses,
             detail=f"**Load error:** `{exc}`",
         )
+        return
+
+    if app_mode in {"manual", "corrections", "manual_corrections", "helper"}:
+        st.sidebar.success("Manual Corrections Mode")
+        st.sidebar.caption("This mode skips the analytics setup and opens directly to roster cleanup.")
+        st.sidebar.caption(f"Dataset: {version.label}")
+        _render_manual_corrections_editor(bundle)
+        _render_data_status_panel(bundle, source_statuses)
         return
 
     metrics = available_metrics(bundle.metric_definitions, bundle.summary, bundle.longitudinal)

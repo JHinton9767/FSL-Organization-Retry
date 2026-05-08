@@ -34,6 +34,23 @@ CANONICAL_OPTIONAL_FILES = [
     "transcript_parse_audit.parquet",
     "transcript_parse_issues.parquet",
 ]
+MANUAL_CORRECTION_REQUIRED_FILES = {
+    "student_summary.parquet": "student_summary",
+    "roster_term.parquet": "roster_term",
+    "qa_checks.parquet": "qa_checks",
+}
+MANUAL_CORRECTION_OPTIONAL_FILES = [
+    "identity_exceptions.parquet",
+    "term_exceptions.parquet",
+    "status_exceptions.parquet",
+    "chapter_conflicts.parquet",
+    "outcome_exceptions.parquet",
+    "missing_evidence_cases.parquet",
+    "unresolved_chapter_review.parquet",
+    "graduation_status_audit.parquet",
+    "transcript_parse_audit.parquet",
+    "transcript_parse_issues.parquet",
+]
 
 
 def _iso_mtime(path: Path) -> str:
@@ -199,6 +216,13 @@ def _validate_loaded_tables(bundle_kind: str, tables: Dict[str, pd.DataFrame]) -
     return []
 
 
+def _validate_manual_correction_tables(tables: Dict[str, pd.DataFrame]) -> List[str]:
+    frame = tables.get("student_summary")
+    if frame is None or "student_id" not in frame.columns:
+        raise ValueError("Manual Corrections Mode requires student_summary with a student_id column.")
+    return []
+
+
 def _loaded_status(label: str, path: Path, required: bool, frame: Optional[pd.DataFrame] = None) -> DataFileStatus:
     return DataFileStatus(
         label=label,
@@ -222,16 +246,31 @@ def _build_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame])
     return statuses
 
 
-def _read_canonical_tables(folder: Path) -> Dict[str, pd.DataFrame]:
+def _read_canonical_tables(
+    folder: Path,
+    required_files: Optional[Dict[str, str]] = None,
+    optional_files: Optional[List[str]] = None,
+) -> Dict[str, pd.DataFrame]:
+    required = required_files or CANONICAL_REQUIRED_FILES
+    optional = optional_files if optional_files is not None else CANONICAL_OPTIONAL_FILES
     tables = {
         table_key: _read_canonical_table(_preferred_canonical_path(folder, filename))
-        for filename, table_key in CANONICAL_REQUIRED_FILES.items()
+        for filename, table_key in required.items()
     }
-    for filename in CANONICAL_OPTIONAL_FILES:
+    for filename in optional:
         path = _preferred_canonical_path(folder, filename)
         if path.exists():
             tables[_table_key_from_filename(filename)] = _read_canonical_table(path)
     return tables
+
+
+def _build_manual_correction_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame]) -> List[DataFileStatus]:
+    statuses: List[DataFileStatus] = []
+    for filename, table_key in MANUAL_CORRECTION_REQUIRED_FILES.items():
+        statuses.append(_loaded_status(filename, _preferred_canonical_path(version.root_path, filename), True, tables.get(table_key)))
+    for filename in MANUAL_CORRECTION_OPTIONAL_FILES:
+        statuses.append(_loaded_status(filename, _preferred_canonical_path(version.root_path, filename), False, tables.get(_table_key_from_filename(filename))))
+    return statuses
 
 
 def load_analysis_bundle(
@@ -276,4 +315,50 @@ def load_analysis_bundle(
         notes=stringify_notes(notes + validation_warnings + version.notes),
         metadata=metadata,
         data_status=_build_data_status(version, tables),
+    )
+
+
+def load_manual_corrections_bundle(
+    version: DatasetVersion,
+    metric_definitions: List[MetricDefinition],
+    settings: Dict[str, object],
+    chapter_mapping_path: Optional[Path] = None,
+) -> AnalysisBundle:
+    if version.dataset_type != "canonical":
+        raise ValueError(f"Unsupported dataset type: {version.dataset_type}. The app only loads canonical analytics runs.")
+
+    chapter_mapping = load_chapter_mapping(chapter_mapping_path)
+    tables = _read_canonical_tables(
+        version.root_path,
+        required_files=MANUAL_CORRECTION_REQUIRED_FILES,
+        optional_files=MANUAL_CORRECTION_OPTIONAL_FILES,
+    )
+    validation_warnings = _validate_manual_correction_tables(tables)
+
+    summary = tables["student_summary"].copy()
+    if not chapter_mapping.empty:
+        summary = apply_chapter_mapping_overrides(summary, chapter_mapping, chapter_column="chapter")
+        summary = apply_chapter_mapping_overrides(
+            summary,
+            chapter_mapping,
+            chapter_column="current_active_chapter",
+            output_prefix="current_active_",
+        )
+
+    metadata = {
+        "bundle_kind": "canonical_manual_corrections",
+        "manual_corrections_mode": True,
+        "raw_tables": sorted(tables.keys()),
+        "validation_warnings": validation_warnings,
+    }
+    notes = ["Loaded lightweight Manual Corrections bundle. Large analytics tables were not loaded."]
+    return AnalysisBundle(
+        version=version,
+        summary=summary,
+        longitudinal=pd.DataFrame(),
+        tables=tables,
+        metric_definitions=list(metric_definitions),
+        notes=stringify_notes(notes + validation_warnings + version.notes),
+        metadata=metadata,
+        data_status=_build_manual_correction_data_status(version, tables),
     )

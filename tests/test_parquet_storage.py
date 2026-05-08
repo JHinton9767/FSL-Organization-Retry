@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.data_loader import CANONICAL_REQUIRED_FILES, _read_canonical_tables
+from app.data_loader import CANONICAL_REQUIRED_FILES, MANUAL_CORRECTION_REQUIRED_FILES, _read_canonical_tables, load_manual_corrections_bundle
+from app.models import DatasetVersion
 from src.build_canonical_pipeline import write_frame
 
 
@@ -47,3 +48,20 @@ def test_canonical_loader_falls_back_to_csv_outputs(tmp_path: Path) -> None:
 
     assert sorted(tables) == sorted(CANONICAL_REQUIRED_FILES.values())
     assert tables["master_longitudinal"].loc[0, "term_code"] == "2026SP"
+
+
+def test_manual_corrections_bundle_uses_lightweight_tables(tmp_path: Path) -> None:
+    for filename, table_key in MANUAL_CORRECTION_REQUIRED_FILES.items():
+        _minimal_canonical_frame(table_key).to_parquet(tmp_path / filename, index=False)
+
+    bundle = load_manual_corrections_bundle(
+        DatasetVersion(key="canonical::test", label="Test", dataset_type="canonical", root_path=tmp_path),
+        metric_definitions=[],
+        settings={},
+    )
+
+    assert bundle.metadata["manual_corrections_mode"] is True
+    assert "student_summary" in bundle.tables
+    assert "roster_term" in bundle.tables
+    assert "master_longitudinal" not in bundle.tables
+    assert bundle.longitudinal.empty

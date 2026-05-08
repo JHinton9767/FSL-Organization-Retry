@@ -46,6 +46,28 @@ py run_canonical_pipeline.py
 
 After the canonical bundle exists, use the application for review, filtering, exports, chapter health, advisor queues, and audit tables.
 
+## Helper manual-correction workflow
+
+For people who only need to make manual roster corrections, use the double-click launcher:
+
+- `Start_Manual_Corrections_App.bat`
+
+That launcher opens the app directly in Manual Corrections Mode, skipping the analytics setup screens. Helpers can:
+
+- search for a student by Banner ID, name, or chapter
+- edit the nine-column manual correction row
+- save corrections to `config/manual_roster_corrections.csv`
+- create/open matching transcript paste-in files under `data/inbox/transcript_text/Transcripts/`
+- download `manual_corrections_package.zip` to send corrections and transcript text back
+
+Manual Corrections Mode loads only the lightweight correction tables it needs, so helpers do not have to wait for the full analytics interface to initialize.
+
+For the full analytics app, use:
+
+- `Start_FSL_Analytics_App.bat`
+
+Both launchers prefer `uv run --with-requirements requirements.txt ...` when `uv` is installed, then fall back to `.venv`, then `py`.
+
 ## Faster reruns
 
 `run_canonical_pipeline.py` now keeps a persistent source cache under `output/canonical/_source_cache/`.

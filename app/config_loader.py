@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from io import BytesIO
 from copy import deepcopy
 import json
 from pathlib import Path
 import re
 from typing import Any, Dict, List, Optional
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
@@ -347,6 +349,19 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
     return candidate
 
 
+def prepare_manual_corrections_workspace(
+    corrections_path: Optional[Path] = None,
+    transcript_folder: Optional[Path] = None,
+) -> Dict[str, Path]:
+    correction_file = corrections_path or MANUAL_ROSTER_CORRECTIONS_PATH
+    transcripts = transcript_folder or MANUAL_TRANSCRIPTS_PATH
+    correction_file.parent.mkdir(parents=True, exist_ok=True)
+    transcripts.mkdir(parents=True, exist_ok=True)
+    if not correction_file.exists():
+        empty_manual_roster_corrections().to_csv(correction_file, index=False)
+    return {"corrections_path": correction_file, "transcript_folder": transcripts}
+
+
 def _manual_transcript_filename_part(value: object, fallback: str) -> str:
     text = normalize_text(value) or fallback
     text = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
@@ -413,6 +428,22 @@ def ensure_manual_transcript_files(corrections: pd.DataFrame, folder: Optional[P
         path.write_text(manual_transcript_template(row), encoding="utf-8")
         created.append(path)
     return created
+
+
+def build_manual_corrections_package(
+    corrections_path: Optional[Path] = None,
+    transcript_folder: Optional[Path] = None,
+) -> bytes:
+    workspace = prepare_manual_corrections_workspace(corrections_path, transcript_folder)
+    correction_file = workspace["corrections_path"]
+    transcripts = workspace["transcript_folder"]
+    buffer = BytesIO()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        archive.write(correction_file, arcname="manual_roster_corrections.csv")
+        for path in sorted(transcripts.glob("*.txt")):
+            archive.write(path, arcname=f"Transcripts/{path.name}")
+    buffer.seek(0)
+    return buffer.read()
 
 
 def stringify_notes(values: List[str]) -> List[str]:
