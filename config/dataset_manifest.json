@@ -9,27 +9,27 @@
       "mode": "latest_run",
       "run_prefix": "run_",
       "required_files": [
-        "roster_term.csv",
-        "academic_term.csv",
-        "master_longitudinal.csv",
-        "student_summary.csv",
-        "cohort_metrics.csv",
-        "qa_checks.csv",
+        "roster_term.parquet",
+        "academic_term.parquet",
+        "master_longitudinal.parquet",
+        "student_summary.parquet",
+        "cohort_metrics.parquet",
+        "qa_checks.parquet",
         "canonical_schema.json"
       ],
       "optional_files": [
-        "identity_exceptions.csv",
-        "term_exceptions.csv",
-        "status_exceptions.csv",
-        "chapter_conflicts.csv",
-        "outcome_exceptions.csv",
-        "missing_evidence_cases.csv",
-        "unresolved_chapter_review.csv",
-        "graduation_status_audit.csv",
-        "transcript_term_summary.csv",
-        "transcript_course_detail.csv",
-        "transcript_parse_audit.csv",
-        "transcript_parse_issues.csv"
+        "identity_exceptions.parquet",
+        "term_exceptions.parquet",
+        "status_exceptions.parquet",
+        "chapter_conflicts.parquet",
+        "outcome_exceptions.parquet",
+        "missing_evidence_cases.parquet",
+        "unresolved_chapter_review.parquet",
+        "graduation_status_audit.parquet",
+        "transcript_term_summary.parquet",
+        "transcript_course_detail.parquet",
+        "transcript_parse_audit.parquet",
+        "transcript_parse_issues.parquet"
       ]
     }
   }

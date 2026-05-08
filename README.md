@@ -79,11 +79,15 @@ py run_canonical_pipeline.py --refresh-source-cache
 Each canonical run now also writes a small performance report to:
 
 - `output/canonical/run_*/performance_report.csv`
+- `output/canonical/run_*/performance_report.parquet`
 - `output/canonical/run_*/performance_report.json`
 - `output/canonical/latest/performance_report.csv`
+- `output/canonical/latest/performance_report.parquet`
 - `output/canonical/latest/performance_report.json`
 
 The report records per-stage timing, cache hit/miss status, and key row counts so you can see where the runtime is going and whether cached stages were reused.
+
+Canonical table outputs are now written in both Parquet and CSV form. The app and intermediate pipeline caches prefer Parquet for faster, smaller reads; CSV files remain as compatibility/review exports for people who want to inspect a table directly.
 
 If you only changed app display code, rerun only the app:
 
@@ -315,6 +319,8 @@ The canonical run also writes reviewable exception files when applicable:
 - `transcript_course_detail.csv`
 - `transcript_parse_audit.csv`
 - `transcript_parse_issues.csv`
+
+Each canonical CSV table listed here is also written as a `.parquet` sibling with the same base filename. The app loads the Parquet file when it is available and falls back to CSV for older runs.
 
 `graduation_status_audit.csv` summarizes confirmed graduation evidence, corrected graduation claims, active/unknown/resolved counts, duplicate student checks, and warning checks for suspiciously high graduation rates.
 

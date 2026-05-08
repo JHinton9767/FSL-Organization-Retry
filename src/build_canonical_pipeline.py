@@ -319,10 +319,17 @@ def combine_reference_frames(
 
 
 def read_cached_frame(path: Path) -> pd.DataFrame:
-    if not path.exists():
+    read_path = path
+    if path.suffix.lower() == ".csv":
+        parquet_path = path.with_suffix(".parquet")
+        if parquet_path.exists():
+            read_path = parquet_path
+    if not read_path.exists():
         return pd.DataFrame()
+    if read_path.suffix.lower() == ".parquet":
+        return pd.read_parquet(read_path)
     try:
-        return pd.read_csv(path, low_memory=False)
+        return pd.read_csv(read_path, low_memory=False)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
 
@@ -409,20 +416,33 @@ def load_or_build_cached_frames(
 ) -> Tuple[Tuple[pd.DataFrame, ...], bool]:
     cache_dir = cache_root / cache_name
     cache_manifest_path = cache_dir / "manifest.json"
-    cache_files = [cache_dir / file_name for file_name in file_names]
+    parquet_cache_files = [cache_dir / Path(file_name).with_suffix(".parquet").name for file_name in file_names]
+    legacy_cache_files = [cache_dir / file_name for file_name in file_names]
     cached_manifest = read_cache_manifest(cache_manifest_path)
-    cache_ready = (
+    parquet_cache_ready = (
         not refresh
         and cached_manifest == manifest
-        and all(path.exists() for path in cache_files)
+        and all(path.exists() for path in parquet_cache_files)
     )
-    if cache_ready:
-        return tuple(read_cached_frame(path) for path in cache_files), True
+    if parquet_cache_ready:
+        return tuple(read_cached_frame(path) for path in parquet_cache_files), True
+
+    legacy_cache_ready = (
+        not refresh
+        and cached_manifest == manifest
+        and all(path.exists() for path in legacy_cache_files)
+    )
+    if legacy_cache_ready:
+        frames = tuple(read_cached_frame(path) for path in legacy_cache_files)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        for frame, path in zip(frames, parquet_cache_files):
+            write_parquet_frame(path, frame)
+        return frames, True
 
     frames = builder()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    for frame, path in zip(frames, cache_files):
-        write_frame(path, frame)
+    for frame, path in zip(frames, parquet_cache_files):
+        write_parquet_frame(path, frame)
     write_cache_manifest(cache_manifest_path, manifest)
     return frames, False
 
@@ -491,9 +511,13 @@ def write_performance_report(
 
     latest_csv = latest_folder / "performance_report.csv"
     latest_json = latest_folder / "performance_report.json"
+    latest_parquet = latest_folder / "performance_report.parquet"
     shutil.copyfile(csv_path, latest_csv)
     shutil.copyfile(json_path, latest_json)
-    return {"performance_report_csv": csv_path, "performance_report_json": json_path}
+    parquet_path = csv_path.with_suffix(".parquet")
+    if parquet_path.exists():
+        shutil.copyfile(parquet_path, latest_parquet)
+    return {"performance_report_csv": csv_path, "performance_report_parquet": parquet_path, "performance_report_json": json_path}
 
 
 @lru_cache(maxsize=None)
@@ -5124,9 +5148,48 @@ def build_qa_checks(
     return ensure_columns(pd.DataFrame(rows), load_schema()["tables"]["qa_checks"])
 
 
+def _parquet_safe_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    def safe_value(value: object) -> object:
+        try:
+            missing = pd.isna(value)
+            if missing is pd.NA:
+                return ""
+            if isinstance(missing, bool) and missing:
+                return ""
+            if type(missing).__name__ == "bool_" and bool(missing):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        return str(value)
+
+    safe = frame.copy()
+    for column in safe.columns:
+        if safe[column].dtype == "object":
+            safe[column] = safe[column].map(safe_value)
+    return safe
+
+
+def write_parquet_frame(path: Path, frame: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        frame.to_parquet(path, index=False)
+    except Exception as exc:
+        try:
+            _parquet_safe_frame(frame).to_parquet(path, index=False)
+        except Exception:
+            raise exc
+
+
 def write_frame(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        write_parquet_frame(path, frame)
+        frame.to_csv(path.with_suffix(".csv"), index=False)
+        return
     frame.to_csv(path, index=False)
+    if suffix == ".csv":
+        write_parquet_frame(path.with_suffix(".parquet"), frame)
 
 
 def build_canonical_pipeline(
@@ -5706,6 +5769,9 @@ def build_canonical_pipeline(
     for key, path in files.items():
         target = latest_folder / path.name
         shutil.copyfile(path, target)
+        parquet_path = path.with_suffix(".parquet")
+        if parquet_path.exists():
+            shutil.copyfile(parquet_path, latest_folder / parquet_path.name)
 
     append_stage(
         performance,

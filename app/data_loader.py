@@ -13,26 +13,26 @@ from src.shared_utils import apply_chapter_mapping_overrides
 
 
 CANONICAL_REQUIRED_FILES = {
-    "roster_term.csv": "roster_term",
-    "academic_term.csv": "academic_term",
-    "master_longitudinal.csv": "master_longitudinal",
-    "student_summary.csv": "student_summary",
-    "cohort_metrics.csv": "cohort_metrics",
-    "qa_checks.csv": "qa_checks",
+    "roster_term.parquet": "roster_term",
+    "academic_term.parquet": "academic_term",
+    "master_longitudinal.parquet": "master_longitudinal",
+    "student_summary.parquet": "student_summary",
+    "cohort_metrics.parquet": "cohort_metrics",
+    "qa_checks.parquet": "qa_checks",
 }
 CANONICAL_OPTIONAL_FILES = [
-    "identity_exceptions.csv",
-    "term_exceptions.csv",
-    "status_exceptions.csv",
-    "chapter_conflicts.csv",
-    "outcome_exceptions.csv",
-    "missing_evidence_cases.csv",
-    "unresolved_chapter_review.csv",
-    "graduation_status_audit.csv",
-    "transcript_term_summary.csv",
-    "transcript_course_detail.csv",
-    "transcript_parse_audit.csv",
-    "transcript_parse_issues.csv",
+    "identity_exceptions.parquet",
+    "term_exceptions.parquet",
+    "status_exceptions.parquet",
+    "chapter_conflicts.parquet",
+    "outcome_exceptions.parquet",
+    "missing_evidence_cases.parquet",
+    "unresolved_chapter_review.parquet",
+    "graduation_status_audit.parquet",
+    "transcript_term_summary.parquet",
+    "transcript_course_detail.parquet",
+    "transcript_parse_audit.parquet",
+    "transcript_parse_issues.parquet",
 ]
 
 
@@ -65,6 +65,28 @@ def _status_from_path(label: str, path: Path, required: bool) -> DataFileStatus:
     )
 
 
+def _table_key_from_filename(filename: str) -> str:
+    return Path(filename).stem
+
+
+def _preferred_canonical_path(folder: Path, filename: str) -> Path:
+    path = folder / filename
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        csv_path = path.with_suffix(".csv")
+        return path if path.exists() or not csv_path.exists() else csv_path
+    if suffix == ".csv":
+        parquet_path = path.with_suffix(".parquet")
+        return parquet_path if parquet_path.exists() else path
+    return path
+
+
+def _read_canonical_table(path: Path) -> pd.DataFrame:
+    if path.suffix.lower() == ".parquet":
+        return pd.read_parquet(path)
+    return pd.read_csv(path)
+
+
 def scan_preloaded_sources() -> List[DataSourceStatus]:
     manifest = load_dataset_manifest()
     statuses: List[DataSourceStatus] = []
@@ -85,9 +107,9 @@ def scan_preloaded_sources() -> List[DataSourceStatus]:
             warnings.append(f"No canonical run folders were found under {root}")
         else:
             for filename in source_cfg.get("required_files", list(CANONICAL_REQUIRED_FILES)):
-                files.append(_status_from_path(filename, selected / filename, True))
+                files.append(_status_from_path(filename, _preferred_canonical_path(selected, filename), True))
             for filename in source_cfg.get("optional_files", CANONICAL_OPTIONAL_FILES):
-                files.append(_status_from_path(filename, selected / filename, False))
+                files.append(_status_from_path(filename, _preferred_canonical_path(selected, filename), False))
 
         available = selected is not None and all(item.exists for item in files if item.required)
         if selected is not None and not available:
@@ -113,7 +135,7 @@ def scan_preloaded_sources() -> List[DataSourceStatus]:
     root = ROOT / "output" / "canonical"
     selected = _latest_run_folder(root, "run_")
     files = [
-        _status_from_path(filename, (selected or root) / filename, True)
+        _status_from_path(filename, _preferred_canonical_path(selected or root, filename), True)
         for filename in CANONICAL_REQUIRED_FILES
     ]
     return [
@@ -193,22 +215,22 @@ def _loaded_status(label: str, path: Path, required: bool, frame: Optional[pd.Da
 def _build_data_status(version: DatasetVersion, tables: Dict[str, pd.DataFrame]) -> List[DataFileStatus]:
     statuses: List[DataFileStatus] = []
     for filename, table_key in CANONICAL_REQUIRED_FILES.items():
-        statuses.append(_loaded_status(filename, version.root_path / filename, True, tables.get(table_key)))
+        statuses.append(_loaded_status(filename, _preferred_canonical_path(version.root_path, filename), True, tables.get(table_key)))
     statuses.append(_loaded_status("canonical_schema.json", version.root_path / "canonical_schema.json", True, None))
     for filename in CANONICAL_OPTIONAL_FILES:
-        statuses.append(_loaded_status(filename, version.root_path / filename, False, tables.get(filename.replace(".csv", ""))))
+        statuses.append(_loaded_status(filename, _preferred_canonical_path(version.root_path, filename), False, tables.get(_table_key_from_filename(filename))))
     return statuses
 
 
 def _read_canonical_tables(folder: Path) -> Dict[str, pd.DataFrame]:
     tables = {
-        table_key: pd.read_csv(folder / filename)
+        table_key: _read_canonical_table(_preferred_canonical_path(folder, filename))
         for filename, table_key in CANONICAL_REQUIRED_FILES.items()
     }
     for filename in CANONICAL_OPTIONAL_FILES:
-        path = folder / filename
+        path = _preferred_canonical_path(folder, filename)
         if path.exists():
-            tables[filename.replace(".csv", "")] = pd.read_csv(path)
+            tables[_table_key_from_filename(filename)] = _read_canonical_table(path)
     return tables
 
 
