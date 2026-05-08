@@ -128,6 +128,12 @@ The local analytics app is preload-only and is expected to load the canonical bu
 
 The app manifest now points to canonical outputs as the preferred prepared dataset source.
 
+Recent app additions:
+
+- `Persistence & Graduation` includes a graduation-rate denominator toggle for the selected cohort/council view, with `Resolved Outcomes Only`, `Full Population`, and side-by-side tables.
+- `Roster Disappearances` isolates students in the `Roster Dissapeared/Unknown` bucket, with chapter rollups, join-term timing, last-observed timing, and downloadable student detail.
+- `Chapter Health` keeps roster-disappeared unknowns visible beside resolved graduation rates so disappeared rosters do not silently become graduations.
+
 Current active membership is now defined separately from historical activeness:
 
 - `Current Active Members (Most Recent Roster)` uses only the single latest roster term in the canonical `roster_term` table.
@@ -170,6 +176,7 @@ Graduation-focused views now expose two denominator styles:
 
 Use `Resolved Outcomes Only` for most final-outcome interpretation.
 Use `Full Population` when you need to show the broader unresolved burden alongside the rate.
+The app-level denominator toggle does not change the underlying classifications; it only changes which denominator is highlighted for display.
 
 ## Graduation evidence rules
 

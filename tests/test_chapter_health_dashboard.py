@@ -1,6 +1,12 @@
 import pandas as pd
 
-from app.analysis import build_chapter_health_dashboard, build_advisor_intervention_queue, chapter_health_options
+from app.analysis import (
+    build_advisor_intervention_queue,
+    build_chapter_health_dashboard,
+    build_graduation_denominator_comparison,
+    build_roster_disappearance_tracker,
+    chapter_health_options,
+)
 
 
 def test_chapter_health_options_include_historical_chapters() -> None:
@@ -177,3 +183,55 @@ def test_build_advisor_intervention_queue_prioritizes_active_students_with_low_g
     assert queue.iloc[0]["Priority"] == "High"
     assert "low cumulative GPA" in queue.iloc[1]["Risk Flags"]
     assert chapter_rollup.iloc[0]["Current Chapter"] == "Alpha"
+
+
+def test_roster_disappearance_tracker_rolls_up_students_by_chapter_and_timing() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3"],
+            "student_name": ["Missing Alpha", "Missing Beta", "Resolved Student"],
+            "initial_chapter": ["Alpha", "Beta", "Alpha"],
+            "latest_chapter": ["Alpha", "Beta", "Alpha"],
+            "council": ["IFC", "MGC", "IFC"],
+            "join_term": ["Fall 2019", "Spring 2020", "Fall 2019"],
+            "last_observed_org_term": ["Spring 2021", "Fall 2021", "Spring 2022"],
+            "latest_outcome_bucket": ["Roster Dissapeared/Unknown", "Unknown", "Graduated"],
+            "outcome_resolution_group": ["Truly Unknown / Unresolved", "Truly Unknown / Unresolved", "Graduated"],
+            "roster_disappeared_unknown_flag": ["Yes", "Yes", "No"],
+            "outcome_evidence_source": ["", "", "Roster status"],
+            "data_completeness_rate": [0.6, 0.8, 1.0],
+        }
+    )
+
+    tracker = build_roster_disappearance_tracker(summary)
+
+    assert tracker["meta"]["affected_students"] == 2
+    assert tracker["meta"]["affected_chapters"] == 2
+    assert tracker["chapter_rollup"]["Affected Students"].tolist() == [1, 1]
+    assert "Fall 2019" in tracker["cohort_rollup"]["Join Term"].tolist()
+    assert "Missing Alpha" in tracker["student_table"]["Student Name"].tolist()
+
+
+def test_graduation_denominator_comparison_keeps_full_and_resolved_rates_separate() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3", "4"],
+            "chapter": ["Alpha", "Alpha", "Alpha", "Beta"],
+            "is_graduated": [True, False, False, True],
+            "is_resolved_outcome": [True, True, False, True],
+            "is_known_non_graduate_exit": [False, True, False, False],
+            "is_active_outcome": [False, False, True, False],
+            "is_unknown_outcome": [False, False, False, False],
+        }
+    )
+
+    comparison = build_graduation_denominator_comparison(summary, "chapter")
+    alpha = comparison.loc[comparison["Group"].eq("Alpha")].iloc[0]
+    beta = comparison.loc[comparison["Group"].eq("Beta")].iloc[0]
+
+    assert alpha["Total Unique Students"] == 3
+    assert alpha["Resolved Outcomes"] == 2
+    assert alpha["Explicit Graduates"] == 1
+    assert alpha["Graduation Rate (Resolved Outcomes Only)"] == 0.5
+    assert alpha["Graduation Rate (Full Population)"] == 1 / 3
+    assert beta["Graduation Rate (Resolved Outcomes Only)"] == 1.0

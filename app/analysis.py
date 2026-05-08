@@ -15,7 +15,7 @@ from app.metrics_engine import (
     select_metric_view,
 )
 from app.models import MetricDefinition
-from app.status_framework import resolved_outcomes_only_frame, student_count
+from app.status_framework import outcome_population_summary, resolved_outcomes_only_frame, student_count
 
 
 DIMENSION_LABELS = {
@@ -75,6 +75,30 @@ ADVISOR_ROLLUP_COLUMNS = [
     "Medium Priority",
     "Monitor",
     "Average Risk Score",
+]
+GRADUATION_DENOMINATOR_COLUMNS = [
+    "Group",
+    "Total Unique Students",
+    "Explicit Graduates",
+    "Resolved Outcomes",
+    "Still Active",
+    "Unknown / Unresolved",
+    "Other / Unmapped",
+    "Graduation Rate (Resolved Outcomes Only)",
+    "Graduation Rate (Full Population)",
+    "Unknown Share",
+]
+ROSTER_DISAPPEARANCE_STUDENT_COLUMNS = [
+    "Student Name",
+    "Student ID",
+    "Chapter",
+    "Council",
+    "Join Term",
+    "Last Observed Org Term",
+    "Latest Outcome",
+    "Outcome Resolution Group",
+    "Outcome Evidence Source",
+    "Data Completeness Rate",
 ]
 
 
@@ -192,6 +216,19 @@ def _first_non_blank(series: pd.Series | None) -> str:
     return usable.iloc[0] if not usable.empty else ""
 
 
+def _term_label_by_sort(values: pd.Series | None, *, latest: bool) -> str:
+    if values is None:
+        return ""
+    cleaned = values.fillna("").astype(str).str.strip()
+    cleaned = cleaned.loc[cleaned.ne("")]
+    if cleaned.empty:
+        return ""
+    ranked = cleaned.to_frame(name="term")
+    ranked["_sort"] = ranked["term"].map(lambda value: parse_term_label(value)["sort_value"])
+    ranked = ranked.sort_values(["_sort", "term"], ascending=[True, True], na_position="last")
+    return str(ranked.iloc[-1 if latest else 0]["term"])
+
+
 def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
     if column not in frame.columns:
         return pd.Series(np.nan, index=frame.index, dtype="float64")
@@ -214,6 +251,190 @@ def _unique_student_count(values: pd.Series) -> int:
         .dropna()
         .nunique()
     )
+
+
+def _roster_disappeared_mask(frame: pd.DataFrame) -> pd.Series:
+    if frame.empty:
+        return pd.Series(False, index=frame.index, dtype="bool")
+    masks: list[pd.Series] = []
+    if "roster_disappeared_unknown_flag" in frame.columns:
+        masks.append(_truthy_series(frame["roster_disappeared_unknown_flag"], frame.index))
+    if "latest_outcome_bucket" in frame.columns:
+        masks.append(
+            _frame_text_series(frame, "latest_outcome_bucket").str.contains(
+                r"roster\s+dis+ap+eared|roster\s+dis+appeared|roster\s+dissapeared",
+                case=False,
+                regex=True,
+                na=False,
+            )
+        )
+    if not masks:
+        return pd.Series(False, index=frame.index, dtype="bool")
+    combined = masks[0]
+    for mask in masks[1:]:
+        combined = combined | mask
+    return combined.fillna(False)
+
+
+def _chapter_label_for_tracker(frame: pd.DataFrame) -> pd.Series:
+    label = _frame_text_series(frame, "initial_chapter")
+    for column in ["latest_chapter", "chapter", "current_active_chapter"]:
+        candidate = _frame_text_series(frame, column)
+        label = label.where(label.ne(""), candidate)
+    return label.replace("", "Unknown")
+
+
+def _council_label_for_tracker(frame: pd.DataFrame) -> pd.Series:
+    label = _frame_text_series(frame, "council")
+    for column in ["current_active_council", "chapter_group"]:
+        candidate = _frame_text_series(frame, column)
+        label = label.where(label.ne(""), candidate)
+    return label.replace("", "Unknown")
+
+
+def build_graduation_denominator_comparison(summary: pd.DataFrame, group_field: str | None = None) -> pd.DataFrame:
+    """Compare explicit-graduation rates under the two app-supported denominator definitions."""
+    if summary.empty:
+        return pd.DataFrame(columns=GRADUATION_DENOMINATOR_COLUMNS)
+
+    def _row(label: object, frame: pd.DataFrame) -> dict[str, object]:
+        population = outcome_population_summary(frame)
+        total = int(population["all_students"])
+        resolved = int(population["resolved_students"])
+        graduates = int(population["graduated_students"])
+        unknown = int(population["unknown_students"])
+        return {
+            "Group": _label_or_unknown(label),
+            "Total Unique Students": total,
+            "Explicit Graduates": graduates,
+            "Resolved Outcomes": resolved,
+            "Still Active": int(population["still_active_students"]),
+            "Unknown / Unresolved": unknown,
+            "Other / Unmapped": int(population["other_unmapped_students"]),
+            "Graduation Rate (Resolved Outcomes Only)": (graduates / resolved) if resolved else np.nan,
+            "Graduation Rate (Full Population)": (graduates / total) if total else np.nan,
+            "Unknown Share": (unknown / total) if total else np.nan,
+        }
+
+    if not group_field or group_field == "Overall" or group_field not in summary.columns:
+        return pd.DataFrame([_row("Overall", summary)], columns=GRADUATION_DENOMINATOR_COLUMNS)
+
+    rows = [_row(group_value, group.copy()) for group_value, group in summary.groupby(group_field, dropna=False)]
+    result = pd.DataFrame(rows, columns=GRADUATION_DENOMINATOR_COLUMNS)
+    if result.empty:
+        return result
+    return result.sort_values(
+        ["Total Unique Students", "Graduation Rate (Resolved Outcomes Only)", "Group"],
+        ascending=[False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def build_roster_disappearance_tracker(summary: pd.DataFrame) -> dict[str, object]:
+    """Build app-facing tables for students left unknown because chapter roster coverage disappeared."""
+    empty = {
+        "meta": {
+            "affected_students": 0,
+            "affected_chapters": 0,
+            "total_students": student_count(summary),
+            "affected_share": 0.0,
+        },
+        "student_table": pd.DataFrame(columns=ROSTER_DISAPPEARANCE_STUDENT_COLUMNS),
+        "chapter_rollup": pd.DataFrame(),
+        "cohort_rollup": pd.DataFrame(),
+        "last_observed_rollup": pd.DataFrame(),
+    }
+    if summary.empty:
+        return empty
+
+    disappeared = summary.loc[_roster_disappeared_mask(summary)].copy()
+    if disappeared.empty:
+        return empty
+
+    disappeared["tracker_chapter"] = _chapter_label_for_tracker(disappeared)
+    disappeared["tracker_council"] = _council_label_for_tracker(disappeared)
+    disappeared["tracker_join_term"] = _frame_text_series(disappeared, "join_term").replace("", "Unknown")
+    last_observed = _frame_text_series(disappeared, "last_observed_org_term")
+    if last_observed.eq("").all():
+        last_observed = _frame_text_series(disappeared, "last_observed_org_term_code")
+    disappeared["tracker_last_observed_org_term"] = last_observed.replace("", "Unknown")
+    disappeared["data_completeness_rate_num"] = _numeric_series(disappeared, "data_completeness_rate")
+    if "current_active_flag" not in disappeared.columns:
+        disappeared["current_active_flag"] = ""
+
+    affected_students = student_count(disappeared)
+    total_students = student_count(summary)
+    affected_chapters = int(disappeared["tracker_chapter"].replace("Unknown", pd.NA).dropna().nunique())
+
+    def _truthy_count(values: pd.Series) -> int:
+        return int(_truthy_series(values, values.index).sum())
+
+    chapter_rollup = (
+        disappeared.groupby(["tracker_chapter", "tracker_council"], dropna=False)
+        .agg(
+            **{
+                "Affected Students": ("student_id", _unique_student_count),
+                "First Join Term": ("tracker_join_term", lambda values: _term_label_by_sort(values, latest=False)),
+                "Latest Last Observed Org Term": ("tracker_last_observed_org_term", lambda values: _term_label_by_sort(values, latest=True)),
+                "Current Active Conflicts": ("current_active_flag", _truthy_count),
+                "Average Data Completeness": ("data_completeness_rate_num", "mean"),
+            }
+        )
+        .reset_index()
+        .rename(columns={"tracker_chapter": "Chapter", "tracker_council": "Council"})
+        .sort_values(["Affected Students", "Chapter"], ascending=[False, True], na_position="last")
+        .reset_index(drop=True)
+    )
+
+    cohort_rollup = (
+        disappeared.groupby("tracker_join_term", dropna=False)
+        .agg(**{"Affected Students": ("student_id", _unique_student_count)})
+        .reset_index()
+        .rename(columns={"tracker_join_term": "Join Term"})
+    )
+    if not cohort_rollup.empty:
+        cohort_rollup["_sort"] = cohort_rollup["Join Term"].map(persistence_cohort_sort_key)
+        cohort_rollup = cohort_rollup.sort_values(["_sort", "Join Term"]).drop(columns=["_sort"]).reset_index(drop=True)
+
+    last_observed_rollup = (
+        disappeared.groupby("tracker_last_observed_org_term", dropna=False)
+        .agg(**{"Affected Students": ("student_id", _unique_student_count)})
+        .reset_index()
+        .rename(columns={"tracker_last_observed_org_term": "Last Observed Org Term"})
+    )
+    if not last_observed_rollup.empty:
+        last_observed_rollup["_sort"] = last_observed_rollup["Last Observed Org Term"].map(lambda value: parse_term_label(value)["sort_value"])
+        last_observed_rollup = last_observed_rollup.sort_values(["_sort", "Last Observed Org Term"]).drop(columns=["_sort"]).reset_index(drop=True)
+
+    student_table = _selected_table(
+        disappeared,
+        {
+            "student_name": "Student Name",
+            "student_id": "Student ID",
+            "tracker_chapter": "Chapter",
+            "tracker_council": "Council",
+            "tracker_join_term": "Join Term",
+            "tracker_last_observed_org_term": "Last Observed Org Term",
+            "latest_outcome_bucket": "Latest Outcome",
+            "outcome_resolution_group": "Outcome Resolution Group",
+            "outcome_evidence_source": "Outcome Evidence Source",
+            "data_completeness_rate": "Data Completeness Rate",
+        },
+        sort_by=["Chapter", "Student Name", "Student ID"],
+    )
+
+    return {
+        "meta": {
+            "affected_students": affected_students,
+            "affected_chapters": affected_chapters,
+            "total_students": total_students,
+            "affected_share": (affected_students / total_students) if total_students else 0.0,
+        },
+        "student_table": student_table,
+        "chapter_rollup": chapter_rollup,
+        "cohort_rollup": cohort_rollup,
+        "last_observed_rollup": last_observed_rollup,
+    }
 
 
 def _sorted_risk_frame(rows: list[dict[str, object]]) -> pd.DataFrame:

@@ -13,11 +13,13 @@ from app.analysis import (
     build_advisor_intervention_queue,
     available_dimensions,
     build_chapter_health_dashboard,
+    build_graduation_denominator_comparison,
     build_persistence_dashboard,
     build_comparison_table,
     build_controlled_comparison,
     build_distribution_table,
     build_observed_term_series,
+    build_roster_disappearance_tracker,
     build_scatter_frame,
     build_summary_time_series,
     chapter_health_options,
@@ -310,6 +312,85 @@ def _render_persistence_and_graduation_view(bundle) -> None:
             hide_index=True,
         )
 
+    with st.expander("Graduation rate denominator toggle", expanded=True):
+        st.caption(
+            "This uses the same selected cohort and council distinction above. "
+            "Resolved-only is best for comparing final outcomes; full-population is the conservative rate that keeps active and unknown students in the denominator."
+        )
+        toggle_cols = st.columns([1, 1])
+        with toggle_cols[0]:
+            denominator_view = st.radio(
+                "Denominator view",
+                options=[RESOLVED_OUTCOMES_ONLY_LABEL, ALL_STUDENTS_LABEL, "Side-by-side"],
+                horizontal=True,
+                key="persistence_graduation_denominator_view",
+            )
+        with toggle_cols[1]:
+            breakdown_options = {
+                "Overall": None,
+                "Chapter": "chapter",
+                "Council": "council",
+                "Fraternity / Sorority": "org_type",
+                "Join Term": "join_term",
+            }
+            breakdown_label = st.selectbox(
+                "Breakdown",
+                options=list(breakdown_options.keys()),
+                key="persistence_graduation_denominator_breakdown",
+            )
+
+        denominator_table = build_graduation_denominator_comparison(cohort_frame, breakdown_options[breakdown_label])
+        if denominator_table.empty:
+            st.caption("No graduation denominator comparison is available for this cohort.")
+        else:
+            display_table = denominator_table.copy()
+            if denominator_view == RESOLVED_OUTCOMES_ONLY_LABEL:
+                display_table["Selected Graduation Rate"] = display_table["Graduation Rate (Resolved Outcomes Only)"]
+                display_table["Selected Denominator"] = display_table["Resolved Outcomes"]
+            elif denominator_view == ALL_STUDENTS_LABEL:
+                display_table["Selected Graduation Rate"] = display_table["Graduation Rate (Full Population)"]
+                display_table["Selected Denominator"] = display_table["Total Unique Students"]
+            else:
+                display_table["Selected Graduation Rate"] = pd.NA
+                display_table["Selected Denominator"] = pd.NA
+            ordered_columns = [
+                "Group",
+                "Selected Graduation Rate",
+                "Selected Denominator",
+                "Explicit Graduates",
+                "Total Unique Students",
+                "Resolved Outcomes",
+                "Still Active",
+                "Unknown / Unresolved",
+                "Other / Unmapped",
+                "Graduation Rate (Resolved Outcomes Only)",
+                "Graduation Rate (Full Population)",
+                "Unknown Share",
+            ]
+            display_table = display_table[[column for column in ordered_columns if column in display_table.columns]]
+            st.dataframe(
+                _format_display_frame(
+                    display_table,
+                    percent_cols=[
+                        "Selected Graduation Rate",
+                        "Graduation Rate (Resolved Outcomes Only)",
+                        "Graduation Rate (Full Population)",
+                        "Unknown Share",
+                    ],
+                    integer_cols=[
+                        "Selected Denominator",
+                        "Explicit Graduates",
+                        "Total Unique Students",
+                        "Resolved Outcomes",
+                        "Still Active",
+                        "Unknown / Unresolved",
+                        "Other / Unmapped",
+                    ],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+
     st.caption(meta["note"])
     st.caption("Caution: this page uses organization-entry cohorts rather than true first-time-in-college cohorts. It is designed to match the institutional presentation format as closely as the available FSL data allows.")
 
@@ -485,6 +566,140 @@ def _render_chapter_health_dashboard(bundle) -> None:
                 _format_display_frame(review_students, percent_cols=["Data Completeness Rate"]),
                 use_container_width=True,
                 hide_index=True,
+            )
+
+
+def _render_roster_disappearance_tracker(bundle) -> None:
+    summary = bundle.summary.copy()
+
+    st.title("Roster Disappearance Tracker")
+    st.caption(
+        "This view isolates students classified as `Roster Dissapeared/Unknown`: they are not treated as graduates, "
+        "but their chapter roster coverage appears to have disappeared before a confirmed final outcome was found."
+    )
+
+    base_tracker = build_roster_disappearance_tracker(summary)
+    base_students = base_tracker["student_table"]
+    if base_students.empty:
+        st.success("No roster-disappeared unknown students were found in the current canonical summary.")
+        return
+
+    filter_cols = st.columns(3)
+    with filter_cols[0]:
+        council_options = ["All"] + _unique_text_options(base_students, "Council")
+        selected_council = st.selectbox("Council", options=council_options, key="roster_disappearance_council")
+    with filter_cols[1]:
+        chapter_options = ["All"] + _unique_text_options(base_students, "Chapter")
+        selected_chapter = st.selectbox("Chapter", options=chapter_options, key="roster_disappearance_chapter")
+    with filter_cols[2]:
+        student_search = st.text_input("Search students", placeholder="Name, Banner ID, or chapter", key="roster_disappearance_search")
+
+    filtered_summary = summary.copy()
+    if selected_council != "All":
+        council_masks = []
+        for column in ["council", "current_active_council", "chapter_group"]:
+            if column in filtered_summary.columns:
+                council_masks.append(filtered_summary[column].fillna("").astype(str).str.strip().eq(selected_council))
+        if council_masks:
+            council_mask = council_masks[0]
+            for mask in council_masks[1:]:
+                council_mask = council_mask | mask
+            filtered_summary = filtered_summary.loc[council_mask].copy()
+        else:
+            filtered_summary = filtered_summary.iloc[0:0].copy()
+    if selected_chapter != "All":
+        chapter_masks = []
+        for column in ["initial_chapter", "latest_chapter", "chapter", "current_active_chapter"]:
+            if column in filtered_summary.columns:
+                chapter_masks.append(filtered_summary[column].fillna("").astype(str).str.strip().eq(selected_chapter))
+        if chapter_masks:
+            chapter_mask = chapter_masks[0]
+            for mask in chapter_masks[1:]:
+                chapter_mask = chapter_mask | mask
+            filtered_summary = filtered_summary.loc[chapter_mask].copy()
+        else:
+            filtered_summary = filtered_summary.iloc[0:0].copy()
+
+    tracker = build_roster_disappearance_tracker(filtered_summary)
+    meta = tracker["meta"]
+    student_table = tracker["student_table"]
+    if student_search and not student_table.empty:
+        search_haystack = student_table.fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+        student_table = student_table.loc[search_haystack.str.contains(student_search.lower(), regex=False, na=False)].copy()
+
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        st.metric("Affected students", f"{int(meta['affected_students']):,}")
+    with kpi_cols[1]:
+        st.metric("Affected chapters", f"{int(meta['affected_chapters']):,}")
+    with kpi_cols[2]:
+        st.metric("Filtered student base", f"{int(meta['total_students']):,}")
+    with kpi_cols[3]:
+        st.metric("Affected share", _display_metric_value(meta["affected_share"], "percent"))
+
+    st.info(
+        "Use this as a cleanup list, not as a graduation list. These students stay unknown until a manual correction, roster status, transcript note, or other explicit evidence resolves them."
+    )
+
+    chapter_rollup = tracker["chapter_rollup"]
+    if not chapter_rollup.empty:
+        top_chapters = chapter_rollup.head(25)
+        chart = bar_chart(
+            top_chapters,
+            x="Chapter",
+            y="Affected Students",
+            color="Council" if "Council" in top_chapters.columns else None,
+            title="Roster-disappeared unknowns by chapter",
+        )
+        st.plotly_chart(chart, use_container_width=True)
+        _save_chart_downloads(chart, "roster_disappearance_by_chapter")
+
+    rollup_tab, cohort_tab, student_tab = st.tabs(["Chapter Rollup", "Timing", "Student Detail"])
+
+    with rollup_tab:
+        st.subheader("Affected chapters")
+        if chapter_rollup.empty:
+            st.caption("No chapter rollup is available for the current filters.")
+        else:
+            st.dataframe(
+                _format_display_frame(chapter_rollup, percent_cols=["Average Data Completeness"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with cohort_tab:
+        timing_cols = st.columns(2)
+        with timing_cols[0]:
+            st.subheader("By join term")
+            cohort_rollup = tracker["cohort_rollup"]
+            if cohort_rollup.empty:
+                st.caption("No join-term rollup is available.")
+            else:
+                st.dataframe(cohort_rollup, use_container_width=True, hide_index=True)
+        with timing_cols[1]:
+            st.subheader("By last observed organization term")
+            last_observed_rollup = tracker["last_observed_rollup"]
+            if last_observed_rollup.empty:
+                st.caption("No last-observed rollup is available.")
+            else:
+                st.dataframe(last_observed_rollup, use_container_width=True, hide_index=True)
+
+    with student_tab:
+        st.subheader("Students to investigate")
+        if student_table.empty:
+            st.caption("No students match the current filters.")
+        else:
+            st.dataframe(
+                _format_display_frame(student_table, percent_cols=["Data Completeness Rate"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "Download roster disappearance students CSV",
+                data=dataframe_to_csv_bytes(student_table),
+                file_name="roster_disappearance_students.csv",
+                mime="text/csv",
+                use_container_width=True,
             )
 
 
@@ -2331,8 +2546,8 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, chapter_health_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
-        ["Persistence & Graduation", "Chapter Health", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
+    landing_tab, chapter_health_tab, roster_disappearance_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
+        ["Persistence & Graduation", "Chapter Health", "Roster Disappearances", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
     )
 
     with landing_tab:
@@ -2340,6 +2555,9 @@ def main() -> None:
 
     with chapter_health_tab:
         _render_chapter_health_dashboard(bundle)
+
+    with roster_disappearance_tab:
+        _render_roster_disappearance_tracker(bundle)
 
     with advisor_help_tab:
         _render_advisor_help_dashboard(bundle)
