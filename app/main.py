@@ -32,15 +32,23 @@ from app.analysis import (
 from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_milestone_chart, scatter_chart, stacked_bar_chart
 from app.config_loader import (
     MANUAL_ROSTER_CORRECTION_COLUMNS,
+    MANUAL_REVIEW_QUEUE_COLUMNS,
+    MANUAL_REVIEW_QUEUE_PATH,
     MANUAL_ROSTER_CORRECTIONS_PATH,
     MANUAL_TRANSCRIPTS_PATH,
+    REVIEW_STATUS_OPTIONS,
     build_manual_corrections_package,
     ensure_manual_transcript_files,
+    find_manual_correction_conflicts,
+    import_manual_corrections_package,
     load_manual_roster_corrections,
+    load_manual_review_queue,
     load_metric_catalog,
     load_settings,
     load_status_code_map,
+    manual_transcript_path_for_correction,
     prepare_manual_corrections_workspace,
+    save_manual_review_queue,
     save_manual_roster_corrections,
 )
 from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
@@ -585,6 +593,182 @@ def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
     }
 
 
+def _manual_review_key(row: pd.Series) -> str:
+    student_id = str(row.get("student_id", "") or "").strip().upper()
+    if student_id:
+        return student_id
+    last_name = str(row.get("last_name", "") or "").strip().lower()
+    first_name = str(row.get("first_name", "") or "").strip().lower()
+    if last_name or first_name:
+        return f"{last_name}|{first_name}"
+    return str(row.get("student_name", "") or "").strip().lower()
+
+
+def _manual_correction_identity_set(corrections: pd.DataFrame) -> set[str]:
+    if corrections.empty:
+        return set()
+    frame = corrections.copy()
+    keys = []
+    for _, row in frame.iterrows():
+        keys.append(_manual_review_key(row))
+    return {key for key in keys if key}
+
+
+def _queue_reason_for_row(row: pd.Series) -> str:
+    reasons: list[str] = []
+    unknown_value = str(row.get("is_unknown_outcome", "") or "").strip().lower()
+    is_unknown = unknown_value in {"true", "1", "yes", "y"}
+    if is_unknown or str(row.get("outcome_resolution_group", "")).lower().find("unknown") >= 0:
+        reasons.append("Unknown outcome")
+    if str(row.get("chapter_assignment_source", "")).lower().find("unresolved") >= 0:
+        reasons.append("Unresolved chapter")
+    if str(row.get("chapter_assignment_source", "")).lower().find("inferred") >= 0:
+        reasons.append("Inferred chapter")
+    completeness = pd.to_numeric(pd.Series([row.get("data_completeness_rate", pd.NA)]), errors="coerce").iloc[0]
+    if pd.notna(completeness) and completeness < 0.75:
+        reasons.append("Incomplete data")
+    if not str(row.get("student_id", "") or "").strip():
+        reasons.append("Missing student ID")
+    return "; ".join(reasons) or "Review recommended"
+
+
+def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+
+    masks: list[pd.Series] = []
+    if "is_unknown_outcome" in summary.columns:
+        masks.append(_truthy_mask(summary["is_unknown_outcome"]))
+    if "outcome_resolution_group" in summary.columns:
+        masks.append(summary["outcome_resolution_group"].fillna("").astype(str).str.contains("unknown|unresolved|unmapped", case=False, na=False))
+    if "chapter_assignment_source" in summary.columns:
+        masks.append(summary["chapter_assignment_source"].fillna("").astype(str).str.contains("unresolved|inferred", case=False, na=False))
+    if "data_completeness_rate" in summary.columns:
+        masks.append(pd.to_numeric(summary["data_completeness_rate"], errors="coerce").lt(0.75))
+    if "student_id" in summary.columns:
+        masks.append(summary["student_id"].fillna("").astype(str).str.strip().eq(""))
+    if not masks:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+
+    combined = masks[0]
+    for mask in masks[1:]:
+        combined = combined | mask
+    candidates = summary.loc[combined].copy()
+    correction_keys = _manual_correction_identity_set(corrections)
+
+    rows: list[dict[str, object]] = []
+    for _, row in candidates.iterrows():
+        review_key = _manual_review_key(row)
+        if not review_key:
+            continue
+        correction_row = pd.Series(_manual_correction_row_from_summary(row))
+        rows.append(
+            {
+                "review_key": review_key,
+                "student_id": row.get("student_id", ""),
+                "last_name": row.get("last_name", ""),
+                "first_name": row.get("first_name", ""),
+                "student_name": row.get("student_name", ""),
+                "chapter": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
+                "join_term": row.get("join_term", ""),
+                "last_observed_org_term": row.get("last_observed_org_term", ""),
+                "latest_outcome_bucket": row.get("latest_outcome_bucket", ""),
+                "outcome_resolution_group": row.get("outcome_resolution_group", ""),
+                "queue_reason": _queue_reason_for_row(row),
+                "assigned_to": "",
+                "review_status": "Needs Review",
+                "needs_transcript": "No",
+                "review_notes": "",
+                "has_manual_correction": "Yes" if review_key in correction_keys else "No",
+                "transcript_file_exists": "Yes" if manual_transcript_path_for_correction(correction_row).exists() else "No",
+                "updated_at": "",
+            }
+        )
+
+    queue = pd.DataFrame(rows)
+    if queue.empty:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    return queue.drop_duplicates(subset=["review_key"], keep="first").reset_index(drop=True)
+
+
+def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> pd.DataFrame:
+    if generated.empty:
+        return saved if not saved.empty else pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    result = generated.copy()
+    if not saved.empty:
+        keep_columns = ["review_key", "assigned_to", "review_status", "needs_transcript", "review_notes", "updated_at"]
+        saved_subset = saved[[column for column in keep_columns if column in saved.columns]].copy()
+        result = result.merge(saved_subset, on="review_key", how="left", suffixes=("", "_saved"))
+        for column in ["assigned_to", "review_status", "needs_transcript", "review_notes", "updated_at"]:
+            saved_column = f"{column}_saved"
+            if saved_column in result.columns:
+                result[column] = result[saved_column].where(result[saved_column].fillna("").astype(str).str.strip().ne(""), result[column])
+                result = result.drop(columns=[saved_column])
+        saved_only = saved.loc[~saved["review_key"].isin(result["review_key"])].copy()
+        if not saved_only.empty:
+            for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+                if column not in saved_only.columns:
+                    saved_only[column] = ""
+            result = pd.concat([result, saved_only[MANUAL_REVIEW_QUEUE_COLUMNS]], ignore_index=True)
+    return result[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str).reset_index(drop=True)
+
+
+def _manual_queue_metrics(queue: pd.DataFrame, corrections: pd.DataFrame) -> dict[str, int]:
+    if queue.empty:
+        return {
+            "queue_total": 0,
+            "needs_review": 0,
+            "in_progress": 0,
+            "corrected": len(corrections),
+            "needs_transcript": 0,
+            "transcripts_ready": 0,
+        }
+    review_status = queue["review_status"].fillna("").astype(str)
+    return {
+        "queue_total": int(len(queue)),
+        "needs_review": int(review_status.eq("Needs Review").sum()),
+        "in_progress": int(review_status.eq("In Progress").sum()),
+        "corrected": int(queue["has_manual_correction"].fillna("").astype(str).str.lower().eq("yes").sum()),
+        "needs_transcript": int(queue["needs_transcript"].fillna("").astype(str).str.lower().eq("yes").sum()),
+        "transcripts_ready": int(queue["transcript_file_exists"].fillna("").astype(str).str.lower().eq("yes").sum()),
+    }
+
+
+def _summary_row_for_review_key(summary: pd.DataFrame, review_key: str) -> pd.Series:
+    if summary.empty or not review_key:
+        return pd.Series(dtype="object")
+    keys = summary.apply(_manual_review_key, axis=1)
+    matches = summary.loc[keys.eq(review_key)]
+    if matches.empty:
+        return pd.Series(dtype="object")
+    return matches.iloc[0]
+
+
+def _save_quick_manual_status(summary_row: pd.Series, final_status: str, assigned_to: str = "") -> dict[str, object]:
+    correction = _manual_correction_row_from_summary(summary_row)
+    correction["final_status"] = final_status
+    if not correction.get("final_status_term"):
+        correction["final_status_term"] = correction.get("leaving_organization_term", "")
+    if not correction.get("leaving_organization_term"):
+        correction["leaving_organization_term"] = correction.get("final_status_term", "")
+    corrections = pd.concat([load_manual_roster_corrections(), pd.DataFrame([correction])], ignore_index=True)
+    saved_path = save_manual_roster_corrections(corrections)
+    saved_corrections = load_manual_roster_corrections()
+    created_transcripts = ensure_manual_transcript_files(saved_corrections)
+
+    review_key = _manual_review_key(pd.Series(correction))
+    queue = load_manual_review_queue()
+    if review_key and not queue.empty:
+        mask = queue["review_key"].eq(review_key)
+        queue.loc[mask, "review_status"] = "Corrected"
+        queue.loc[mask, "has_manual_correction"] = "Yes"
+        if assigned_to:
+            queue.loc[mask, "assigned_to"] = assigned_to
+        queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+        save_manual_review_queue(queue)
+    return {"saved_path": saved_path, "created_transcripts": created_transcripts}
+
+
 def _manual_correction_review_tables(bundle) -> dict[str, pd.DataFrame]:
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
     tables = getattr(bundle, "tables", {})
@@ -696,6 +880,7 @@ def _manual_workspace_summary() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {"Item": "Correction CSV", "Path": str(workspace["corrections_path"])},
+            {"Item": "Assignment Queue CSV", "Path": str(workspace["review_queue_path"])},
             {"Item": "Transcript Paste-In Folder", "Path": str(workspace["transcript_folder"])},
             {"Item": "Canonical Latest Folder", "Path": str(MANUAL_ROSTER_CORRECTIONS_PATH.parent.parent / "output" / "canonical" / "latest")},
         ]
@@ -713,14 +898,25 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     corrections = load_manual_roster_corrections()
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
+    saved_queue = load_manual_review_queue()
+    generated_queue = _build_manual_assignment_queue(summary, corrections)
+    review_queue = _merge_saved_review_queue(generated_queue, saved_queue)
+    save_manual_review_queue(review_queue)
 
-    info_cols = st.columns(3)
+    metrics = _manual_queue_metrics(review_queue, corrections)
+    info_cols = st.columns(6)
     with info_cols[0]:
         st.metric("Saved corrections", f"{len(corrections):,}")
     with info_cols[1]:
-        st.metric("Correction file", MANUAL_ROSTER_CORRECTIONS_PATH.name)
+        st.metric("Queue records", f"{metrics['queue_total']:,}")
     with info_cols[2]:
-        st.metric("Applies on", "Next canonical run")
+        st.metric("Needs review", f"{metrics['needs_review']:,}")
+    with info_cols[3]:
+        st.metric("In progress", f"{metrics['in_progress']:,}")
+    with info_cols[4]:
+        st.metric("Needs transcript", f"{metrics['needs_transcript']:,}")
+    with info_cols[5]:
+        st.metric("Transcript files", f"{metrics['transcripts_ready']:,}")
 
     with st.expander("Helper quick start", expanded=True):
         st.write("1. Search for the student by Banner ID, name, or chapter.")
@@ -751,20 +947,144 @@ def _render_manual_corrections_editor(bundle) -> None:
             )
 
     st.info(
-        "Search for a student first. The top edit row will auto-fill from the current canonical data so you can adjust it instead of starting from a blank row. "
+        "Work the Assignment Queue first when possible. Search is still available when you need to jump to a specific student. "
         "If Student Join Term is blank, it defaults to Organization Join Term when saved. "
         "When a correction row is saved, the app creates a matching transcript text file in the Transcripts folder and opens newly created files for pasting. "
         "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV."
     )
 
-    editor_frame = corrections.copy()
-    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
-        if column not in editor_frame.columns:
-            editor_frame[column] = ""
-    editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
+    queue_tab, correction_tab, package_tab, review_tab = st.tabs(["Assignment Queue", "Correction Sheet", "Import / Export", "Weird Records"])
 
-    editor_col, review_col = st.columns([2, 1], gap="large")
-    with editor_col:
+    with queue_tab:
+        helper_initials = st.text_input("Helper initials / owner", value=st.session_state.get("manual_helper_initials", ""), key="manual_helper_initials")
+        queue_filters = st.columns(4)
+        with queue_filters[0]:
+            status_filter = st.multiselect("Review status", options=REVIEW_STATUS_OPTIONS, default=["Needs Review", "In Progress", "Waiting on Transcript"])
+        with queue_filters[1]:
+            owner_options = _unique_text_options(review_queue, "assigned_to")
+            owner_filter = st.multiselect("Assigned to", options=owner_options)
+        with queue_filters[2]:
+            transcript_filter = st.selectbox("Needs transcript", options=["All", "Yes", "No"])
+        with queue_filters[3]:
+            reason_search = st.text_input("Reason contains", placeholder="unknown, inferred, incomplete")
+
+        queue_view = review_queue.copy()
+        if status_filter:
+            queue_view = queue_view.loc[queue_view["review_status"].isin(status_filter)]
+        if owner_filter:
+            queue_view = queue_view.loc[queue_view["assigned_to"].isin(owner_filter)]
+        if transcript_filter != "All":
+            queue_view = queue_view.loc[queue_view["needs_transcript"].eq(transcript_filter)]
+        if reason_search:
+            queue_view = queue_view.loc[queue_view["queue_reason"].fillna("").astype(str).str.contains(reason_search, case=False, regex=False, na=False)]
+
+        work_cols = st.columns([1, 3])
+        with work_cols[0]:
+            if st.button("Next unresolved student", use_container_width=True, disabled=queue_view.empty):
+                next_candidates = queue_view.loc[~queue_view["review_status"].isin(["Corrected", "Skipped / No Change"])]
+                if not next_candidates.empty:
+                    st.session_state["manual_queue_selected_key"] = next_candidates.iloc[0]["review_key"]
+                    st.rerun()
+        with work_cols[1]:
+            selected_options = queue_view["review_key"].fillna("").astype(str).replace("", pd.NA).dropna().tolist()
+            if selected_options:
+                st.selectbox(
+                    "Selected queue student",
+                    options=selected_options,
+                    index=selected_options.index(st.session_state["manual_queue_selected_key"]) if st.session_state.get("manual_queue_selected_key") in selected_options else 0,
+                    format_func=lambda key: (
+                        queue_view.loc[queue_view["review_key"].eq(key), ["student_name", "student_id", "chapter", "queue_reason"]]
+                        .fillna("")
+                        .astype(str)
+                        .agg(" | ".join, axis=1)
+                        .iloc[0]
+                        if key in set(queue_view["review_key"])
+                        else key
+                    ),
+                    key="manual_queue_selected_key",
+                )
+            else:
+                st.caption("No queue records match the current filters.")
+
+        if selected_options:
+            selected_summary = _summary_row_for_review_key(summary, st.session_state.get("manual_queue_selected_key", ""))
+            selected_queue_row = review_queue.loc[review_queue["review_key"].eq(st.session_state.get("manual_queue_selected_key", ""))].head(1)
+            if not selected_queue_row.empty:
+                st.subheader("Selected student")
+                st.dataframe(selected_queue_row, use_container_width=True, hide_index=True)
+            if not selected_summary.empty:
+                st.caption("Quick final-status buttons create/update the nine-column manual correction row and mark this queue item as corrected.")
+                quick_status_cols = st.columns(6)
+                for index, status in enumerate(["Inactive", "Resigned", "Revoked", "Suspended", "Unknown", "Graduated"]):
+                    with quick_status_cols[index]:
+                        if st.button(status, use_container_width=True, key=f"quick_status_{status.lower()}"):
+                            result = _save_quick_manual_status(selected_summary, status, helper_initials)
+                            st.success(f"Saved {status} correction to {result['saved_path']}.")
+                            for path in result["created_transcripts"]:
+                                _open_local_text_file(path)
+                            st.rerun()
+                transcript_col, skip_col = st.columns(2)
+                with transcript_col:
+                    if st.button("Create/Open transcript file", use_container_width=True):
+                        correction_row = pd.Series(_manual_correction_row_from_summary(selected_summary))
+                        created = ensure_manual_transcript_files(pd.DataFrame([correction_row]))
+                        transcript_path = manual_transcript_path_for_correction(correction_row)
+                        _open_local_text_file(transcript_path)
+                        queue = load_manual_review_queue()
+                        mask = queue["review_key"].eq(_manual_review_key(selected_summary))
+                        queue.loc[mask, "needs_transcript"] = "Yes"
+                        queue.loc[mask, "transcript_file_exists"] = "Yes" if transcript_path.exists() else "No"
+                        queue.loc[mask, "review_status"] = "Waiting on Transcript"
+                        if helper_initials:
+                            queue.loc[mask, "assigned_to"] = helper_initials
+                        queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+                        save_manual_review_queue(queue)
+                        st.success(f"Transcript file ready: {transcript_path}")
+                        if not created:
+                            st.caption("The transcript file already existed, so it was not overwritten.")
+                        st.rerun()
+                with skip_col:
+                    if st.button("Mark skipped / no change", use_container_width=True):
+                        queue = load_manual_review_queue()
+                        mask = queue["review_key"].eq(_manual_review_key(selected_summary))
+                        queue.loc[mask, "review_status"] = "Skipped / No Change"
+                        if helper_initials:
+                            queue.loc[mask, "assigned_to"] = helper_initials
+                        queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+                        save_manual_review_queue(queue)
+                        st.rerun()
+
+        st.subheader("Editable assignment queue")
+        edited_queue = st.data_editor(
+            queue_view,
+            num_rows="fixed",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "review_status": st.column_config.SelectboxColumn("Review Status", options=REVIEW_STATUS_OPTIONS),
+                "needs_transcript": st.column_config.SelectboxColumn("Needs Transcript", options=["Yes", "No"]),
+                "assigned_to": st.column_config.TextColumn("Assigned To"),
+                "review_notes": st.column_config.TextColumn("Review Notes", width="large"),
+            },
+            key="manual_review_queue_editor",
+        )
+        if st.button("Save queue updates", use_container_width=True):
+            base = review_queue.set_index("review_key")
+            updates = edited_queue.set_index("review_key")
+            for column in ["assigned_to", "review_status", "needs_transcript", "review_notes"]:
+                if column in updates.columns:
+                    base.loc[updates.index, column] = updates[column]
+            base.loc[updates.index, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+            save_manual_review_queue(base.reset_index())
+            st.success(f"Saved queue updates to {MANUAL_REVIEW_QUEUE_PATH}.")
+            st.rerun()
+
+    with correction_tab:
+        editor_frame = corrections.copy()
+        for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+            if column not in editor_frame.columns:
+                editor_frame[column] = ""
+        editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
         search = st.text_input("Find a student to edit", placeholder="Type Banner ID, first name, last name, or chapter")
         if search and not summary.empty:
             haystack_columns = [
@@ -853,7 +1173,37 @@ def _render_manual_corrections_editor(bundle) -> None:
                 mime="text/csv",
             )
 
-    with review_col:
+    with package_tab:
+        st.subheader("Import returned helper package")
+        uploaded_package = st.file_uploader("Upload manual_corrections_package.zip", type=["zip"])
+        if uploaded_package is not None and st.button("Merge uploaded package", use_container_width=True):
+            result = import_manual_corrections_package(uploaded_package.getvalue())
+            st.success(
+                f"Merged {result['incoming_rows']:,} incoming correction row(s). "
+                f"Master correction file now has {result['merged_rows']:,} row(s). "
+                f"Imported {result['transcript_imported']:,} transcript file(s)."
+            )
+            conflicts = result.get("conflicts", pd.DataFrame())
+            if isinstance(conflicts, pd.DataFrame) and not conflicts.empty:
+                st.warning("Potential conflicting corrections were found. Review these before applying the next canonical rebuild.")
+                st.dataframe(conflicts, use_container_width=True, hide_index=True)
+
+        st.subheader("Duplicate / conflict check")
+        conflict_frame = find_manual_correction_conflicts(load_manual_roster_corrections())
+        if conflict_frame.empty:
+            st.success("No conflicting manual correction rows were found.")
+        else:
+            st.warning("Multiple different correction rows exist for the same student/name.")
+            st.dataframe(conflict_frame, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download current helper package",
+            data=build_manual_corrections_package(),
+            file_name="manual_corrections_package.zip",
+            mime="application/zip",
+            use_container_width=True,
+        )
+
+    with review_tab:
         _render_manual_review_panel(bundle)
 
 

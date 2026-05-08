@@ -5,9 +5,13 @@ import pytest
 
 from app.config_loader import (
     build_manual_corrections_package,
+    find_manual_correction_conflicts,
+    import_manual_corrections_package,
     ensure_manual_transcript_files,
     load_manual_roster_corrections,
+    load_manual_review_queue,
     prepare_manual_corrections_workspace,
+    save_manual_review_queue,
     save_manual_roster_corrections,
 )
 from app.data_loader import _validate_loaded_tables
@@ -109,5 +113,65 @@ def test_manual_workspace_and_package_are_helper_ready(tmp_path) -> None:
     with ZipFile(package_path) as archive:
         assert sorted(archive.namelist()) == [
             "Transcripts/A00000001_Doe_Jane.txt",
+            "manual_review_queue.csv",
             "manual_roster_corrections.csv",
         ]
+
+
+def test_manual_correction_conflict_detection() -> None:
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000001"],
+            "last_name": ["Doe", "Doe"],
+            "first_name": ["Jane", "Jane"],
+            "student_join_term": ["Spring 2026", "Spring 2026"],
+            "organization_join_term": ["Spring 2026", "Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi", "Alpha Sigma Phi"],
+            "leaving_organization_term": ["Spring 2026", "Spring 2026"],
+            "final_status_term": ["Fall 2026", "Fall 2026"],
+            "final_status": ["Inactive", "Graduated"],
+        }
+    )
+
+    conflicts = find_manual_correction_conflicts(corrections)
+
+    assert len(conflicts) == 1
+    assert conflicts.loc[0, "student_id"] == "A00000001"
+
+
+def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monkeypatch) -> None:
+    corrections_path = tmp_path / "config" / "manual_roster_corrections.csv"
+    review_path = tmp_path / "config" / "manual_review_queue.csv"
+    transcript_folder = tmp_path / "transcript_text" / "Transcripts"
+    monkeypatch.setattr("app.config_loader.MANUAL_ROSTER_CORRECTIONS_PATH", corrections_path)
+    monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_QUEUE_PATH", review_path)
+    monkeypatch.setattr("app.config_loader.MANUAL_TRANSCRIPTS_PATH", transcript_folder)
+
+    save_manual_roster_corrections(
+        pd.DataFrame(
+            {
+                "student_id": ["A00000001"],
+                "last_name": ["Doe"],
+                "first_name": ["Jane"],
+                "student_join_term": ["Spring 2026"],
+                "organization_join_term": ["Spring 2026"],
+                "organization_name": ["Alpha Sigma Phi"],
+                "leaving_organization_term": ["Spring 2026"],
+                "final_status_term": ["Fall 2026"],
+                "final_status": ["Inactive"],
+            }
+        ),
+        corrections_path,
+    )
+    save_manual_review_queue(pd.DataFrame({"review_key": ["A00000001"], "review_status": ["Corrected"]}), review_path)
+    transcript_folder.mkdir(parents=True, exist_ok=True)
+    (transcript_folder / "A00000001_Doe_Jane.txt").write_text("Spring 2026\nCredits: 3\n", encoding="utf-8")
+    package_bytes = build_manual_corrections_package(corrections_path, transcript_folder, review_path)
+
+    result = import_manual_corrections_package(package_bytes)
+
+    assert result["incoming_rows"] == 1
+    assert result["merged_rows"] == 1
+    assert result["transcript_skipped"] == 1
+    assert len(load_manual_roster_corrections(corrections_path)) == 1
+    assert len(load_manual_review_queue(review_path)) == 1

@@ -54,11 +54,16 @@ For people who only need to make manual roster corrections, use the double-click
 
 That launcher opens the app directly in Manual Corrections Mode, skipping the analytics setup screens. Helpers can:
 
+- work from an Assignment Queue of unresolved, unknown, inferred, or incomplete records
+- claim rows with helper initials and set review status / notes
+- use quick final-status buttons for common outcomes such as Inactive, Resigned, Revoked, Suspended, Unknown, or Graduated
 - search for a student by Banner ID, name, or chapter
 - edit the nine-column manual correction row
 - save corrections to `config/manual_roster_corrections.csv`
+- track assignment progress in `config/manual_review_queue.csv`
 - create/open matching transcript paste-in files under `data/inbox/transcript_text/Transcripts/`
-- download `manual_corrections_package.zip` to send corrections and transcript text back
+- download `manual_corrections_package.zip` to send corrections, queue progress, and transcript text back
+- import returned helper packages and review duplicate/conflicting corrections before the next canonical rebuild
 
 Manual Corrections Mode loads only the lightweight correction tables it needs, so helpers do not have to wait for the full analytics interface to initialize.
 
@@ -324,6 +329,14 @@ Manual roster correction behavior:
 7. `final_status_term` and `final_status` can create or update the final manual status row
 8. saving correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
 9. the app shows an `x` helper column for deleting saved correction rows, but the CSV itself stays in the nine-column format above
+
+Manual helper queue behavior:
+
+1. `config/manual_review_queue.csv` stores helper ownership, review status, transcript-needed flags, and notes
+2. the queue is generated from current canonical records with unknown outcomes, unresolved/inferred chapters, low data completeness, or missing IDs
+3. saved/imported queue rows are preserved even if a later canonical run no longer auto-generates that exact queue item
+4. helper packages include `manual_roster_corrections.csv`, `manual_review_queue.csv`, and transcript `.txt` files
+5. importing a returned helper package merges correction rows, imports transcript files without overwriting different existing text, and flags duplicate/conflicting corrections
 
 ## Exception outputs
 
