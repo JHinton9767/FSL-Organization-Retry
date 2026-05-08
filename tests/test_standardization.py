@@ -128,7 +128,6 @@ def test_manual_roster_corrections_override_status_and_chapter() -> None:
     )
     corrections = pd.DataFrame(
         {
-            "delete_row": [""],
             "student_id": ["A00000001"],
             "last_name": [""],
             "first_name": [""],
@@ -138,8 +137,6 @@ def test_manual_roster_corrections_override_status_and_chapter() -> None:
             "leaving_organization_term": [""],
             "final_status_term": [""],
             "final_status": [""],
-            "notes": ["Corrected from advisor review"],
-            "updated_at": [""],
         }
     )
 
@@ -171,7 +168,6 @@ def test_manual_roster_corrections_mark_between_terms_unknown() -> None:
     )
     corrections = pd.DataFrame(
         {
-            "delete_row": [""],
             "student_id": ["A00000001"],
             "last_name": [""],
             "first_name": [""],
@@ -181,8 +177,6 @@ def test_manual_roster_corrections_mark_between_terms_unknown() -> None:
             "leaving_organization_term": ["Fall 2025"],
             "final_status_term": ["Fall 2026"],
             "final_status": ["Inactive"],
-            "notes": ["Timeline correction"],
-            "updated_at": [""],
         }
     )
 

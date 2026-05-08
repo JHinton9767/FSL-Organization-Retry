@@ -566,7 +566,6 @@ def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
     final_status_term = row.get("graduation_term", "") or row.get("last_observed_academic_term", "") or row.get("last_observed_org_term", "")
     final_status = row.get("latest_outcome_bucket", "") or row.get("status_group", "") or row.get("latest_roster_status_bucket", "")
     return {
-        "delete_row": "",
         "student_id": row.get("student_id", ""),
         "last_name": row.get("last_name", ""),
         "first_name": row.get("first_name", ""),
@@ -576,8 +575,6 @@ def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
         "leaving_organization_term": row.get("last_observed_org_term", "") or row.get("last_observed_org_term_code", ""),
         "final_status_term": final_status_term,
         "final_status": final_status,
-        "notes": "Drafted from app search; review before saving.",
-        "updated_at": "",
     }
 
 
@@ -686,7 +683,7 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     st.info(
         "Search for a student first. The top edit row will auto-fill from the current canonical data so you can adjust it instead of starting from a blank row. "
-        "Check the `x` box on a saved correction row before saving if you want to remove that correction."
+        "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV."
     )
 
     editor_frame = corrections.copy()
@@ -732,8 +729,10 @@ def _render_manual_corrections_editor(bundle) -> None:
                     st.caption("No matching student was found in the current canonical summary.")
 
         with st.form("manual_roster_corrections_form"):
+            editor_display = editor_frame.copy()
+            editor_display.insert(0, "delete_row", "")
             edited = st.data_editor(
-                editor_frame,
+                editor_display,
                 num_rows="dynamic",
                 use_container_width=True,
                 hide_index=True,
@@ -748,24 +747,11 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
                     "final_status_term": st.column_config.TextColumn("Final Status Term"),
                     "final_status": st.column_config.TextColumn("Final Status"),
-                    "notes": st.column_config.TextColumn("Notes", width="large"),
-                    "updated_at": st.column_config.TextColumn("Updated At"),
                 },
             )
             saved = st.form_submit_button("Save manual corrections", use_container_width=True)
 
         if saved:
-            edited = edited.copy()
-            if "updated_at" in edited.columns:
-                blank_timestamp = edited["updated_at"].fillna("").astype(str).str.strip().eq("")
-                has_action = (
-                    edited.get("organization_join_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                    | edited.get("organization_name", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                    | edited.get("leaving_organization_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                    | edited.get("final_status_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                    | edited.get("final_status", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                )
-                edited.loc[blank_timestamp & has_action, "updated_at"] = datetime.now().isoformat(timespec="seconds")
             saved_path = save_manual_roster_corrections(edited)
             st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")
 

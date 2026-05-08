@@ -274,7 +274,6 @@ Persistent manual roster corrections:
 - the canonical pipeline reapplies those corrections on future runs, including runs with `--refresh-source-cache`
 - raw roster Excel/PDF files are never modified
 - supported correction columns:
-  - `delete_row`
   - `student_id`
   - `last_name`
   - `first_name`
@@ -284,8 +283,6 @@ Persistent manual roster corrections:
   - `leaving_organization_term`
   - `final_status_term`
   - `final_status`
-  - `notes`
-  - `updated_at`
 
 Manual roster correction behavior:
 
@@ -296,7 +293,7 @@ Manual roster correction behavior:
 5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
 6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`
 7. `final_status_term` and `final_status` can create or update the final manual status row
-8. `delete_row` removes a saved correction row from the correction ledger; it does not delete raw roster rows
+8. the app shows an `x` helper column for deleting saved correction rows, but the CSV itself stays in the nine-column format above
 
 ## Exception outputs
 

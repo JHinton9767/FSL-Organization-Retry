@@ -3049,7 +3049,6 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         columns=[
-            "delete_row",
             "student_id",
             "last_name",
             "first_name",
@@ -3059,8 +3058,6 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
             "leaving_organization_term",
             "final_status_term",
             "final_status",
-            "notes",
-            "updated_at",
         ]
     ).to_csv(path, index=False)
 
@@ -3193,15 +3190,11 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
     synthetic_rows: List[dict] = []
 
     for correction in corrections.itertuples(index=False):
-        if _manual_truthy(getattr(correction, "delete_row", "")):
-            continue
-
         student_mask = _manual_student_mask(result, correction)
         organization_name = normalize_chapter_name(getattr(correction, "organization_name", ""))
         organization_mask = _manual_org_mask(result, organization_name)
         matched_student_org = student_mask if organization_name else student_mask & organization_mask
-        notes = clean_text(getattr(correction, "notes", ""))
-        note_text = notes or "Applied from config/manual_roster_corrections.csv."
+        note_text = "Applied from config/manual_roster_corrections.csv."
 
         student_join_term = _manual_term_code(getattr(correction, "student_join_term", ""))
         organization_join_term = _manual_term_code(getattr(correction, "organization_join_term", ""))

@@ -222,7 +222,6 @@ def load_manual_chapter_assignments(path: Optional[Path] = None) -> pd.DataFrame
 
 
 MANUAL_ROSTER_CORRECTION_COLUMNS = [
-    "delete_row",
     "student_id",
     "last_name",
     "first_name",
@@ -232,8 +231,6 @@ MANUAL_ROSTER_CORRECTION_COLUMNS = [
     "leaving_organization_term",
     "final_status_term",
     "final_status",
-    "notes",
-    "updated_at",
 ]
 
 
@@ -253,7 +250,6 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     header_map = dict(zip(frame.columns, canonical_headers(frame.columns)))
     renamed = frame.rename(columns=header_map).copy()
     alias_map = {
-        "delete_row": ["delete_row", "delete row", "x", "delete"],
         "student_id": ["student_id", "student id", "banner id", "banner"],
         "last_name": ["last_name", "last name"],
         "first_name": ["first_name", "first name"],
@@ -263,8 +259,6 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         "leaving_organization_term": ["leaving_organization_term", "leaving organization term", "last_org_term", "last observed org term"],
         "final_status_term": ["final_status_term", "final status term", "graduation_term", "status term"],
         "final_status": ["final_status", "final status", "status_override", "status override", "status", "member status", "membership status"],
-        "notes": ["notes", "note", "comment", "comments"],
-        "updated_at": ["updated_at", "updated at", "updated", "timestamp"],
     }
 
     resolved: Dict[str, str] = {}
@@ -282,6 +276,12 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         standardized[column] = standardized[column].str.strip()
 
+    delete_source = next((column for column in renamed.columns if column in {"delete_row", "delete row", "x", "delete"}), None)
+    delete_mask = (
+        renamed[delete_source].fillna("").astype(str).str.strip().str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
+        if delete_source
+        else pd.Series(False, index=standardized.index)
+    )
     has_identity = (
         standardized["student_id"].ne("")
         | standardized["first_name"].ne("")
@@ -294,7 +294,6 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         | standardized["final_status_term"].ne("")
         | standardized["final_status"].ne("")
     )
-    delete_mask = standardized["delete_row"].str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
     return standardized.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
 
@@ -305,6 +304,14 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
         cleaned = empty_manual_roster_corrections()
     else:
         cleaned = frame.copy()
+        delete_mask = (
+            cleaned.get("delete_row", pd.Series("", index=cleaned.index))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"yes", "y", "true", "1", "x", "delete"})
+        )
         for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
             if column not in cleaned.columns:
                 cleaned[column] = ""
@@ -319,7 +326,6 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
             | cleaned["final_status_term"].ne("")
             | cleaned["final_status"].ne("")
         )
-        delete_mask = cleaned["delete_row"].str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
         cleaned = cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
     cleaned.to_csv(candidate, index=False)
     return candidate
