@@ -4,9 +4,12 @@ import pandas as pd
 from openpyxl import Workbook
 
 from src.build_canonical_pipeline import (
+    ensure_columns,
     build_roster_supplement_from_academic,
     dedupe_table,
+    load_schema,
     load_academic_term_table,
+    prepare_canonical_sources,
 )
 
 
@@ -164,3 +167,97 @@ def test_load_academic_term_table_reads_utf16_csv_exports(tmp_path: Path) -> Non
     assert academic.iloc[0]["student_id"] == "A05233818"
     assert academic.iloc[0]["term_code"] == "2024FA"
     assert academic.iloc[0]["term_gpa"] == 3.1
+
+
+def test_prepare_canonical_sources_keeps_roster_membership_authoritative() -> None:
+    schema = load_schema()
+    roster_term = ensure_columns(
+        pd.DataFrame(
+            [
+                {
+                    "student_id": "A05233818",
+                    "student_id_raw": "A05233818",
+                    "identity_resolution_basis": "source_banner_id",
+                    "identity_resolution_notes": "",
+                    "first_name": "Alex",
+                    "last_name": "Smith",
+                    "email": "alex@example.com",
+                    "source_file": r"Copy of Rosters\Fall 2025\IFC\Final\Alpha Sigma Phi\roster.xlsx",
+                    "source_sheet": "Members",
+                    "roster_file_version": "Final",
+                    "roster_file_version_priority": 3,
+                    "roster_file_month": "",
+                    "roster_file_month_priority": 0,
+                    "term_code": "2025FA",
+                    "term_label": "Fall 2025",
+                    "term_year": 2025,
+                    "term_season": "FA",
+                    "term_source_basis": "folder_or_filename",
+                    "chapter": "Alpha Sigma Phi",
+                    "chapter_raw": "Alpha Sigma Phi",
+                    "chapter_assignment_source": "original",
+                    "chapter_assignment_confidence": "high",
+                    "chapter_assignment_notes": "",
+                    "org_status_raw": "Active",
+                    "org_status_bucket": "Active",
+                    "org_position_raw": "",
+                    "semester_joined_raw": "",
+                    "new_member_flag": "No",
+                    "org_entry_term_code": "",
+                    "org_entry_term_basis": "",
+                }
+            ]
+        ),
+        schema["tables"]["roster_term"],
+    )
+    academic_term = ensure_columns(
+        pd.DataFrame(
+            [
+                {
+                    "student_id": "A05233819",
+                    "student_id_raw": "A05233819",
+                    "identity_resolution_basis": "source_student_id",
+                    "identity_resolution_notes": "",
+                    "first_name": "Jamie",
+                    "last_name": "Jones",
+                    "email": "jamie@example.com",
+                    "source_file": r"Copy of Grades\2025\Fall 2025\LOGI Reports\IFC\Alpha Sigma Phi LOGI.xlsx",
+                    "source_sheet": "Sheet1",
+                    "term_code": "2025FA",
+                    "term_label": "Fall 2025",
+                    "term_year": 2025,
+                    "term_season": "FA",
+                    "term_source_basis": "copy_of_grades_logi",
+                    "academic_status_raw": "Active",
+                    "major": "Biology",
+                    "term_gpa": 3.2,
+                    "institutional_cumulative_gpa": 3.2,
+                    "overall_cumulative_gpa": 3.2,
+                    "transfer_gpa": "",
+                    "attempted_hours_term": 15,
+                    "earned_hours_term": 15,
+                    "institutional_cumulative_hours": 45,
+                    "total_cumulative_hours": 45,
+                    "academic_standing_raw": "Good Standing",
+                    "academic_standing_bucket": "Good Standing",
+                    "graduation_term_code": "",
+                    "graduation_term_label": "",
+                }
+            ]
+        ),
+        schema["tables"]["academic_term"],
+    )
+
+    prepared_roster, prepared_academic, *_ = prepare_canonical_sources(
+        roster_term,
+        academic_term,
+        pd.DataFrame(),
+        pd.DataFrame(),
+        settings={"secondary_organizations": []},
+        manual_chapter_assignments=pd.DataFrame(),
+    )
+
+    assert len(prepared_academic.index) == 1
+    assert len(prepared_roster.index) == 1
+    assert prepared_roster.iloc[0]["student_id"] == "A05233818"
+    assert not prepared_roster["student_id"].astype(str).eq("A05233819").any()

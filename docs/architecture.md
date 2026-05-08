@@ -4,7 +4,7 @@
 
 - Center all analytics on one canonical source-of-truth bundle
 - Keep preprocessing outside the app and analysis inside the app
-- Preserve legacy outputs only for backward compatibility and manual review
+- Remove fallback app-loading branches so the dashboard only reads canonical runs
 - Avoid app-side recalculation of already standardized canonical tables
 
 ## Active architecture
@@ -49,7 +49,7 @@ The app treats these as the only authoritative analytics tables:
 - `cohort_metrics`
 - `qa_checks`
 
-Everything else is downstream presentation or backward-compatibility output.
+Everything else is downstream presentation output.
 
 ### 3. No required app-side re-standardization for canonical data
 
@@ -59,7 +59,7 @@ When the canonical bundle is loaded:
 - no additional summary standardization is required
 - no longitudinal rollup merge is required
 
-Legacy standardization code remains available only for manual review of older bundles.
+App-side fallback standardization has been removed. Any older bundle must be rebuilt through the canonical pipeline before it can be used by the app.
 
 ### 4. Metric execution model
 
@@ -83,20 +83,13 @@ The app validates:
 
 The UI exposes dataset status, file presence, timestamps, row counts, QA warnings, and exception-table availability.
 
-### 6. Backward compatibility
+### 6. Removed fallback app paths
 
-Legacy bundles such as enhanced or snapshot-augmented outputs are preserved only for:
-
-- manual review
-- historical comparison
-- troubleshooting
-
-They are not the active default dataset path once a canonical bundle exists.
+The app no longer loads enhanced, snapshot-augmented, or processed bundles directly. This keeps the denominator, graduation, and current-active rules in one canonical source of truth.
 
 ## Main modules
 
-- `app/legacy_bridge.py`: dataset discovery, manifest validation, and canonical bundle loading
-- `app/standardize.py`: legacy-only standardization helpers retained for backward compatibility
+- `app/data_loader.py`: dataset discovery, manifest validation, and canonical bundle loading
 - `app/status_framework.py`: outcome-resolution classification utilities
 - `app/metrics_engine.py`: metric execution on canonical app tables
 - `app/analysis.py`: filtering, grouping, ranking, comparisons, and trends
@@ -107,5 +100,5 @@ They are not the active default dataset path once a canonical bundle exists.
 ## Known limits
 
 - Runtime validation still depends on the presence of a built canonical run
-- Legacy loaders remain in code for compatibility, even though the active manifest is canonical-only
+- Older non-canonical outputs must be regenerated through `run_canonical_pipeline.py` before use in the app
 - Any metric quality issues inherited from source data still need to be handled through canonical QA and exception tables

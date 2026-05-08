@@ -32,7 +32,7 @@ from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_m
 from app.config_loader import load_metric_catalog, load_settings, load_status_code_map
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
-from app.legacy_bridge import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
+from app.data_loader import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
     ALL_STUDENTS_LABEL,
     RESOLVED_OUTCOMES_ONLY_LABEL,
@@ -774,16 +774,16 @@ def _render_population_summary(metric: MetricDefinition, metric_views: dict[str,
         if latest_term_value.empty:
             latest_term_value = latest_term_code.fillna("").astype(str).str.strip().replace("", pd.NA).dropna()
         latest_term_text = latest_term_value.iloc[0] if not latest_term_value.empty else "Unknown"
-        legacy_active_count = int(_truthy_mask(filtered_summary.get("active_flag", pd.Series(False, index=filtered_summary.index))).sum())
+        historical_active_count = int(_truthy_mask(filtered_summary.get("active_flag", pd.Series(False, index=filtered_summary.index))).sum())
         current_columns = st.columns(4)
         with current_columns[0]:
             st.metric("Current Active Students", format_metric_value(all_result["value"], metric.format))
         with current_columns[1]:
             st.metric("Most Recent Roster Term", latest_term_text)
         with current_columns[2]:
-            st.metric("Historical Latest-Status Active", format_metric_value(legacy_active_count, "integer"))
+            st.metric("Historical Latest-Status Active", format_metric_value(historical_active_count, "integer"))
         with current_columns[3]:
-            st.metric("Inflation Removed", format_metric_value(max(legacy_active_count - int(all_result["value"]), 0), "integer"))
+            st.metric("Inflation Removed", format_metric_value(max(historical_active_count - int(all_result["value"]), 0), "integer"))
         st.caption("Current active counts use only the single most recent roster term. Historical rosters remain available for cohort and trend analysis, but they do not roll forward into this present-day count.")
         transparency = _population_transparency_frame(metric, metric_views, filtered_summary)
         st.dataframe(transparency, use_container_width=True, hide_index=True)
@@ -963,7 +963,7 @@ def _audit_tables(summary: pd.DataFrame, bundle) -> dict[str, pd.DataFrame]:
                     {"Measure": "Rows in most recent roster term", "Value": int(len(latest_roster)), "Notes": "All roster rows in the selected latest term after canonical conflict resolution."},
                     {"Measure": "Unique students in most recent roster term", "Value": int(latest_roster["student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()), "Notes": ""},
                     {"Measure": "Current active students (latest roster only)", "Value": current_active_students, "Notes": "Used by the current active metric and chapter current-headcount views."},
-                    {"Measure": "Historical latest-status active students", "Value": historical_active_students, "Notes": "Legacy broader count kept only for historical/outcome context."},
+                    {"Measure": "Historical latest-status active students", "Value": historical_active_students, "Notes": "Broader historical count kept only for historical/outcome context."},
                     {"Measure": "Inflation difference removed", "Value": max(historical_active_students - current_active_students, 0), "Notes": "Difference between historical latest-status actives and latest-roster-only actives."},
                 ]
             )
@@ -1292,6 +1292,22 @@ def _render_advanced_analytics(
             st.dataframe(frame, use_container_width=True, hide_index=True)
 
     with export_tab:
+        with st.expander("Where the old spreadsheet reports went", expanded=False):
+            st.caption("The old standalone workbook builders have been retired. Their review workflows now live here so the app and canonical pipeline use one source of truth.")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Former workbook/report": "Master roster / roster grades", "App replacement": "Filtered Students + Filtered Longitudinal export"},
+                        {"Former workbook/report": "Member tenure report", "App replacement": "Overview, Trends, and Chapter Health cohort views"},
+                        {"Former workbook/report": "Chapter history workbooks", "App replacement": "Chapter Health dashboard and current-active audit tables"},
+                        {"Former workbook/report": "Full academic record priority list", "App replacement": "Advisor Help intervention queue"},
+                        {"Former workbook/report": "Unresolved outcome year report", "App replacement": "Audit tab, Graduation Evidence Audit, and unresolved outcome exports"},
+                        {"Former workbook/report": "Executive report", "App replacement": "Persistence & Graduation landing page, comparisons, rankings, and app workbook export"},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
         st.subheader("Filtered tables")
         export_columns = [
             column
@@ -1416,15 +1432,9 @@ def _render_advanced_analytics(
         )
         st.dataframe(metric_table, use_container_width=True, hide_index=True)
 
-        if "metric_definitions" in bundle.tables:
-            st.subheader("Legacy metric definition table")
-            st.dataframe(bundle.tables["metric_definitions"], use_container_width=True, hide_index=True)
         if "qa_checks" in bundle.tables:
-            st.subheader("Legacy QA table")
+            st.subheader("Canonical QA table")
             st.dataframe(bundle.tables["qa_checks"], use_container_width=True, hide_index=True)
-        if "snapshot_merge_qa" in bundle.tables:
-            st.subheader("Snapshot merge QA table")
-            st.dataframe(bundle.tables["snapshot_merge_qa"], use_container_width=True, hide_index=True)
 
 
 def main() -> None:

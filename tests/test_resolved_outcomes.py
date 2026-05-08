@@ -3,63 +3,8 @@ import pandas as pd
 from app.analysis import summarize_metric_by_group
 from app.metrics_engine import ALL_STUDENTS_LABEL, RESOLVED_OUTCOMES_ONLY_LABEL, compute_metric_views
 from app.models import MetricDefinition
-from app.standardize import standardize_processed_summary
 from app.status_framework import build_outcome_resolution_fields
 from src.shared_utils import ROSTER_DISAPPEARED_UNKNOWN
-
-
-def test_processed_summary_builds_resolved_outcome_flags() -> None:
-    summary = pd.DataFrame(
-        {
-            "student_id": ["1", "2", "3", "4"],
-            "first_name": ["Alex", "Jamie", "Taylor", "Morgan"],
-            "last_name": ["Lee", "Ng", "Jordan", "Patel"],
-            "chapter": ["Alpha", "Alpha", "Beta", "Beta"],
-            "join_term": ["Fall 2021", "Fall 2021", "Spring 2022", "Spring 2022"],
-            "latest_membership_status": ["ACTIVE", "TRANSFER", "GRADUATED", ""],
-            "major": ["Biology", "History", "Math", "English"],
-            "pell_flag": ["Yes", "No", "", ""],
-            "cohort": ["FTFT", "Transfer", "", ""],
-            "total_earned": [45, 78, 12, 30],
-            "avg_term_gpa": [3.1, 2.8, 3.5, 2.9],
-            "latest_gpa_cum": [3.2, 3.0, 3.8, 3.1],
-            "graduated": [False, False, True, False],
-            "graduated_4yr": [False, False, False, False],
-            "graduated_6yr": [False, False, True, False],
-            "first_term": ["Fall 2021", "Fall 2021", "Spring 2022", "Spring 2022"],
-            "first_term_sort": [20213, 20213, 20221, 20221],
-            "last_term_sort": [20223, 20241, 20221, 20221],
-        }
-    )
-
-    standardized = standardize_processed_summary(
-        summary=summary,
-        chapter_mapping=pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
-        settings={
-            "high_hours_threshold": 60,
-            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
-            "completeness_fields": ["student_id", "chapter", "join_term"],
-            "outcome_resolution": {
-                "priority_order": ["Graduated", "Known Non-Graduate Exit", "Still Active", "Unknown", "Other / Unmapped"],
-                "group_patterns": {
-                    "Graduated": ["\\bGRADUAT"],
-                    "Known Non-Graduate Exit": ["\\bTRANSFER\\b"],
-                    "Still Active": ["\\bACTIVE\\b"],
-                    "Unknown": ["\\bUNKNOWN\\b"],
-                    "Other / Unmapped": [],
-                },
-                "resolved_only_excluded_groups": ["Still Active", "Unknown", "Other / Unmapped"],
-            },
-        },
-        status_code_map={"active": ["ACTIVE"], "transfer": ["TRANSFER"], "graduated": ["GRADUATED"], "inactive": [], "suspended": []},
-    )
-
-    assert standardized.loc[0, "outcome_resolution_group"] == "Still Active"
-    assert bool(standardized.loc[0, "resolved_outcome_excluded_flag"]) is True
-    assert standardized.loc[1, "outcome_resolution_group"] == "Resolved Non-Graduate Exit"
-    assert bool(standardized.loc[1, "resolved_outcomes_only_flag"]) is True
-    assert standardized.loc[2, "outcome_resolution_group"] == "Graduated"
-    assert standardized.loc[3, "outcome_resolution_group"] == "Unknown"
 
 
 def test_compute_metric_views_preserves_full_and_adds_resolved_only() -> None:
@@ -155,7 +100,7 @@ def test_graduation_list_alone_does_not_count_without_roster_confirmation() -> N
     assert bool(result.loc[0, "graduation_status_without_evidence"]) is True
 
 
-def test_legacy_graduation_flags_do_not_count_without_explicit_evidence() -> None:
+def test_unconfirmed_graduation_flags_do_not_count_without_explicit_evidence() -> None:
     frame = pd.DataFrame(
         {
             "student_id": ["1", "2"],
@@ -164,7 +109,7 @@ def test_legacy_graduation_flags_do_not_count_without_explicit_evidence() -> Non
             "active_flag": ["No", "No"],
             "graduated_eventual": [True, True],
             "outcome_evidence_source": ["Processed graduation flag (unconfirmed)", ""],
-            "source_logic": ["processed_pipeline", "processed_pipeline"],
+            "source_logic": ["unconfirmed_pipeline", "unconfirmed_pipeline"],
         }
     )
 

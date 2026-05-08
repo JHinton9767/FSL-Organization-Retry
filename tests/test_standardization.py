@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.standardize import standardize_processed_summary
 from src.build_canonical_pipeline import (
     build_current_active_fields,
     roster_file_version_details,
@@ -19,54 +18,6 @@ from src.build_master_roster import (
     should_upgrade_to_new_member_status,
     source_context_indicates_new_member,
 )
-
-
-def test_processed_summary_assigns_core_groups() -> None:
-    summary = pd.DataFrame(
-        {
-            "student_id": ["1", "2"],
-            "first_name": ["Alex", "Jamie"],
-            "last_name": ["Lee", "Ng"],
-            "chapter": ["Alpha", "Alpha"],
-            "join_term": ["Fall 2021", "Spring 2022"],
-            "latest_membership_status": ["ACTIVE", "TRANSFER"],
-            "major": ["Biology", ""],
-            "pell_flag": ["Yes", ""],
-            "cohort": ["FTFT", "Transfer"],
-            "total_earned": [45, 78],
-            "avg_term_gpa": [3.1, 2.8],
-            "latest_gpa_cum": [3.2, 3.0],
-            "graduated": [False, True],
-            "graduated_4yr": [False, False],
-            "graduated_6yr": [False, True],
-            "first_term": ["Fall 2021", "Spring 2022"],
-            "first_term_sort": [20213, 20221],
-            "last_term_sort": [20223, 20241],
-        }
-    )
-    standardized = standardize_processed_summary(
-        summary=summary,
-        chapter_mapping=pd.DataFrame(
-            {
-                "chapter": ["Alpha"],
-                "chapter_group": ["North"],
-                "council": ["IFC"],
-                "org_type": ["Fraternity"],
-                "family": ["Traditional"],
-                "custom_group": ["Pilot"],
-            }
-        ),
-        settings={
-            "high_hours_threshold": 60,
-            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
-            "completeness_fields": ["student_id", "chapter", "join_term"],
-        },
-        status_code_map={"active": ["ACTIVE"], "transfer": ["TRANSFER"], "graduated": ["GRADUATED"], "inactive": [], "suspended": []},
-    )
-    assert standardized.loc[0, "chapter_group"] == "North"
-    assert standardized.loc[0, "pell_group"] == "Pell"
-    assert standardized.loc[1, "transfer_group"] == "Transfer"
-    assert standardized.loc[1, "high_hours_group"] == "High Hours"
 
 
 def test_current_active_fields_use_latest_roster_only() -> None:
@@ -132,93 +83,6 @@ def test_current_active_fields_allow_missing_source_metadata_columns() -> None:
     assert result.loc[0, "current_active_source_file"] == ""
     assert result.loc[0, "current_active_source_sheet"] == ""
     assert result.loc[1, "current_active_flag"] == "No"
-
-
-def test_processed_summary_does_not_treat_single_letter_g_inside_longer_text_as_graduated() -> None:
-    summary = pd.DataFrame(
-        {
-            "student_id": ["1"],
-            "first_name": ["Alex"],
-            "last_name": ["Lee"],
-            "chapter": ["Alpha"],
-            "join_term": ["Fall 2021"],
-            "latest_membership_status": ["Good Standing"],
-            "major": ["Biology"],
-            "pell_flag": ["Yes"],
-            "cohort": ["FTFT"],
-            "total_earned": [45],
-            "avg_term_gpa": [3.1],
-            "latest_gpa_cum": [3.2],
-            "graduated": [False],
-            "graduated_4yr": [False],
-            "graduated_6yr": [False],
-            "first_term": ["Fall 2021"],
-            "first_term_sort": [20213],
-            "last_term_sort": [20223],
-        }
-    )
-
-    standardized = standardize_processed_summary(
-        summary=summary,
-        chapter_mapping=pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
-        settings={
-            "high_hours_threshold": 60,
-            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
-            "completeness_fields": ["student_id", "chapter", "join_term"],
-        },
-        status_code_map={"active": ["A"], "transfer": ["T"], "graduated": ["G"], "inactive": [], "suspended": []},
-    )
-
-    assert standardized.loc[0, "latest_outcome_bucket"] != "Graduated"
-
-
-def test_processed_summary_matches_official_chapter_mapping_names_to_short_chapter_values() -> None:
-    summary = pd.DataFrame(
-        {
-            "student_id": ["1"],
-            "first_name": ["Alex"],
-            "last_name": ["Lee"],
-            "chapter": ["Alpha Phi Alpha"],
-            "join_term": ["Fall 2021"],
-            "latest_membership_status": ["ACTIVE"],
-            "major": ["Biology"],
-            "pell_flag": ["Yes"],
-            "cohort": ["FTFT"],
-            "total_earned": [45],
-            "avg_term_gpa": [3.1],
-            "latest_gpa_cum": [3.2],
-            "graduated": [False],
-            "graduated_4yr": [False],
-            "graduated_6yr": [False],
-            "first_term": ["Fall 2021"],
-            "first_term_sort": [20213],
-            "last_term_sort": [20223],
-        }
-    )
-
-    standardized = standardize_processed_summary(
-        summary=summary,
-        chapter_mapping=pd.DataFrame(
-            {
-                "chapter": ["Alpha Phi Alpha Fraternity, Inc."],
-                "chapter_group": ["Alpha Phi Alpha"],
-                "council": ["MGC"],
-                "org_type": ["Fraternity"],
-                "family": ["MGC"],
-                "custom_group": [""],
-            }
-        ),
-        settings={
-            "high_hours_threshold": 60,
-            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
-            "completeness_fields": ["student_id", "chapter", "join_term"],
-        },
-        status_code_map={"active": ["ACTIVE"], "transfer": [], "graduated": ["GRADUATED"], "inactive": [], "suspended": []},
-    )
-
-    assert standardized.loc[0, "council"] == "MGC"
-    assert standardized.loc[0, "org_type"] == "Fraternity"
-    assert standardized.loc[0, "family"] == "MGC"
 
 
 def test_infer_chapter_uses_parent_chapter_folder_before_council_or_final_folders() -> None:

@@ -730,6 +730,8 @@ def extract_academic_rows_from_table_rows(
         term_source_basis = grade_term_source_basis(path, sheet_name, section_context)
 
         for row in table_rows[header_row_idx + 1 : next_header_row_idx]:
+            if all(not clean_text(cell) for cell in row):
+                break
             first_name = clean_text(get_cell(row, header_map.get("First Name")))
             last_name = clean_text(get_cell(row, header_map.get("Last Name")))
             if not first_name and not last_name:
@@ -3255,11 +3257,6 @@ def prepare_canonical_sources(
     manual_chapter_assignments: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-
-    academic_roster_supplement = build_roster_supplement_from_academic(academic_term)
-    if not academic_roster_supplement.empty:
-        roster_term = pd.concat([roster_term, academic_roster_supplement], ignore_index=True)
-        roster_term = ensure_columns(roster_term, load_schema()["tables"]["roster_term"])
 
     email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
     roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
 import pandas as pd
 
 from src.shared_utils import coerce_numeric
-from src.greek_life_pipeline import canonicalize_column, parse_term
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +19,31 @@ SEASON_CODES = {
     "fall": "FA",
     "unknown": "UN",
 }
+TERM_ORDER = {
+    "winter": 0,
+    "spring": 1,
+    "summer": 2,
+    "fall": 3,
+    "unknown": 9,
+}
+
+
+@dataclass(frozen=True)
+class TermParts:
+    year: int | None
+    season: str
+
+    @property
+    def sort_key(self) -> int | None:
+        if self.year is None:
+            return None
+        return self.year * 10 + TERM_ORDER.get(self.season, TERM_ORDER["unknown"])
+
+    @property
+    def label(self) -> str | None:
+        if self.year is None:
+            return None
+        return f"{self.season.title()} {self.year}"
 
 
 def normalize_text(value: object) -> str:
@@ -31,6 +56,13 @@ def normalize_text(value: object) -> str:
 
 def normalize_key(value: object) -> str:
     return canonicalize_column(value).replace(" ", "_")
+
+
+def canonicalize_column(name: object) -> str:
+    text = "" if name is None else str(name)
+    text = text.strip().lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def safe_slug(value: str) -> str:
@@ -72,6 +104,35 @@ def category_from_bool(value: Optional[bool], yes_label: str, no_label: str, unk
     if value is False:
         return no_label
     return unknown_label
+
+
+def parse_term(value: object) -> TermParts:
+    if pd.isna(value):
+        return TermParts(year=None, season="unknown")
+    text = str(value).strip().lower()
+    if not text:
+        return TermParts(year=None, season="unknown")
+
+    year_match = re.search(r"(20\d{2}|19\d{2})", text)
+    year = int(year_match.group(1)) if year_match else None
+
+    if re.search(r"(?:\b|_)(fa|fall)(?:\b|_)", text) or "fall" in text or text.endswith("fa") or text.startswith("fa"):
+        season = "fall"
+    elif re.search(r"(?:\b|_)(sp|spr|spring)(?:\b|_)", text) or "spring" in text or text.endswith("sp") or text.startswith("sp"):
+        season = "spring"
+    elif re.search(r"(?:\b|_)(sum|su|summer)(?:\b|_)", text) or "summer" in text or text.endswith("su") or text.startswith("su"):
+        season = "summer"
+    elif re.search(r"(?:\b|_)(win|winter)(?:\b|_)", text) or "winter" in text or text.endswith("wi") or text.startswith("wi"):
+        season = "winter"
+    elif re.fullmatch(r"\d{6}", text):
+        code = text[-2:]
+        season = {"10": "spring", "20": "summer", "30": "fall"}.get(code, "unknown")
+        if year is None:
+            year = int(text[:4])
+    else:
+        season = "unknown"
+
+    return TermParts(year=year, season=season)
 
 
 def parse_term_label(value: object) -> dict[str, object]:

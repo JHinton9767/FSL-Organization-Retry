@@ -31,7 +31,7 @@
     "numerator_label": "Students marked current active on the most recent roster",
     "denominator_label": "Not applicable",
     "notes": "Historical rosters remain available for trends and cohorts, but they are not combined to create the present-day active count.",
-    "limitations": "This metric requires a bundle with latest-roster current membership fields; older fallback bundles may not support it."
+    "limitations": "This metric requires canonical latest-roster current membership fields."
   },
   {
     "key": "graduation_rate_eventual",
@@ -67,7 +67,7 @@
     "numerator_label": "Unique students with confirmed graduation evidence within 4 years",
     "denominator_label": "Students with enough observation window",
     "notes": "Recent cohorts may be excluded from the denominator.",
-    "limitations": "Unavailable in some processed-only bundles; requires enough follow-up time and explicit graduation evidence with a graduation term."
+    "limitations": "Requires enough follow-up time and explicit graduation evidence with a graduation term."
   },
   {
     "key": "graduation_rate_6yr",
@@ -85,7 +85,7 @@
     "numerator_label": "Unique students with confirmed graduation evidence within 6 years",
     "denominator_label": "Students with enough observation window",
     "notes": "This is one of the best ranking metrics for long-run outcomes.",
-    "limitations": "Processed-only bundles use the lighter-weight legacy summary, but disappearance and transcript completion history still do not count as graduation without explicit evidence."
+    "limitations": "Disappearance and transcript completion history do not count as graduation without explicit evidence."
   },
   {
     "key": "retention_rate_next_term",
@@ -99,11 +99,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Share retained on chapter rosters in the next observed roster term.",
-    "logic_source": "Existing enhanced summary follow-up flags",
+    "logic_source": "Canonical student-summary follow-up flags",
     "numerator_label": "Students retained to next observed term",
     "denominator_label": "Students with a measurable next observed term",
     "notes": "Graduates and terminal statuses before follow-up are handled upstream in the existing logic.",
-    "limitations": "Not available in the simple processed bundle."
+    "limitations": "Requires canonical follow-up fields."
   },
   {
     "key": "retention_rate_next_fall",
@@ -117,11 +117,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Share retained to the next fall after organization entry.",
-    "logic_source": "Existing enhanced summary follow-up flags",
+    "logic_source": "Canonical student-summary follow-up flags",
     "numerator_label": "Students retained to next fall",
     "denominator_label": "Students with measurable next-fall follow-up",
     "notes": "Useful for chapter-level continuation checks.",
-    "limitations": "Not available in the simple processed bundle."
+    "limitations": "Requires canonical follow-up fields."
   },
   {
     "key": "retention_rate_one_year",
@@ -135,11 +135,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Share retained one academic year after organization entry.",
-    "logic_source": "Enhanced one-year same-season flag or processed year-2 proxy",
+    "logic_source": "Canonical one-year follow-up flag",
     "numerator_label": "Students retained one year later",
     "denominator_label": "Students with measurable one-year follow-up",
-    "notes": "Processed bundles use the existing year-to-year proxy from the base pipeline.",
-    "limitations": "Definitions vary slightly by source bundle, so the app labels the source in the metric notes."
+    "notes": "Uses the canonical organization-entry follow-up definition.",
+    "limitations": "Coverage depends on available roster and academic follow-up records."
   },
   {
     "key": "continuation_rate_next_fall",
@@ -153,11 +153,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Share of students with any academic record in the next fall after organization entry.",
-    "logic_source": "Existing enhanced continuation flags",
+    "logic_source": "Canonical academic continuation flags",
     "numerator_label": "Students continuing academically to next fall",
     "denominator_label": "Students with measurable next-fall academic follow-up",
     "notes": "This is academic continuation, not chapter retention.",
-    "limitations": "Only available in enhanced-style bundles."
+    "limitations": "Requires canonical academic follow-up fields."
   },
   {
     "key": "average_term_gpa",
@@ -170,11 +170,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Average term-based GPA metric available in the selected bundle.",
-    "logic_source": "Enhanced first-year average term GPA or processed average observed term GPA",
+    "logic_source": "Canonical selected average term GPA field",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with non-missing term GPA measure",
-    "notes": "The app preserves the best available term-GPA field for the selected source.",
-    "limitations": "Processed and enhanced bundles do not expose identical term-GPA windows."
+    "notes": "The app uses the canonical term-GPA field prepared upstream.",
+    "limitations": "Missing GPA history is excluded from the mean."
   },
   {
     "key": "average_cumulative_gpa",
@@ -187,10 +187,10 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Average selected cumulative GPA across the filtered students.",
-    "logic_source": "Existing enhanced overall/TxState GPA preference or processed latest cumulative GPA",
+    "logic_source": "Canonical selected cumulative GPA field",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with non-missing cumulative GPA",
-    "notes": "When both overall and institutional cumulative GPAs exist, the app prefers the most complete legacy field.",
+    "notes": "When both overall and institutional cumulative GPAs exist, the canonical bundle provides the selected value.",
     "limitations": "Campus baseline comparisons only exist if non-FSL students are present in the source data."
   },
   {
@@ -204,11 +204,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Average change from the first to second observed academic term after entry.",
-    "logic_source": "Existing enhanced GPA change field",
+    "logic_source": "Canonical GPA change field",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with non-missing GPA change",
     "notes": "Useful for improvement and decline rankings.",
-    "limitations": "Not available in simple processed bundles."
+    "limitations": "Requires enough observed GPA history."
   },
   {
     "key": "average_total_cumulative_hours",
@@ -221,11 +221,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Average latest cumulative-hours measure available in the selected bundle.",
-    "logic_source": "Current snapshot total hours, enhanced longitudinal cumulative hours, or processed total earned hours proxy",
+    "logic_source": "Canonical selected cumulative-hours field",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with non-missing cumulative hours",
     "notes": "The app labels estimated/proxy values separately in the UI.",
-    "limitations": "Processed bundles may reflect observed earned hours instead of a registrar cumulative-hours field."
+    "limitations": "Depends on available academic source coverage."
   },
   {
     "key": "average_entry_hours",
@@ -238,11 +238,11 @@
     "higher_is_better": false,
     "min_sample_size": 5,
     "description": "Average observed cumulative hours at organization entry.",
-    "logic_source": "Existing enhanced entry cumulative-hours field",
+    "logic_source": "Canonical entry cumulative-hours field",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with observed entry hours",
-    "notes": "This is observed, not estimated, when the enhanced longitudinal bundle provides it.",
-    "limitations": "Unavailable in the simple processed bundle."
+    "notes": "This is observed when canonical academic records provide it.",
+    "limitations": "Unavailable when entry cumulative hours are missing."
   },
   {
     "key": "average_estimated_pre_org_hours",
@@ -255,11 +255,11 @@
     "higher_is_better": false,
     "min_sample_size": 5,
     "description": "Average estimated credit hours accumulated before observed organization entry.",
-    "logic_source": "Existing current snapshot augmentation logic",
+    "logic_source": "Canonical current snapshot / academic augmentation fields",
     "numerator_label": "Not applicable",
     "denominator_label": "Students with estimated pre-organization hours",
     "notes": "This metric is explicitly estimated and should not be treated as exact historical fact.",
-    "limitations": "Only available in snapshot-augmented bundles."
+    "limitations": "Only available when canonical upstream data contains the estimated field."
   },
   {
     "key": "low_gpa_rate_2_0",
@@ -272,11 +272,11 @@
     "higher_is_better": false,
     "min_sample_size": 5,
     "description": "Share of observed students with first-term GPA below 2.0.",
-    "logic_source": "Existing enhanced first-term low-GPA flag",
+    "logic_source": "Canonical first-term low-GPA flag",
     "numerator_label": "Students flagged below 2.0",
     "denominator_label": "Students with observed first-term GPA flag",
     "notes": "Because the denominator is based on observed rows, missing GPA history does not silently count as success.",
-    "limitations": "Only available in enhanced-style bundles."
+    "limitations": "Requires canonical first-term GPA flags."
   },
   {
     "key": "first_year_probation_rate",
@@ -289,11 +289,11 @@
     "higher_is_better": false,
     "min_sample_size": 5,
     "description": "Share of observed students flagged for probation or warning in the first academic year after entry.",
-    "logic_source": "Existing enhanced academic-standing risk flag",
+    "logic_source": "Canonical academic-standing risk flag",
     "numerator_label": "Students flagged probation / warning",
     "denominator_label": "Students with observed first-year standing history",
     "notes": "Useful for fair subgroup comparisons when combined with controls.",
-    "limitations": "Only available in enhanced-style bundles."
+    "limitations": "Requires canonical first-year standing flags."
   },
   {
     "key": "snapshot_match_rate",
@@ -306,11 +306,11 @@
     "higher_is_better": true,
     "min_sample_size": 5,
     "description": "Share of filtered students matched to a current one-row-per-student snapshot.",
-    "logic_source": "Existing current snapshot merge logic",
+    "logic_source": "Canonical snapshot match field",
     "numerator_label": "Students with snapshot match",
     "denominator_label": "Students with snapshot match field present",
-    "notes": "Useful for understanding how much of the current augmented bundle is actually resolved by snapshot data.",
-    "limitations": "Only available in snapshot-augmented bundles."
+    "notes": "Useful for understanding how much of the canonical bundle is resolved by snapshot data.",
+    "limitations": "Only available when canonical snapshot data is present."
   },
   {
     "key": "data_completeness_rate",

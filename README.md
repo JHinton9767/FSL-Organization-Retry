@@ -44,7 +44,7 @@ Use this order when rebuilding from source files:
 py run_canonical_pipeline.py
 ```
 
-After the canonical bundle exists, any workbook/report builders are downstream exports only.
+After the canonical bundle exists, use the application for review, filtering, exports, chapter health, advisor queues, and audit tables.
 
 ## Faster reruns
 
@@ -85,23 +85,11 @@ Each canonical run now also writes a small performance report to:
 
 The report records per-stage timing, cache hit/miss status, and key row counts so you can see where the runtime is going and whether cached stages were reused.
 
-If you only changed a downstream builder, rerun only that builder instead of the full chain. For example:
+If you only changed app display code, rerun only the app:
 
-- report formatting only: `py run_executive_report.py`
-- chapter workbooks only: `py run_chapter_history_workbooks.py`
-- app UI only: `py run_local_analytics_app.py`
-
-## Downstream exports
-
-These scripts now read canonical outputs instead of using old report files as upstream inputs:
-
-- `py run_master_roster_grades.py`
-- `py run_member_tenure_report.py`
-- `py run_yearly_chapter_rosters.py`
-- `py run_chapter_history_workbooks.py`
-- `py run_full_record_priority_list.py`
-- `py run_unresolved_outcome_year_report.py`
-- `py run_executive_report.py`
+```powershell
+py run_local_analytics_app.py
+```
 
 ## App behavior
 
@@ -245,7 +233,7 @@ Secondary organizations ignored for primary-chapter analytics:
 
 These rows are still preserved in the canonical roster outputs, but they are ignored when choosing a student's primary chapter, backfilling missing chapter assignments, detecting same-term chapter conflicts, and preferring a chapter for entry-term analytics.
 
-Same-term double-roster cleanup also prefers a non-`Resigned` / non-`Revoked` chapter row over a `Resigned` or `Revoked` row when both appear for the same student and term. This keeps RS/RV legacy rows from driving chapter-level graduation, retention, or GPA analytics for the student's later active organization.
+Same-term double-roster cleanup also prefers a non-`Resigned` / non-`Revoked` chapter row over a `Resigned` or `Revoked` row when both appear for the same student and term. This keeps prior RS/RV rows from driving chapter-level graduation, retention, or GPA analytics for the student's later active organization.
 
 When multiple roster files exist for the same chapter and term, source-file version priority is:
 
@@ -330,15 +318,20 @@ Additional reference outputs now include:
 - `reference_unclassified_rows.csv`
 - `retention_reference_values.csv`
 
-## Legacy scripts
+## Canonical-only app loading
 
-Older builders remain in the repository only for backward compatibility or manual review. They are no longer the analytical source of truth.
+The application now loads canonical analytics runs only. Older enhanced, current-snapshot, and processed fallback loaders were removed so the app cannot silently switch to a different denominator or graduation-status implementation.
 
-In particular:
+The old standalone spreadsheet builders have been retired in favor of the app views and app export workbook:
 
-- `Member_Tenure_Report.xlsx` is no longer an upstream dependency
-- `Master_Roster_Grades.xlsx` is no longer the analytical source of truth
-- `data/processed/*.csv` is no longer the preferred analytics source once canonical outputs exist
+- master roster and roster-grade review -> Data & Export filtered student/longitudinal tables
+- member tenure report -> Overview, Trends, and Chapter Health cohort views
+- chapter history workbooks -> Chapter Health dashboard and current-active audit tables
+- full academic record priority list -> Advisor Help intervention queue
+- unresolved outcome year report -> Audit tab and unresolved outcome exports
+- executive report -> Persistence & Graduation landing page, comparisons, rankings, and app workbook export
+
+`data/processed/*.csv` is not an app source; rebuild through `py run_canonical_pipeline.py`.
 
 ## Setup
 

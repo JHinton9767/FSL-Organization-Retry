@@ -8,4 +8,9 @@ data/raw/
 data/processed/
 output/
 .venv/
+.uv-cache/
+.uv-python/
 Yearly/
+__pycache__/
+*.py[cod]
+.pytest_cache/

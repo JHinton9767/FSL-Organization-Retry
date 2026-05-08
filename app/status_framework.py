@@ -287,7 +287,7 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
             axis=1,
         ).fillna(False).any(axis=1) & graduation_evidence
         groups = groups.where(~graduated_mask, GRADUATED_GROUP)
-    groups = groups.where(~(groups.eq(GRADUATED_GROUP) & ~graduation_evidence), TRULY_UNKNOWN_GROUP)
+    groups = groups.where(~(graduation_claim & ~graduation_evidence), TRULY_UNKNOWN_GROUP)
     groups = groups.where(~roster_disappeared_unknown.fillna(False), TRULY_UNKNOWN_GROUP)
 
     excluded_groups = set(merged["resolved_only_excluded_groups"])
