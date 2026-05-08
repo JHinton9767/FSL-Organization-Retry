@@ -128,16 +128,16 @@ def test_manual_roster_corrections_override_status_and_chapter() -> None:
     )
     corrections = pd.DataFrame(
         {
+            "delete_row": [""],
             "student_id": ["A00000001"],
-            "first_name": [""],
             "last_name": [""],
-            "term_code": ["2026SP"],
-            "term_label": [""],
-            "chapter_match": ["Wrong Chapter"],
-            "chapter_override": ["Alpha Sigma Phi"],
-            "status_override": ["New Member"],
-            "new_member_override": [""],
-            "remove_from_roster": [""],
+            "first_name": [""],
+            "student_join_term": ["Spring 2026"],
+            "organization_join_term": ["Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": [""],
+            "final_status_term": [""],
+            "final_status": [""],
             "notes": ["Corrected from advisor review"],
             "updated_at": [""],
         }
@@ -152,43 +152,46 @@ def test_manual_roster_corrections_override_status_and_chapter() -> None:
     assert jane["new_member_flag"] == "Yes"
 
 
-def test_manual_roster_corrections_can_remove_bad_roster_rows() -> None:
+def test_manual_roster_corrections_mark_between_terms_unknown() -> None:
     roster = pd.DataFrame(
         {
-            "student_id": ["A00000001", "A00000002"],
-            "first_name": ["Jane", "Alex"],
-            "last_name": ["Doe", "Smith"],
-            "term_code": ["2026SP", "2026SP"],
-            "term_label": ["Spring 2026", "Spring 2026"],
-            "chapter": ["Alpha", "Beta"],
-            "chapter_assignment_source": ["original", "original"],
-            "chapter_assignment_confidence": ["high", "high"],
-            "chapter_assignment_notes": ["", ""],
-            "org_status_raw": ["Active", "Active"],
-            "org_status_bucket": ["Active", "Active"],
-            "new_member_flag": ["No", "No"],
+            "student_id": ["A00000001", "A00000001", "A00000001"],
+            "first_name": ["Jane", "Jane", "Jane"],
+            "last_name": ["Doe", "Doe", "Doe"],
+            "term_code": ["2025FA", "2026SP", "2026FA"],
+            "term_label": ["Fall 2025", "Spring 2026", "Fall 2026"],
+            "chapter": ["Alpha Sigma Phi", "Alpha Sigma Phi", "Alpha Sigma Phi"],
+            "chapter_assignment_source": ["original", "original", "original"],
+            "chapter_assignment_confidence": ["high", "high", "high"],
+            "chapter_assignment_notes": ["", "", ""],
+            "org_status_raw": ["Active", "Active", "Active"],
+            "org_status_bucket": ["Active", "Active", "Active"],
+            "new_member_flag": ["No", "No", "No"],
         }
     )
     corrections = pd.DataFrame(
         {
+            "delete_row": [""],
             "student_id": ["A00000001"],
-            "first_name": [""],
             "last_name": [""],
-            "term_code": ["2026SP"],
-            "term_label": [""],
-            "chapter_match": [""],
-            "chapter_override": [""],
-            "status_override": [""],
-            "new_member_override": [""],
-            "remove_from_roster": ["Yes"],
-            "notes": ["Bad roster row"],
+            "first_name": [""],
+            "student_join_term": ["Fall 2025"],
+            "organization_join_term": ["Fall 2025"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": ["Fall 2025"],
+            "final_status_term": ["Fall 2026"],
+            "final_status": ["Inactive"],
+            "notes": ["Timeline correction"],
             "updated_at": [""],
         }
     )
 
     result = apply_manual_roster_corrections(roster, corrections)
 
-    assert result["student_id"].tolist() == ["A00000002"]
+    spring = result.loc[result["term_code"].eq("2026SP")].iloc[0]
+    final = result.loc[result["term_code"].eq("2026FA")].iloc[0]
+    assert spring["org_status_bucket"] == "Unknown"
+    assert final["org_status_bucket"] == "Inactive"
 
 
 def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:

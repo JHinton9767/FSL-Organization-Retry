@@ -2086,6 +2086,7 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
     working["_source_format_priority"] = working.get("source_file", pd.Series([""] * len(working), index=working.index)).map(source_file_format_priority)
     working["_assignment_rank"] = working["chapter_assignment_source"].fillna("").astype(str).map(
         {
+            "manual_roster_correction": 0,
             "manual_override": 0,
             "matched_by_id_name": 1,
             "matched_by_id": 2,
@@ -3048,16 +3049,16 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         columns=[
+            "delete_row",
             "student_id",
-            "first_name",
             "last_name",
-            "term_code",
-            "term_label",
-            "chapter_match",
-            "chapter_override",
-            "status_override",
-            "new_member_override",
-            "remove_from_roster",
+            "first_name",
+            "student_join_term",
+            "organization_join_term",
+            "organization_name",
+            "leaving_organization_term",
+            "final_status_term",
+            "final_status",
             "notes",
             "updated_at",
         ]
@@ -3072,7 +3073,11 @@ def _manual_falsey(value: object) -> bool:
     return clean_text(value).lower() in {"no", "n", "false", "0"}
 
 
-def _manual_correction_mask(roster: pd.DataFrame, correction: object) -> pd.Series:
+def _manual_term_code(value: object) -> str:
+    return parse_term_code(value)[0]
+
+
+def _manual_student_mask(roster: pd.DataFrame, correction: object) -> pd.Series:
     mask = pd.Series(False, index=roster.index, dtype="bool")
     student_id = normalize_banner_id(getattr(correction, "student_id", ""))
     first_name = clean_text(getattr(correction, "first_name", "")).lower()
@@ -3087,20 +3092,85 @@ def _manual_correction_mask(roster: pd.DataFrame, correction: object) -> pd.Seri
         if last_name:
             mask = mask & roster["last_name"].fillna("").astype(str).str.strip().str.lower().eq(last_name)
 
-    term_code = parse_term_code(getattr(correction, "term_code", ""))[0]
-    if not term_code:
-        term_code = parse_term_code(getattr(correction, "term_label", ""))[0]
-    if term_code:
-        mask = mask & roster["term_code"].fillna("").astype(str).str.strip().eq(term_code)
-    else:
-        term_label = clean_text(getattr(correction, "term_label", "")).lower()
-        if term_label:
-            mask = mask & roster["term_label"].fillna("").astype(str).str.strip().str.lower().eq(term_label)
-
-    chapter_match = normalize_chapter_name(getattr(correction, "chapter_match", ""))
-    if chapter_match:
-        mask = mask & roster["chapter"].fillna("").astype(str).map(normalize_chapter_name).eq(chapter_match)
     return mask.fillna(False)
+
+
+def _manual_org_mask(roster: pd.DataFrame, organization_name: str) -> pd.Series:
+    if not organization_name:
+        return pd.Series(True, index=roster.index, dtype="bool")
+    normalized_org = normalize_chapter_name(organization_name)
+    return roster["chapter"].fillna("").astype(str).map(normalize_chapter_name).eq(normalized_org)
+
+
+def _manual_term_mask(roster: pd.DataFrame, term_code: str) -> pd.Series:
+    if not term_code:
+        return pd.Series(False, index=roster.index, dtype="bool")
+    return roster["term_code"].fillna("").astype(str).str.strip().eq(term_code)
+
+
+def _apply_manual_unknown_gap(result: pd.DataFrame, mask: pd.Series, notes: str, organization_name: str) -> None:
+    if not mask.any():
+        return
+    result.loc[mask, "org_status_raw"] = "Unknown"
+    result.loc[mask, "org_status_bucket"] = "Unknown"
+    result.loc[mask, "new_member_flag"] = "No"
+    if organization_name:
+        result.loc[mask, "chapter"] = organization_name
+        result.loc[mask, "chapter_raw"] = organization_name
+    result.loc[mask, "chapter_assignment_source"] = "manual_roster_correction"
+    result.loc[mask, "chapter_assignment_confidence"] = "manual"
+    result.loc[mask, "chapter_assignment_notes"] = notes
+
+
+def _manual_roster_row(
+    columns: Sequence[str],
+    correction: object,
+    term_code: str,
+    organization_name: str,
+    status: str,
+    notes: str,
+) -> dict:
+    parsed_code, term_label, term_year, term_season = parse_term_code(term_code)
+    first_name = clean_text(getattr(correction, "first_name", ""))
+    last_name = clean_text(getattr(correction, "last_name", ""))
+    student_id = normalize_banner_id(getattr(correction, "student_id", ""))
+    status_bucket = roster_status_bucket(status, "")
+    row = {column: "" for column in columns}
+    row.update(
+        {
+            "student_id": student_id,
+            "student_id_raw": student_id,
+            "identity_resolution_basis": "manual_roster_correction",
+            "identity_resolution_notes": notes,
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": "",
+            "source_file": str(MANUAL_ROSTER_CORRECTIONS_PATH),
+            "source_sheet": "Manual Corrections",
+            "roster_file_version": "Manual Correction",
+            "roster_file_version_priority": 9,
+            "roster_file_month": "",
+            "roster_file_month_priority": 0,
+            "term_code": parsed_code,
+            "term_label": term_label,
+            "term_year": term_year,
+            "term_season": term_season,
+            "term_source_basis": "manual_roster_correction",
+            "chapter": organization_name,
+            "chapter_raw": organization_name,
+            "chapter_assignment_source": "manual_roster_correction",
+            "chapter_assignment_confidence": "manual",
+            "chapter_assignment_notes": notes,
+            "org_status_raw": status,
+            "org_status_bucket": status_bucket,
+            "org_position_raw": "",
+            "semester_joined_raw": term_label if status_bucket == "New Member" else "",
+            "new_member_flag": "Yes" if status_bucket == "New Member" else "No",
+            "org_entry_term_code": "",
+            "org_entry_term_basis": "",
+        }
+    )
+    return row
 
 
 def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFrame) -> pd.DataFrame:
@@ -3114,49 +3184,98 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
             "chapter_assignment_source",
             "chapter_assignment_confidence",
             "chapter_assignment_notes",
+            "chapter_raw",
             "org_status_raw",
             "org_status_bucket",
             "new_member_flag",
         ],
     )
-    drop_mask = pd.Series(False, index=result.index, dtype="bool")
+    synthetic_rows: List[dict] = []
 
     for correction in corrections.itertuples(index=False):
-        match_mask = _manual_correction_mask(result, correction)
-        if not match_mask.any():
+        if _manual_truthy(getattr(correction, "delete_row", "")):
             continue
 
+        student_mask = _manual_student_mask(result, correction)
+        organization_name = normalize_chapter_name(getattr(correction, "organization_name", ""))
+        organization_mask = _manual_org_mask(result, organization_name)
+        matched_student_org = student_mask if organization_name else student_mask & organization_mask
         notes = clean_text(getattr(correction, "notes", ""))
         note_text = notes or "Applied from config/manual_roster_corrections.csv."
 
-        if _manual_truthy(getattr(correction, "remove_from_roster", "")):
-            drop_mask = drop_mask | match_mask
-            continue
+        student_join_term = _manual_term_code(getattr(correction, "student_join_term", ""))
+        organization_join_term = _manual_term_code(getattr(correction, "organization_join_term", ""))
+        leaving_organization_term = _manual_term_code(getattr(correction, "leaving_organization_term", ""))
+        final_status_term = _manual_term_code(getattr(correction, "final_status_term", ""))
+        final_status = clean_text(getattr(correction, "final_status", ""))
 
-        chapter_override = normalize_chapter_name(getattr(correction, "chapter_override", ""))
-        if chapter_override:
-            result.loc[match_mask, "chapter"] = chapter_override
-            result.loc[match_mask, "chapter_assignment_source"] = "manual_roster_correction"
-            result.loc[match_mask, "chapter_assignment_confidence"] = "manual"
-            result.loc[match_mask, "chapter_assignment_notes"] = note_text
+        result_term_sort = result["term_code"].map(sort_term_code)
+        if student_join_term and organization_join_term and sort_term_code(student_join_term) < sort_term_code(organization_join_term):
+            gap_mask = student_mask & result_term_sort.gt(sort_term_code(student_join_term)) & result_term_sort.lt(sort_term_code(organization_join_term))
+            _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked student/org pre-entry gap as Unknown.", organization_name)
 
-        status_override = clean_text(getattr(correction, "status_override", ""))
-        if status_override:
-            status_bucket = roster_status_bucket(status_override, "")
-            result.loc[match_mask, "org_status_raw"] = status_override
-            result.loc[match_mask, "org_status_bucket"] = status_bucket
-            result.loc[match_mask, "new_member_flag"] = "Yes" if status_bucket == "New Member" else "No"
+        if leaving_organization_term and final_status_term and sort_term_code(leaving_organization_term) < sort_term_code(final_status_term):
+            gap_mask = matched_student_org & result_term_sort.gt(sort_term_code(leaving_organization_term)) & result_term_sort.lt(sort_term_code(final_status_term))
+            _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked org-exit/final-status gap as Unknown.", organization_name)
 
-        new_member_override = getattr(correction, "new_member_override", "")
-        if _manual_truthy(new_member_override):
-            result.loc[match_mask, "org_status_raw"] = "New Member"
-            result.loc[match_mask, "org_status_bucket"] = "New Member"
-            result.loc[match_mask, "new_member_flag"] = "Yes"
-        elif _manual_falsey(new_member_override):
-            result.loc[match_mask, "new_member_flag"] = "No"
+        if organization_name and matched_student_org.any():
+            result.loc[matched_student_org, "chapter"] = organization_name
+            result.loc[matched_student_org, "chapter_raw"] = organization_name
+            result.loc[matched_student_org, "chapter_assignment_source"] = "manual_roster_correction"
+            result.loc[matched_student_org, "chapter_assignment_confidence"] = "manual"
+            result.loc[matched_student_org, "chapter_assignment_notes"] = note_text
 
-    if drop_mask.any():
-        result = result.loc[~drop_mask].copy()
+        if organization_join_term:
+            org_join_mask = student_mask & _manual_term_mask(result, organization_join_term)
+            if org_join_mask.any():
+                if organization_name:
+                    result.loc[org_join_mask, "chapter"] = organization_name
+                    result.loc[org_join_mask, "chapter_raw"] = organization_name
+                result.loc[org_join_mask, "org_status_raw"] = "New Member"
+                result.loc[org_join_mask, "org_status_bucket"] = "New Member"
+                result.loc[org_join_mask, "new_member_flag"] = "Yes"
+                result.loc[org_join_mask, "chapter_assignment_source"] = "manual_roster_correction"
+                result.loc[org_join_mask, "chapter_assignment_confidence"] = "manual"
+                result.loc[org_join_mask, "chapter_assignment_notes"] = note_text
+            elif normalize_banner_id(getattr(correction, "student_id", "")):
+                synthetic_rows.append(
+                    _manual_roster_row(
+                        result.columns,
+                        correction,
+                        organization_join_term,
+                        organization_name,
+                        "New Member",
+                        note_text,
+                    )
+                )
+
+        if final_status and final_status_term:
+            final_mask = student_mask & _manual_term_mask(result, final_status_term)
+            status_bucket = roster_status_bucket(final_status, "")
+            if final_mask.any():
+                if organization_name:
+                    result.loc[final_mask, "chapter"] = organization_name
+                    result.loc[final_mask, "chapter_raw"] = organization_name
+                result.loc[final_mask, "org_status_raw"] = final_status
+                result.loc[final_mask, "org_status_bucket"] = status_bucket
+                result.loc[final_mask, "new_member_flag"] = "Yes" if status_bucket == "New Member" else "No"
+                result.loc[final_mask, "chapter_assignment_source"] = "manual_roster_correction"
+                result.loc[final_mask, "chapter_assignment_confidence"] = "manual"
+                result.loc[final_mask, "chapter_assignment_notes"] = note_text
+            elif normalize_banner_id(getattr(correction, "student_id", "")):
+                synthetic_rows.append(
+                    _manual_roster_row(
+                        result.columns,
+                        correction,
+                        final_status_term,
+                        organization_name,
+                        final_status,
+                        note_text,
+                    )
+                )
+
+    if synthetic_rows:
+        result = pd.concat([result, pd.DataFrame(synthetic_rows, columns=result.columns)], ignore_index=True)
     return result.reset_index(drop=True)
 
 

@@ -1,1 +1,1 @@
-student_id,first_name,last_name,term_code,term_label,chapter_match,chapter_override,status_override,new_member_override,remove_from_roster,notes,updated_at
+delete_row,student_id,last_name,first_name,student_join_term,organization_join_term,organization_name,leaving_organization_term,final_status_term,final_status,notes,updated_at

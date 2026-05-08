@@ -562,6 +562,109 @@ def _render_advisor_help_dashboard(bundle) -> None:
             )
 
 
+def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
+    final_status_term = row.get("graduation_term", "") or row.get("last_observed_academic_term", "") or row.get("last_observed_org_term", "")
+    final_status = row.get("latest_outcome_bucket", "") or row.get("status_group", "") or row.get("latest_roster_status_bucket", "")
+    return {
+        "delete_row": "",
+        "student_id": row.get("student_id", ""),
+        "last_name": row.get("last_name", ""),
+        "first_name": row.get("first_name", ""),
+        "student_join_term": row.get("school_entry_term", "") or row.get("school_entry_term_code", ""),
+        "organization_join_term": row.get("join_term", "") or row.get("join_term_code", ""),
+        "organization_name": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
+        "leaving_organization_term": row.get("last_observed_org_term", "") or row.get("last_observed_org_term_code", ""),
+        "final_status_term": final_status_term,
+        "final_status": final_status,
+        "notes": "Drafted from app search; review before saving.",
+        "updated_at": "",
+    }
+
+
+def _manual_correction_review_tables(bundle) -> dict[str, pd.DataFrame]:
+    summary = getattr(bundle, "summary", pd.DataFrame()).copy()
+    tables = getattr(bundle, "tables", {})
+    review: dict[str, pd.DataFrame] = {}
+
+    if not summary.empty:
+        masks = []
+        if "is_unknown_outcome" in summary.columns:
+            masks.append(_truthy_mask(summary["is_unknown_outcome"]))
+        if "chapter_assignment_source" in summary.columns:
+            masks.append(summary["chapter_assignment_source"].fillna("").astype(str).str.contains("unresolved|inferred", case=False, na=False))
+        if "data_completeness_rate" in summary.columns:
+            masks.append(pd.to_numeric(summary["data_completeness_rate"], errors="coerce").lt(0.75))
+        if "student_id" in summary.columns:
+            masks.append(summary["student_id"].fillna("").astype(str).str.strip().eq(""))
+
+        if masks:
+            combined = masks[0]
+            for mask in masks[1:]:
+                combined = combined | mask
+            columns = [
+                column
+                for column in [
+                    "student_id",
+                    "student_name",
+                    "last_name",
+                    "first_name",
+                    "chapter",
+                    "latest_chapter",
+                    "join_term",
+                    "last_observed_org_term",
+                    "latest_outcome_bucket",
+                    "outcome_resolution_group",
+                    "chapter_assignment_source",
+                    "data_completeness_rate",
+                ]
+                if column in summary.columns
+            ]
+            review["Incomplete or unresolved students"] = summary.loc[combined, columns].head(150)
+
+    roster = tables.get("roster_term", pd.DataFrame())
+    if roster is not None and not roster.empty and {"student_id", "term_code"}.issubset(roster.columns):
+        duplicate_counts = (
+            roster.groupby(["student_id", "term_code"], dropna=False)
+            .size()
+            .reset_index(name="Roster Rows")
+            .loc[lambda frame: frame["Roster Rows"].gt(1)]
+            .sort_values("Roster Rows", ascending=False)
+            .head(100)
+        )
+        if not duplicate_counts.empty:
+            review["Multiple roster rows for same student/term"] = duplicate_counts
+
+    for key, label in [
+        ("unresolved_chapter_review", "Unresolved chapter review"),
+        ("identity_exceptions", "Identity exceptions"),
+        ("term_exceptions", "Term exceptions"),
+        ("status_exceptions", "Status exceptions"),
+        ("chapter_conflicts", "Chapter conflicts"),
+        ("outcome_exceptions", "Outcome exceptions"),
+        ("missing_evidence_cases", "Missing evidence cases"),
+    ]:
+        frame = tables.get(key)
+        if frame is not None and not frame.empty:
+            review[label] = frame.head(150)
+    return review
+
+
+def _render_manual_review_panel(bundle) -> None:
+    st.subheader("Weird / incomplete records")
+    st.caption("Use these as cleanup targets. They are pulled from the current canonical QA and student summary tables.")
+    review_tables = _manual_correction_review_tables(bundle)
+    if not review_tables:
+        st.success("No weird or incomplete record tables were found in the current bundle.")
+    for label, frame in review_tables.items():
+        with st.expander(f"{label} ({len(frame):,})", expanded=label == "Incomplete or unresolved students"):
+            st.dataframe(frame, use_container_width=True, hide_index=True)
+
+    with st.expander("Graduation-rate display options to decide", expanded=False):
+        st.write("- **Resolved-only ranking:** rank chapters only on students with confirmed final outcomes. Cleanest for comparing chapters, but hides unresolved burden unless shown beside it.")
+        st.write("- **Conservative full-cohort rate:** keep unknowns in the denominator. Most cautious and honest, but can punish chapters/years with bad historical records.")
+        st.write("- **Two-column default:** show resolved-only graduation rate as the main ranking and full-cohort conservative rate plus unknown share beside it. This is my recommendation for showing Greek Life fairly without hiding data quality.")
+
+
 def _render_manual_corrections_editor(bundle) -> None:
     st.title("Manual Roster Corrections")
     st.caption(
@@ -582,38 +685,9 @@ def _render_manual_corrections_editor(bundle) -> None:
         st.metric("Applies on", "Next canonical run")
 
     st.info(
-        "Match by Banner ID when possible. If Banner ID is blank, the pipeline falls back to exact first/last name. "
-        "Term and chapter match fields are optional filters; leaving them blank applies the correction to every matching roster row for that student."
+        "Search for a student first. The top edit row will auto-fill from the current canonical data so you can adjust it instead of starting from a blank row. "
+        "Check the `x` box on a saved correction row before saving if you want to remove that correction."
     )
-
-    search = st.text_input("Find a student to copy values from", placeholder="Type Banner ID, first name, last name, or chapter")
-    if search and not summary.empty:
-        haystack_columns = [
-            column
-            for column in ["student_id", "student_name", "first_name", "last_name", "chapter", "join_term"]
-            if column in summary.columns
-        ]
-        if haystack_columns:
-            haystack = summary[haystack_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
-            matches = summary.loc[haystack.str.contains(search.lower(), regex=False, na=False)].copy()
-            display_columns = [
-                column
-                for column in [
-                    "student_id",
-                    "student_name",
-                    "first_name",
-                    "last_name",
-                    "chapter",
-                    "current_active_chapter",
-                    "join_term",
-                    "status_group",
-                    "outcome_resolution_group",
-                ]
-                if column in matches.columns
-            ]
-            st.dataframe(matches[display_columns].head(25), use_container_width=True, hide_index=True)
-
-    status_options = ["", "Active", "New Member", "Inactive", "Graduated", "Resigned", "Revoked", "Suspended", "Transfer", "Unknown"]
 
     editor_frame = corrections.copy()
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
@@ -621,46 +695,90 @@ def _render_manual_corrections_editor(bundle) -> None:
             editor_frame[column] = ""
     editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
 
-    with st.form("manual_roster_corrections_form"):
-        edited = st.data_editor(
-            editor_frame,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "term_code": st.column_config.TextColumn("term_code", help="Optional canonical term code, such as 2026SP."),
-                "term_label": st.column_config.TextColumn("term_label", help="Optional term label, such as Spring 2026."),
-                "chapter_match": st.column_config.TextColumn("chapter_match", help="Optional existing chapter filter for the row to correct."),
-                "chapter_override": st.column_config.TextColumn("chapter_override", help="Optional corrected chapter/organization name."),
-                "status_override": st.column_config.SelectboxColumn("status_override", options=status_options),
-                "new_member_override": st.column_config.SelectboxColumn("new_member_override", options=["", "Yes", "No"]),
-                "remove_from_roster": st.column_config.SelectboxColumn("remove_from_roster", options=["", "Yes", "No"]),
-                "notes": st.column_config.TextColumn("notes", width="large"),
-            },
-        )
-        saved = st.form_submit_button("Save manual corrections", use_container_width=True)
+    editor_col, review_col = st.columns([2, 1], gap="large")
+    with editor_col:
+        search = st.text_input("Find a student to edit", placeholder="Type Banner ID, first name, last name, or chapter")
+        if search and not summary.empty:
+            haystack_columns = [
+                column
+                for column in ["student_id", "student_name", "first_name", "last_name", "chapter", "latest_chapter", "join_term"]
+                if column in summary.columns
+            ]
+            if haystack_columns:
+                haystack = summary[haystack_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+                matches = summary.loc[haystack.str.contains(search.lower(), regex=False, na=False)].copy()
+                if not matches.empty:
+                    draft_row = pd.DataFrame([_manual_correction_row_from_summary(matches.iloc[0])])
+                    editor_frame = pd.concat([draft_row, editor_frame], ignore_index=True)
+                    display_columns = [
+                        column
+                        for column in [
+                            "student_id",
+                            "student_name",
+                            "first_name",
+                            "last_name",
+                            "chapter",
+                            "current_active_chapter",
+                            "join_term",
+                            "last_observed_org_term",
+                            "latest_outcome_bucket",
+                            "outcome_resolution_group",
+                        ]
+                        if column in matches.columns
+                    ]
+                    st.caption("Best matches. The first row below was copied into the top correction row.")
+                    st.dataframe(matches[display_columns].head(10), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No matching student was found in the current canonical summary.")
 
-    if saved:
-        edited = edited.copy()
-        if "updated_at" in edited.columns:
-            blank_timestamp = edited["updated_at"].fillna("").astype(str).str.strip().eq("")
-            has_action = (
-                edited.get("chapter_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                | edited.get("status_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                | edited.get("new_member_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
-                | edited.get("remove_from_roster", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+        with st.form("manual_roster_corrections_form"):
+            edited = st.data_editor(
+                editor_frame,
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "delete_row": st.column_config.CheckboxColumn("x", help="Check this and save to remove this correction row."),
+                    "student_id": st.column_config.TextColumn("Student ID"),
+                    "last_name": st.column_config.TextColumn("Last Name"),
+                    "first_name": st.column_config.TextColumn("First Name"),
+                    "student_join_term": st.column_config.TextColumn("Student Join Term"),
+                    "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
+                    "organization_name": st.column_config.TextColumn("Organization Name"),
+                    "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
+                    "final_status_term": st.column_config.TextColumn("Final Status Term"),
+                    "final_status": st.column_config.TextColumn("Final Status"),
+                    "notes": st.column_config.TextColumn("Notes", width="large"),
+                    "updated_at": st.column_config.TextColumn("Updated At"),
+                },
             )
-            edited.loc[blank_timestamp & has_action, "updated_at"] = datetime.now().isoformat(timespec="seconds")
-        saved_path = save_manual_roster_corrections(edited)
-        st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")
+            saved = st.form_submit_button("Save manual corrections", use_container_width=True)
 
-    if not corrections.empty:
-        st.download_button(
-            "Download saved corrections CSV",
-            data=dataframe_to_csv_bytes(corrections),
-            file_name="manual_roster_corrections.csv",
-            mime="text/csv",
-        )
+        if saved:
+            edited = edited.copy()
+            if "updated_at" in edited.columns:
+                blank_timestamp = edited["updated_at"].fillna("").astype(str).str.strip().eq("")
+                has_action = (
+                    edited.get("organization_join_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                    | edited.get("organization_name", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                    | edited.get("leaving_organization_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                    | edited.get("final_status_term", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                    | edited.get("final_status", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                )
+                edited.loc[blank_timestamp & has_action, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+            saved_path = save_manual_roster_corrections(edited)
+            st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")
+
+        if not corrections.empty:
+            st.download_button(
+                "Download saved corrections CSV",
+                data=dataframe_to_csv_bytes(corrections),
+                file_name="manual_roster_corrections.csv",
+                mime="text/csv",
+            )
+
+    with review_col:
+        _render_manual_review_panel(bundle)
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:

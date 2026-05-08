@@ -222,16 +222,16 @@ def load_manual_chapter_assignments(path: Optional[Path] = None) -> pd.DataFrame
 
 
 MANUAL_ROSTER_CORRECTION_COLUMNS = [
+    "delete_row",
     "student_id",
-    "first_name",
     "last_name",
-    "term_code",
-    "term_label",
-    "chapter_match",
-    "chapter_override",
-    "status_override",
-    "new_member_override",
-    "remove_from_roster",
+    "first_name",
+    "student_join_term",
+    "organization_join_term",
+    "organization_name",
+    "leaving_organization_term",
+    "final_status_term",
+    "final_status",
     "notes",
     "updated_at",
 ]
@@ -253,16 +253,16 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     header_map = dict(zip(frame.columns, canonical_headers(frame.columns)))
     renamed = frame.rename(columns=header_map).copy()
     alias_map = {
+        "delete_row": ["delete_row", "delete row", "x", "delete"],
         "student_id": ["student_id", "student id", "banner id", "banner"],
-        "first_name": ["first_name", "first name"],
         "last_name": ["last_name", "last name"],
-        "term_code": ["term_code", "term code"],
-        "term_label": ["term_label", "term label", "term"],
-        "chapter_match": ["chapter_match", "chapter match", "matching chapter", "old chapter"],
-        "chapter_override": ["chapter_override", "chapter override", "chapter", "new chapter", "organization"],
-        "status_override": ["status_override", "status override", "status", "member status", "membership status"],
-        "new_member_override": ["new_member_override", "new member override", "new member"],
-        "remove_from_roster": ["remove_from_roster", "remove from roster", "remove", "delete row", "exclude"],
+        "first_name": ["first_name", "first name"],
+        "student_join_term": ["student_join_term", "student join term", "school_entry_term", "school entry term"],
+        "organization_join_term": ["organization_join_term", "organization join term", "org join term", "join_term", "term_code", "term code", "term_label", "term label", "term"],
+        "organization_name": ["organization_name", "organization name", "chapter_override", "chapter override", "chapter", "new chapter", "organization"],
+        "leaving_organization_term": ["leaving_organization_term", "leaving organization term", "last_org_term", "last observed org term"],
+        "final_status_term": ["final_status_term", "final status term", "graduation_term", "status term"],
+        "final_status": ["final_status", "final status", "status_override", "status override", "status", "member status", "membership status"],
         "notes": ["notes", "note", "comment", "comments"],
         "updated_at": ["updated_at", "updated at", "updated", "timestamp"],
     }
@@ -288,12 +288,14 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         | standardized["last_name"].ne("")
     )
     has_action = (
-        standardized["chapter_override"].ne("")
-        | standardized["status_override"].ne("")
-        | standardized["new_member_override"].ne("")
-        | standardized["remove_from_roster"].ne("")
+        standardized["organization_join_term"].ne("")
+        | standardized["organization_name"].ne("")
+        | standardized["leaving_organization_term"].ne("")
+        | standardized["final_status_term"].ne("")
+        | standardized["final_status"].ne("")
     )
-    return standardized.loc[has_identity & has_action].reset_index(drop=True)
+    delete_mask = standardized["delete_row"].str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
+    return standardized.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
 
 def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
@@ -311,12 +313,14 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
             cleaned[column] = cleaned[column].str.strip()
         has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
         has_action = (
-            cleaned["chapter_override"].ne("")
-            | cleaned["status_override"].ne("")
-            | cleaned["new_member_override"].ne("")
-            | cleaned["remove_from_roster"].ne("")
+            cleaned["organization_join_term"].ne("")
+            | cleaned["organization_name"].ne("")
+            | cleaned["leaving_organization_term"].ne("")
+            | cleaned["final_status_term"].ne("")
+            | cleaned["final_status"].ne("")
         )
-        cleaned = cleaned.loc[has_identity & has_action].reset_index(drop=True)
+        delete_mask = cleaned["delete_row"].str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
+        cleaned = cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
     cleaned.to_csv(candidate, index=False)
     return candidate
 

@@ -274,16 +274,16 @@ Persistent manual roster corrections:
 - the canonical pipeline reapplies those corrections on future runs, including runs with `--refresh-source-cache`
 - raw roster Excel/PDF files are never modified
 - supported correction columns:
+  - `delete_row`
   - `student_id`
-  - `first_name`
   - `last_name`
-  - `term_code`
-  - `term_label`
-  - `chapter_match`
-  - `chapter_override`
-  - `status_override`
-  - `new_member_override`
-  - `remove_from_roster`
+  - `first_name`
+  - `student_join_term`
+  - `organization_join_term`
+  - `organization_name`
+  - `leaving_organization_term`
+  - `final_status_term`
+  - `final_status`
   - `notes`
   - `updated_at`
 
@@ -291,12 +291,12 @@ Manual roster correction behavior:
 
 1. exact `student_id` match is preferred
 2. exact `first_name` + `last_name` is used when no ID is supplied
-3. optional `term_code` / `term_label` narrows the correction to one term
-4. optional `chapter_match` narrows the correction to a specific existing chapter
-5. `chapter_override` changes the chapter assignment
-6. `status_override` changes the roster status used by graduation/current-active/new-member logic
-7. `new_member_override` can force the new-member flag to `Yes` or `No`
-8. `remove_from_roster=Yes` removes matching roster rows before dedupe, conflict resolution, current-active counts, and outcome calculations
+3. `organization_join_term` anchors the corrected organization-entry term and can create a manual New Member row
+4. `organization_name` changes the chapter assignment for matched roster rows
+5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
+6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`
+7. `final_status_term` and `final_status` can create or update the final manual status row
+8. `delete_row` removes a saved correction row from the correction ledger; it does not delete raw roster rows
 
 ## Exception outputs
 
