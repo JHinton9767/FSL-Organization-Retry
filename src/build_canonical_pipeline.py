@@ -23,8 +23,10 @@ from app.config_loader import (
     DEFAULT_CHAPTER_GROUPS_PATH,
     EXAMPLE_CHAPTER_GROUPS_PATH,
     MANUAL_CHAPTER_ASSIGNMENTS_PATH,
+    MANUAL_ROSTER_CORRECTIONS_PATH,
     load_chapter_mapping,
     load_manual_chapter_assignments,
+    load_manual_roster_corrections,
     load_settings,
 )
 from app.status_framework import build_outcome_resolution_fields
@@ -3040,6 +3042,124 @@ def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFra
     return result.drop(columns=["_manual_id_key", "_manual_name_key", "_manual_override"], errors="ignore")
 
 
+def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECTIONS_PATH) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        columns=[
+            "student_id",
+            "first_name",
+            "last_name",
+            "term_code",
+            "term_label",
+            "chapter_match",
+            "chapter_override",
+            "status_override",
+            "new_member_override",
+            "remove_from_roster",
+            "notes",
+            "updated_at",
+        ]
+    ).to_csv(path, index=False)
+
+
+def _manual_truthy(value: object) -> bool:
+    return clean_text(value).lower() in {"yes", "y", "true", "1", "remove", "delete", "exclude"}
+
+
+def _manual_falsey(value: object) -> bool:
+    return clean_text(value).lower() in {"no", "n", "false", "0"}
+
+
+def _manual_correction_mask(roster: pd.DataFrame, correction: object) -> pd.Series:
+    mask = pd.Series(False, index=roster.index, dtype="bool")
+    student_id = normalize_banner_id(getattr(correction, "student_id", ""))
+    first_name = clean_text(getattr(correction, "first_name", "")).lower()
+    last_name = clean_text(getattr(correction, "last_name", "")).lower()
+
+    if student_id:
+        mask = roster["student_id"].map(normalize_banner_id).eq(student_id)
+    elif first_name or last_name:
+        mask = pd.Series(True, index=roster.index, dtype="bool")
+        if first_name:
+            mask = mask & roster["first_name"].fillna("").astype(str).str.strip().str.lower().eq(first_name)
+        if last_name:
+            mask = mask & roster["last_name"].fillna("").astype(str).str.strip().str.lower().eq(last_name)
+
+    term_code = parse_term_code(getattr(correction, "term_code", ""))[0]
+    if not term_code:
+        term_code = parse_term_code(getattr(correction, "term_label", ""))[0]
+    if term_code:
+        mask = mask & roster["term_code"].fillna("").astype(str).str.strip().eq(term_code)
+    else:
+        term_label = clean_text(getattr(correction, "term_label", "")).lower()
+        if term_label:
+            mask = mask & roster["term_label"].fillna("").astype(str).str.strip().str.lower().eq(term_label)
+
+    chapter_match = normalize_chapter_name(getattr(correction, "chapter_match", ""))
+    if chapter_match:
+        mask = mask & roster["chapter"].fillna("").astype(str).map(normalize_chapter_name).eq(chapter_match)
+    return mask.fillna(False)
+
+
+def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFrame) -> pd.DataFrame:
+    if roster.empty or corrections.empty:
+        return roster
+
+    result = ensure_text_columns(
+        roster,
+        [
+            "chapter",
+            "chapter_assignment_source",
+            "chapter_assignment_confidence",
+            "chapter_assignment_notes",
+            "org_status_raw",
+            "org_status_bucket",
+            "new_member_flag",
+        ],
+    )
+    drop_mask = pd.Series(False, index=result.index, dtype="bool")
+
+    for correction in corrections.itertuples(index=False):
+        match_mask = _manual_correction_mask(result, correction)
+        if not match_mask.any():
+            continue
+
+        notes = clean_text(getattr(correction, "notes", ""))
+        note_text = notes or "Applied from config/manual_roster_corrections.csv."
+
+        if _manual_truthy(getattr(correction, "remove_from_roster", "")):
+            drop_mask = drop_mask | match_mask
+            continue
+
+        chapter_override = normalize_chapter_name(getattr(correction, "chapter_override", ""))
+        if chapter_override:
+            result.loc[match_mask, "chapter"] = chapter_override
+            result.loc[match_mask, "chapter_assignment_source"] = "manual_roster_correction"
+            result.loc[match_mask, "chapter_assignment_confidence"] = "manual"
+            result.loc[match_mask, "chapter_assignment_notes"] = note_text
+
+        status_override = clean_text(getattr(correction, "status_override", ""))
+        if status_override:
+            status_bucket = roster_status_bucket(status_override, "")
+            result.loc[match_mask, "org_status_raw"] = status_override
+            result.loc[match_mask, "org_status_bucket"] = status_bucket
+            result.loc[match_mask, "new_member_flag"] = "Yes" if status_bucket == "New Member" else "No"
+
+        new_member_override = getattr(correction, "new_member_override", "")
+        if _manual_truthy(new_member_override):
+            result.loc[match_mask, "org_status_raw"] = "New Member"
+            result.loc[match_mask, "org_status_bucket"] = "New Member"
+            result.loc[match_mask, "new_member_flag"] = "Yes"
+        elif _manual_falsey(new_member_override):
+            result.loc[match_mask, "new_member_flag"] = "No"
+
+    if drop_mask.any():
+        result = result.loc[~drop_mask].copy()
+    return result.reset_index(drop=True)
+
+
 def build_unresolved_chapter_review(
     roster: pd.DataFrame,
     academic: pd.DataFrame,
@@ -3255,6 +3375,7 @@ def prepare_canonical_sources(
     graduation: pd.DataFrame,
     settings: Dict[str, object],
     manual_chapter_assignments: pd.DataFrame,
+    manual_roster_corrections: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
 
@@ -3263,6 +3384,7 @@ def prepare_canonical_sources(
     academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
     roster_term = resolve_missing_roster_chapters(roster_term, settings)
     roster_term = apply_manual_chapter_assignments(roster_term, manual_chapter_assignments)
+    roster_term = apply_manual_roster_corrections(roster_term, manual_roster_corrections)
 
     roster_term, roster_dup_issues = dedupe_table(roster_term, ["student_id", "term_code", "chapter"], "roster")
     academic_term, academic_dup_issues = dedupe_table(academic_term, ["student_id", "term_code"], "academic")
@@ -4908,9 +5030,11 @@ def build_canonical_pipeline(
     settings = load_settings()
     chapter_mapping = load_chapter_mapping()
     ensure_manual_chapter_assignment_template()
+    ensure_manual_roster_corrections_template()
     transcript_text_root.mkdir(parents=True, exist_ok=True)
     ensure_transcript_text_manifest_template()
     manual_chapter_assignments = load_manual_chapter_assignments()
+    manual_roster_corrections = load_manual_roster_corrections()
     transcript_text_manifest = load_transcript_text_manifest()
     config_manifest = optional_files_manifest(
         [
@@ -4918,6 +5042,7 @@ def build_canonical_pipeline(
             DEFAULT_CHAPTER_GROUPS_PATH,
             EXAMPLE_CHAPTER_GROUPS_PATH,
             MANUAL_CHAPTER_ASSIGNMENTS_PATH,
+            MANUAL_ROSTER_CORRECTIONS_PATH,
             TRANSCRIPT_TEXT_MANIFEST_PATH,
             SCHEMA_PATH,
         ]
@@ -5172,6 +5297,7 @@ def build_canonical_pipeline(
                     resolve_missing_ids,
                     resolve_missing_roster_chapters,
                     apply_manual_chapter_assignments,
+                    apply_manual_roster_corrections,
                     dedupe_table,
                     resolve_roster_conflicts,
                     attach_org_entry_terms,
@@ -5186,6 +5312,7 @@ def build_canonical_pipeline(
             graduation,
             settings,
             manual_chapter_assignments,
+            manual_roster_corrections,
         ),
         file_names=[
             "roster_term_prepared.csv",

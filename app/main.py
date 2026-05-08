@@ -29,7 +29,15 @@ from app.analysis import (
     PERSISTENCE_COUNCIL_OPTIONS,
 )
 from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_milestone_chart, scatter_chart, stacked_bar_chart
-from app.config_loader import load_metric_catalog, load_settings, load_status_code_map
+from app.config_loader import (
+    MANUAL_ROSTER_CORRECTION_COLUMNS,
+    MANUAL_ROSTER_CORRECTIONS_PATH,
+    load_manual_roster_corrections,
+    load_metric_catalog,
+    load_settings,
+    load_status_code_map,
+    save_manual_roster_corrections,
+)
 from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
 from app.data_loader import discover_dataset_versions, load_analysis_bundle, scan_preloaded_sources, select_default_dataset
@@ -552,6 +560,107 @@ def _render_advisor_help_dashboard(bundle) -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+
+
+def _render_manual_corrections_editor(bundle) -> None:
+    st.title("Manual Roster Corrections")
+    st.caption(
+        "Store roster fixes without touching raw Excel or PDF files. Corrections are saved to "
+        "`config/manual_roster_corrections.csv` and reapplied whenever the canonical pipeline is rebuilt, "
+        "even after refreshing source caches."
+    )
+
+    corrections = load_manual_roster_corrections()
+    summary = getattr(bundle, "summary", pd.DataFrame()).copy()
+
+    info_cols = st.columns(3)
+    with info_cols[0]:
+        st.metric("Saved corrections", f"{len(corrections):,}")
+    with info_cols[1]:
+        st.metric("Correction file", MANUAL_ROSTER_CORRECTIONS_PATH.name)
+    with info_cols[2]:
+        st.metric("Applies on", "Next canonical run")
+
+    st.info(
+        "Match by Banner ID when possible. If Banner ID is blank, the pipeline falls back to exact first/last name. "
+        "Term and chapter match fields are optional filters; leaving them blank applies the correction to every matching roster row for that student."
+    )
+
+    search = st.text_input("Find a student to copy values from", placeholder="Type Banner ID, first name, last name, or chapter")
+    if search and not summary.empty:
+        haystack_columns = [
+            column
+            for column in ["student_id", "student_name", "first_name", "last_name", "chapter", "join_term"]
+            if column in summary.columns
+        ]
+        if haystack_columns:
+            haystack = summary[haystack_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+            matches = summary.loc[haystack.str.contains(search.lower(), regex=False, na=False)].copy()
+            display_columns = [
+                column
+                for column in [
+                    "student_id",
+                    "student_name",
+                    "first_name",
+                    "last_name",
+                    "chapter",
+                    "current_active_chapter",
+                    "join_term",
+                    "status_group",
+                    "outcome_resolution_group",
+                ]
+                if column in matches.columns
+            ]
+            st.dataframe(matches[display_columns].head(25), use_container_width=True, hide_index=True)
+
+    status_options = ["", "Active", "New Member", "Inactive", "Graduated", "Resigned", "Revoked", "Suspended", "Transfer", "Unknown"]
+
+    editor_frame = corrections.copy()
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        if column not in editor_frame.columns:
+            editor_frame[column] = ""
+    editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
+
+    with st.form("manual_roster_corrections_form"):
+        edited = st.data_editor(
+            editor_frame,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "term_code": st.column_config.TextColumn("term_code", help="Optional canonical term code, such as 2026SP."),
+                "term_label": st.column_config.TextColumn("term_label", help="Optional term label, such as Spring 2026."),
+                "chapter_match": st.column_config.TextColumn("chapter_match", help="Optional existing chapter filter for the row to correct."),
+                "chapter_override": st.column_config.TextColumn("chapter_override", help="Optional corrected chapter/organization name."),
+                "status_override": st.column_config.SelectboxColumn("status_override", options=status_options),
+                "new_member_override": st.column_config.SelectboxColumn("new_member_override", options=["", "Yes", "No"]),
+                "remove_from_roster": st.column_config.SelectboxColumn("remove_from_roster", options=["", "Yes", "No"]),
+                "notes": st.column_config.TextColumn("notes", width="large"),
+            },
+        )
+        saved = st.form_submit_button("Save manual corrections", use_container_width=True)
+
+    if saved:
+        edited = edited.copy()
+        if "updated_at" in edited.columns:
+            blank_timestamp = edited["updated_at"].fillna("").astype(str).str.strip().eq("")
+            has_action = (
+                edited.get("chapter_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                | edited.get("status_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                | edited.get("new_member_override", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+                | edited.get("remove_from_roster", pd.Series("", index=edited.index)).fillna("").astype(str).str.strip().ne("")
+            )
+            edited.loc[blank_timestamp & has_action, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+        saved_path = save_manual_roster_corrections(edited)
+        st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")
+
+    if not corrections.empty:
+        st.download_button(
+            "Download saved corrections CSV",
+            data=dataframe_to_csv_bytes(corrections),
+            file_name="manual_roster_corrections.csv",
+            mime="text/csv",
+        )
 
 
 def _analysis_summary_for_metric(summary: pd.DataFrame, metric: MetricDefinition) -> pd.DataFrame:
@@ -1656,8 +1765,8 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, chapter_health_tab, advisor_help_tab, advanced_tab = st.tabs(
-        ["Persistence & Graduation", "Chapter Health", "Advisor Help", "Advanced Analytics"]
+    landing_tab, chapter_health_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
+        ["Persistence & Graduation", "Chapter Health", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
     )
 
     with landing_tab:
@@ -1668,6 +1777,9 @@ def main() -> None:
 
     with advisor_help_tab:
         _render_advisor_help_dashboard(bundle)
+
+    with corrections_tab:
+        _render_manual_corrections_editor(bundle)
 
     with advanced_tab:
         _render_advanced_analytics(

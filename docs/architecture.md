@@ -6,6 +6,7 @@
 - Keep preprocessing outside the app and analysis inside the app
 - Remove fallback app-loading branches so the dashboard only reads canonical runs
 - Avoid app-side recalculation of already standardized canonical tables
+- Allow persistent manual roster corrections without editing raw source files
 
 ## Active architecture
 
@@ -87,6 +88,14 @@ The UI exposes dataset status, file presence, timestamps, row counts, QA warning
 
 The app no longer loads enhanced, snapshot-augmented, or processed bundles directly. This keeps the denominator, graduation, and current-active rules in one canonical source of truth.
 
+### 7. Manual correction ledger
+
+The app can write roster corrections to:
+
+- `config/manual_roster_corrections.csv`
+
+Those corrections are not applied by editing raw Excel/PDF files. The canonical pipeline reads the ledger during source preparation, applies matching chapter/status/new-member/removal corrections before dedupe and conflict resolution, and includes the correction file in cache invalidation. Refreshing source caches does not erase the ledger.
+
 ## Main modules
 
 - `app/data_loader.py`: dataset discovery, manifest validation, and canonical bundle loading
@@ -102,3 +111,4 @@ The app no longer loads enhanced, snapshot-augmented, or processed bundles direc
 - Runtime validation still depends on the presence of a built canonical run
 - Older non-canonical outputs must be regenerated through `run_canonical_pipeline.py` before use in the app
 - Any metric quality issues inherited from source data still need to be handled through canonical QA and exception tables
+- Manual corrections saved in the app require a canonical pipeline rerun before all metrics/charts reflect them

@@ -154,7 +154,7 @@ def select_default_dataset(versions: List[DatasetVersion]) -> Optional[DatasetVe
 
 def _validate_loaded_tables(bundle_kind: str, tables: Dict[str, pd.DataFrame]) -> List[str]:
     if bundle_kind != "canonical":
-        raise ValueError(f"Unsupported dataset type after canonical-only cleanup: {bundle_kind}")
+        raise ValueError(f"Unsupported dataset type: {bundle_kind}. The app only loads canonical analytics runs.")
 
     requirements = {
         "student_summary": ["student_id"],
@@ -220,7 +220,7 @@ def load_analysis_bundle(
     chapter_mapping_path: Optional[Path] = None,
 ) -> AnalysisBundle:
     if version.dataset_type != "canonical":
-        raise ValueError(f"Unsupported dataset type after canonical-only cleanup: {version.dataset_type}")
+        raise ValueError(f"Unsupported dataset type: {version.dataset_type}. The app only loads canonical analytics runs.")
 
     chapter_mapping = load_chapter_mapping(chapter_mapping_path)
     tables = _read_canonical_tables(version.root_path)
@@ -228,7 +228,7 @@ def load_analysis_bundle(
 
     summary = tables["student_summary"].copy()
     longitudinal = tables.get("master_longitudinal", pd.DataFrame()).copy()
-    notes = ["Loaded canonical analytics bundle directly. App-side fallback standardization is disabled."]
+    notes = ["Loaded canonical analytics bundle directly."]
     if not chapter_mapping.empty:
         summary = apply_chapter_mapping_overrides(summary, chapter_mapping, chapter_column="chapter")
         summary = apply_chapter_mapping_overrides(

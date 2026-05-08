@@ -3,6 +3,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.build_canonical_pipeline import (
+    apply_manual_roster_corrections,
     build_current_active_fields,
     roster_file_version_details,
     roster_status_bucket,
@@ -106,6 +107,88 @@ def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> N
     assert roster_status_bucket("G", "Member") == "Graduated"
     assert roster_status_bucket("Graduated", "Member") == "Graduated"
     assert roster_status_bucket("Good Standing", "Member") != "Graduated"
+
+
+def test_manual_roster_corrections_override_status_and_chapter() -> None:
+    roster = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "first_name": ["Jane", "Alex"],
+            "last_name": ["Doe", "Smith"],
+            "term_code": ["2026SP", "2026SP"],
+            "term_label": ["Spring 2026", "Spring 2026"],
+            "chapter": ["Wrong Chapter", "Beta"],
+            "chapter_assignment_source": ["original", "original"],
+            "chapter_assignment_confidence": ["high", "high"],
+            "chapter_assignment_notes": ["", ""],
+            "org_status_raw": ["Active", "Active"],
+            "org_status_bucket": ["Active", "Active"],
+            "new_member_flag": ["No", "No"],
+        }
+    )
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "first_name": [""],
+            "last_name": [""],
+            "term_code": ["2026SP"],
+            "term_label": [""],
+            "chapter_match": ["Wrong Chapter"],
+            "chapter_override": ["Alpha Sigma Phi"],
+            "status_override": ["New Member"],
+            "new_member_override": [""],
+            "remove_from_roster": [""],
+            "notes": ["Corrected from advisor review"],
+            "updated_at": [""],
+        }
+    )
+
+    result = apply_manual_roster_corrections(roster, corrections)
+
+    jane = result.loc[result["student_id"].eq("A00000001")].iloc[0]
+    assert jane["chapter"] == "Alpha Sigma Phi"
+    assert jane["chapter_assignment_source"] == "manual_roster_correction"
+    assert jane["org_status_bucket"] == "New Member"
+    assert jane["new_member_flag"] == "Yes"
+
+
+def test_manual_roster_corrections_can_remove_bad_roster_rows() -> None:
+    roster = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "first_name": ["Jane", "Alex"],
+            "last_name": ["Doe", "Smith"],
+            "term_code": ["2026SP", "2026SP"],
+            "term_label": ["Spring 2026", "Spring 2026"],
+            "chapter": ["Alpha", "Beta"],
+            "chapter_assignment_source": ["original", "original"],
+            "chapter_assignment_confidence": ["high", "high"],
+            "chapter_assignment_notes": ["", ""],
+            "org_status_raw": ["Active", "Active"],
+            "org_status_bucket": ["Active", "Active"],
+            "new_member_flag": ["No", "No"],
+        }
+    )
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "first_name": [""],
+            "last_name": [""],
+            "term_code": ["2026SP"],
+            "term_label": [""],
+            "chapter_match": [""],
+            "chapter_override": [""],
+            "status_override": [""],
+            "new_member_override": [""],
+            "remove_from_roster": ["Yes"],
+            "notes": ["Bad roster row"],
+            "updated_at": [""],
+        }
+    )
+
+    result = apply_manual_roster_corrections(roster, corrections)
+
+    assert result["student_id"].tolist() == ["A00000002"]
 
 
 def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:

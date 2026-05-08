@@ -250,7 +250,7 @@ Folder names are included in this same ranking logic. For example, a regular fil
 
 Roster PDFs are now supported on a best-effort basis when they contain extractable tables that look like the Excel roster files. PDF ingestion uses `pdfplumber`; if a PDF cannot be read as a table, the canonical run records a `roster_pdf_issue` in the exception outputs instead of silently skipping it.
 
-Persistent manual overrides:
+Persistent manual chapter overrides:
 
 - add or edit rows in `config/manual_chapter_assignments.csv`
 - the canonical pipeline will reuse those overrides on future runs
@@ -267,6 +267,36 @@ Matching priority for manual overrides:
 2. exact `first_name` + `last_name` when no override ID is supplied
 
 The canonical pipeline also writes `unresolved_chapter_review.csv`, which lists uncertain chapter assignments along with the roster files, academic files, and sheets where each student appears so you can review and add a one-time manual override.
+
+Persistent manual roster corrections:
+
+- use the app's `Manual Corrections` tab, or edit `config/manual_roster_corrections.csv`
+- the canonical pipeline reapplies those corrections on future runs, including runs with `--refresh-source-cache`
+- raw roster Excel/PDF files are never modified
+- supported correction columns:
+  - `student_id`
+  - `first_name`
+  - `last_name`
+  - `term_code`
+  - `term_label`
+  - `chapter_match`
+  - `chapter_override`
+  - `status_override`
+  - `new_member_override`
+  - `remove_from_roster`
+  - `notes`
+  - `updated_at`
+
+Manual roster correction behavior:
+
+1. exact `student_id` match is preferred
+2. exact `first_name` + `last_name` is used when no ID is supplied
+3. optional `term_code` / `term_label` narrows the correction to one term
+4. optional `chapter_match` narrows the correction to a specific existing chapter
+5. `chapter_override` changes the chapter assignment
+6. `status_override` changes the roster status used by graduation/current-active/new-member logic
+7. `new_member_override` can force the new-member flag to `Yes` or `No`
+8. `remove_from_roster=Yes` removes matching roster rows before dedupe, conflict resolution, current-active counts, and outcome calculations
 
 ## Exception outputs
 

@@ -255,6 +255,7 @@ def test_prepare_canonical_sources_keeps_roster_membership_authoritative() -> No
         pd.DataFrame(),
         settings={"secondary_organizations": []},
         manual_chapter_assignments=pd.DataFrame(),
+        manual_roster_corrections=pd.DataFrame(),
     )
 
     assert len(prepared_academic.index) == 1

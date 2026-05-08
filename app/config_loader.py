@@ -20,6 +20,7 @@ DATASET_MANIFEST_PATH = CONFIG_DIR / "dataset_manifest.json"
 DEFAULT_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.csv"
 EXAMPLE_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.example.csv"
 MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
+MANUAL_ROSTER_CORRECTIONS_PATH = CONFIG_DIR / "manual_roster_corrections.csv"
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -218,6 +219,106 @@ def load_manual_chapter_assignments(path: Optional[Path] = None) -> pd.DataFrame
         )
     ].copy()
     return standardized.reset_index(drop=True)
+
+
+MANUAL_ROSTER_CORRECTION_COLUMNS = [
+    "student_id",
+    "first_name",
+    "last_name",
+    "term_code",
+    "term_label",
+    "chapter_match",
+    "chapter_override",
+    "status_override",
+    "new_member_override",
+    "remove_from_roster",
+    "notes",
+    "updated_at",
+]
+
+
+def empty_manual_roster_corrections() -> pd.DataFrame:
+    return pd.DataFrame(columns=MANUAL_ROSTER_CORRECTION_COLUMNS)
+
+
+def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
+    candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
+    if not candidate.exists():
+        return empty_manual_roster_corrections()
+
+    frame = read_tabular_file(candidate)
+    if frame.empty:
+        return empty_manual_roster_corrections()
+
+    header_map = dict(zip(frame.columns, canonical_headers(frame.columns)))
+    renamed = frame.rename(columns=header_map).copy()
+    alias_map = {
+        "student_id": ["student_id", "student id", "banner id", "banner"],
+        "first_name": ["first_name", "first name"],
+        "last_name": ["last_name", "last name"],
+        "term_code": ["term_code", "term code"],
+        "term_label": ["term_label", "term label", "term"],
+        "chapter_match": ["chapter_match", "chapter match", "matching chapter", "old chapter"],
+        "chapter_override": ["chapter_override", "chapter override", "chapter", "new chapter", "organization"],
+        "status_override": ["status_override", "status override", "status", "member status", "membership status"],
+        "new_member_override": ["new_member_override", "new member override", "new member"],
+        "remove_from_roster": ["remove_from_roster", "remove from roster", "remove", "delete row", "exclude"],
+        "notes": ["notes", "note", "comment", "comments"],
+        "updated_at": ["updated_at", "updated at", "updated", "timestamp"],
+    }
+
+    resolved: Dict[str, str] = {}
+    for target, aliases in alias_map.items():
+        source = next((column for column in renamed.columns if column in aliases), None)
+        if source:
+            resolved[target] = source
+
+    standardized = pd.DataFrame()
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        source = resolved.get(column)
+        standardized[column] = renamed[source] if source else ""
+
+    standardized = standardized.fillna("").astype(str)
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        standardized[column] = standardized[column].str.strip()
+
+    has_identity = (
+        standardized["student_id"].ne("")
+        | standardized["first_name"].ne("")
+        | standardized["last_name"].ne("")
+    )
+    has_action = (
+        standardized["chapter_override"].ne("")
+        | standardized["status_override"].ne("")
+        | standardized["new_member_override"].ne("")
+        | standardized["remove_from_roster"].ne("")
+    )
+    return standardized.loc[has_identity & has_action].reset_index(drop=True)
+
+
+def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
+    candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if frame is None or frame.empty:
+        cleaned = empty_manual_roster_corrections()
+    else:
+        cleaned = frame.copy()
+        for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+            if column not in cleaned.columns:
+                cleaned[column] = ""
+        cleaned = cleaned[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
+        for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+            cleaned[column] = cleaned[column].str.strip()
+        has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
+        has_action = (
+            cleaned["chapter_override"].ne("")
+            | cleaned["status_override"].ne("")
+            | cleaned["new_member_override"].ne("")
+            | cleaned["remove_from_roster"].ne("")
+        )
+        cleaned = cleaned.loc[has_identity & has_action].reset_index(drop=True)
+    cleaned.to_csv(candidate, index=False)
+    return candidate
 
 
 def stringify_notes(values: List[str]) -> List[str]:
