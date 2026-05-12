@@ -58,7 +58,7 @@ That launcher opens the app directly in Manual Corrections Mode, skipping the an
 - claim rows with helper initials and set review status / notes
 - use quick final-status buttons for common outcomes such as Inactive, Resigned, Revoked, Suspended, Unknown, or Graduated
 - search for a student by Banner ID, name, or chapter
-- edit the manual correction row
+- edit or stage manual correction rows
 - save corrections to `config/manual_roster_corrections.csv`
 - track assignment progress in `config/manual_review_queue.csv`
 - create/open matching transcript paste-in files under `data/inbox/transcript_text/Transcripts/`
@@ -343,9 +343,10 @@ Manual roster correction behavior:
 5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
 6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`; if `student_join_term` is blank, it defaults to `organization_join_term`
 7. `final_status_term` and `final_status` can create or update the final manual status row
-8. saving correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
-9. the app shows an `x` helper column for deleting saved correction rows, but the `x` column itself is not written to the CSV
-10. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
+8. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
+9. saving or committing correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
+10. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
+11. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
 
 Roster exclusion behavior:
 
@@ -364,6 +365,8 @@ Manual helper queue behavior:
 3. saved/imported queue rows are preserved even if a later canonical run no longer auto-generates that exact queue item
 4. helper packages include `manual_roster_corrections.csv`, `manual_review_queue.csv`, and transcript `.txt` files
 5. importing a returned helper package merges correction rows, imports transcript files without overwriting different existing text, and flags duplicate/conflicting corrections
+6. the default correction mode is **Stage changes (fast batch)**, which keeps pending rows in the current app session until **Commit staged changes** is clicked
+7. staged rows are not included in canonical rebuilds or downloaded helper packages until they are committed to the CSV
 
 ## Exception outputs
 

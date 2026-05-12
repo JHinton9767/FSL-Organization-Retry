@@ -264,6 +264,8 @@ MANUAL_REVIEW_QUEUE_COLUMNS = [
     "updated_at",
 ]
 REVIEW_STATUS_OPTIONS = ["Needs Review", "In Progress", "Waiting on Transcript", "Corrected", "Skipped / No Change", "Blocked"]
+MANUAL_ROW_DELETE_VALUES = {"yes", "y", "true", "1", "x", "delete"}
+MANUAL_ACTION_VALUES = {"yes", "y", "true", "1", "x", "remove", "delete", "exclude"}
 
 
 def empty_manual_roster_corrections() -> pd.DataFrame:
@@ -279,6 +281,39 @@ def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
         missing_student_join = frame["student_join_term"].fillna("").astype(str).str.strip().eq("")
         frame.loc[missing_student_join, "student_join_term"] = frame.loc[missing_student_join, "organization_join_term"]
     return frame
+
+
+def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return empty_manual_roster_corrections()
+
+    cleaned = frame.copy()
+    delete_mask = (
+        cleaned.get("delete_row", pd.Series("", index=cleaned.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(MANUAL_ROW_DELETE_VALUES)
+    )
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        if column not in cleaned.columns:
+            cleaned[column] = ""
+    cleaned = cleaned[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
+    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+        cleaned[column] = cleaned[column].str.strip()
+    cleaned = _default_student_join_term(cleaned)
+
+    has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
+    has_action = (
+        cleaned["organization_join_term"].ne("")
+        | cleaned["organization_name"].ne("")
+        | cleaned["leaving_organization_term"].ne("")
+        | cleaned["final_status_term"].ne("")
+        | cleaned["final_status"].ne("")
+        | cleaned["exclude_from_roster_calculations"].str.lower().isin(MANUAL_ACTION_VALUES)
+    )
+    return cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
 
 def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
@@ -328,65 +363,16 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         source = resolved.get(column)
         standardized[column] = renamed[source] if source else ""
 
-    standardized = standardized.fillna("").astype(str)
-    for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
-        standardized[column] = standardized[column].str.strip()
-    standardized = _default_student_join_term(standardized)
-
     delete_source = next((column for column in renamed.columns if column in {"delete_row", "delete row", "x", "delete"}), None)
-    delete_mask = (
-        renamed[delete_source].fillna("").astype(str).str.strip().str.lower().isin({"yes", "y", "true", "1", "x", "delete"})
-        if delete_source
-        else pd.Series(False, index=standardized.index)
-    )
-    has_identity = (
-        standardized["student_id"].ne("")
-        | standardized["first_name"].ne("")
-        | standardized["last_name"].ne("")
-    )
-    has_action = (
-        standardized["organization_join_term"].ne("")
-        | standardized["organization_name"].ne("")
-        | standardized["leaving_organization_term"].ne("")
-        | standardized["final_status_term"].ne("")
-        | standardized["final_status"].ne("")
-        | standardized["exclude_from_roster_calculations"].str.lower().isin({"yes", "y", "true", "1", "x", "remove", "delete", "exclude"})
-    )
-    return standardized.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
+    if delete_source:
+        standardized["delete_row"] = renamed[delete_source]
+    return normalize_manual_roster_corrections(standardized)
 
 
 def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
     candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    if frame is None or frame.empty:
-        cleaned = empty_manual_roster_corrections()
-    else:
-        cleaned = frame.copy()
-        delete_mask = (
-            cleaned.get("delete_row", pd.Series("", index=cleaned.index))
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .isin({"yes", "y", "true", "1", "x", "delete"})
-        )
-        for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
-            if column not in cleaned.columns:
-                cleaned[column] = ""
-        cleaned = cleaned[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
-        for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
-            cleaned[column] = cleaned[column].str.strip()
-        cleaned = _default_student_join_term(cleaned)
-        has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
-        has_action = (
-            cleaned["organization_join_term"].ne("")
-            | cleaned["organization_name"].ne("")
-            | cleaned["leaving_organization_term"].ne("")
-            | cleaned["final_status_term"].ne("")
-            | cleaned["final_status"].ne("")
-            | cleaned["exclude_from_roster_calculations"].str.lower().isin({"yes", "y", "true", "1", "x", "remove", "delete", "exclude"})
-        )
-        cleaned = cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
+    cleaned = normalize_manual_roster_corrections(frame)
     cleaned.to_csv(candidate, index=False)
     return candidate
 

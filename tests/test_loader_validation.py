@@ -10,6 +10,7 @@ from app.config_loader import (
     ensure_manual_transcript_files,
     load_manual_roster_corrections,
     load_manual_review_queue,
+    normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
     save_manual_review_queue,
     save_manual_roster_corrections,
@@ -97,6 +98,26 @@ def test_manual_roster_corrections_accept_exclusion_action(tmp_path) -> None:
 
     assert len(loaded) == 1
     assert loaded.loc[0, "exclude_from_roster_calculations"] == "Yes"
+
+
+def test_manual_roster_correction_normalizer_removes_deleted_rows() -> None:
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "last_name": ["Doe", "Smith"],
+            "first_name": ["Jane", "John"],
+            "organization_join_term": ["Spring 2026", "Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi", "Lambda Chi Alpha"],
+            "final_status": ["Unknown", "Inactive"],
+            "delete_row": ["x", ""],
+        }
+    )
+
+    normalized = normalize_manual_roster_corrections(corrections)
+
+    assert len(normalized) == 1
+    assert normalized.loc[0, "student_id"] == "A00000002"
+    assert normalized.loc[0, "student_join_term"] == "Spring 2026"
 
 
 def test_manual_roster_corrections_create_transcript_template(tmp_path) -> None:
