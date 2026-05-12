@@ -56,7 +56,7 @@ That launcher opens the app directly in Manual Corrections Mode, skipping the an
 
 - work from an Assignment Queue of unresolved, unknown, inferred, or incomplete records
 - claim rows with helper initials and set review status / notes
-- use quick final-status buttons for common outcomes such as Inactive, Resigned, Revoked, Suspended, Unknown, or Graduated
+- check multiple Assignment Queue rows and use one final-status button for common outcomes such as Inactive, Resigned, Revoked, Suspended, Unknown, or Graduated
 - search for a student by Banner ID, name, or chapter
 - edit or stage manual correction rows
 - save corrections to `config/manual_roster_corrections.csv`
@@ -367,6 +367,7 @@ Manual helper queue behavior:
 5. importing a returned helper package merges correction rows, imports transcript files without overwriting different existing text, and flags duplicate/conflicting corrections
 6. the default correction mode is **Stage changes (fast batch)**, which keeps pending rows in the current app session until **Commit staged changes** is clicked
 7. staged rows are not included in canonical rebuilds or downloaded helper packages until they are committed to the CSV
+8. the Assignment Queue supports batch selection: check visible rows, click one outcome/exclusion button, and the app stages or saves the selected corrections with one normalized transfer
 
 ## Exception outputs
 
