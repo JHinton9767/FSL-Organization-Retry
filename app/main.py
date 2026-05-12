@@ -996,6 +996,7 @@ def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
         "leaving_organization_term": row.get("last_observed_org_term", "") or row.get("last_observed_org_term_code", ""),
         "final_status_term": final_status_term,
         "final_status": final_status,
+        "exclude_from_roster_calculations": "",
     }
 
 
@@ -1153,6 +1154,7 @@ def _summary_row_for_review_key(summary: pd.DataFrame, review_key: str) -> pd.Se
 def _save_quick_manual_status(summary_row: pd.Series, final_status: str, assigned_to: str = "") -> dict[str, object]:
     correction = _manual_correction_row_from_summary(summary_row)
     correction["final_status"] = final_status
+    correction["exclude_from_roster_calculations"] = ""
     if not correction.get("final_status_term"):
         correction["final_status_term"] = correction.get("leaving_organization_term", "")
     if not correction.get("leaving_organization_term"):
@@ -1173,6 +1175,31 @@ def _save_quick_manual_status(summary_row: pd.Series, final_status: str, assigne
         queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
         save_manual_review_queue(queue)
     return {"saved_path": saved_path, "created_transcripts": created_transcripts}
+
+
+def _save_quick_manual_exclusion(summary_row: pd.Series, assigned_to: str = "") -> dict[str, object]:
+    correction = _manual_correction_row_from_summary(summary_row)
+    correction["final_status"] = ""
+    correction["final_status_term"] = ""
+    correction["exclude_from_roster_calculations"] = "Yes"
+    corrections = pd.concat([load_manual_roster_corrections(), pd.DataFrame([correction])], ignore_index=True)
+    saved_path = save_manual_roster_corrections(corrections)
+
+    review_key = _manual_review_key(pd.Series(correction))
+    queue = load_manual_review_queue()
+    if review_key and not queue.empty:
+        mask = queue["review_key"].eq(review_key)
+        queue.loc[mask, "review_status"] = "Corrected"
+        queue.loc[mask, "has_manual_correction"] = "Yes"
+        if assigned_to:
+            queue.loc[mask, "assigned_to"] = assigned_to
+        queue.loc[mask, "review_notes"] = queue.loc[mask, "review_notes"].where(
+            queue.loc[mask, "review_notes"].fillna("").astype(str).str.strip().ne(""),
+            "Excluded from roster calculations by manual correction.",
+        )
+        queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
+        save_manual_review_queue(queue)
+    return {"saved_path": saved_path}
 
 
 def _manual_correction_review_tables(bundle) -> dict[str, pd.DataFrame]:
@@ -1356,7 +1383,8 @@ def _render_manual_corrections_editor(bundle) -> None:
         "Work the Assignment Queue first when possible. Search is still available when you need to jump to a specific student. "
         "If Student Join Term is blank, it defaults to Organization Join Term when saved. "
         "When a correction row is saved, the app creates a matching transcript text file in the Transcripts folder and opens newly created files for pasting. "
-        "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV."
+        "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV. "
+        "Use **Exclude From Roster Calculations** when the source roster row itself should be ignored by the canonical pipeline."
     )
 
     queue_tab, correction_tab, package_tab, review_tab = st.tabs(["Assignment Queue", "Correction Sheet", "Import / Export", "Weird Records"])
@@ -1419,7 +1447,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                 st.subheader("Selected student")
                 st.dataframe(selected_queue_row, use_container_width=True, hide_index=True)
             if not selected_summary.empty:
-                st.caption("Quick final-status buttons create/update the nine-column manual correction row and mark this queue item as corrected.")
+                st.caption("Quick final-status buttons create/update the manual correction row and mark this queue item as corrected.")
                 quick_status_cols = st.columns(6)
                 for index, status in enumerate(["Inactive", "Resigned", "Revoked", "Suspended", "Unknown", "Graduated"]):
                     with quick_status_cols[index]:
@@ -1429,7 +1457,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                             for path in result["created_transcripts"]:
                                 _open_local_text_file(path)
                             st.rerun()
-                transcript_col, skip_col = st.columns(2)
+                transcript_col, exclude_col, skip_col = st.columns(3)
                 with transcript_col:
                     if st.button("Create/Open transcript file", use_container_width=True):
                         correction_row = pd.Series(_manual_correction_row_from_summary(selected_summary))
@@ -1448,6 +1476,11 @@ def _render_manual_corrections_editor(bundle) -> None:
                         st.success(f"Transcript file ready: {transcript_path}")
                         if not created:
                             st.caption("The transcript file already existed, so it was not overwritten.")
+                        st.rerun()
+                with exclude_col:
+                    if st.button("Exclude from roster calcs", use_container_width=True):
+                        result = _save_quick_manual_exclusion(selected_summary, helper_initials)
+                        st.success(f"Saved roster-calculation exclusion to {result['saved_path']}.")
                         st.rerun()
                 with skip_col:
                     if st.button("Mark skipped / no change", use_container_width=True):
@@ -1528,6 +1561,8 @@ def _render_manual_corrections_editor(bundle) -> None:
         with st.form("manual_roster_corrections_form"):
             editor_display = editor_frame.copy()
             editor_display.insert(0, "delete_row", "")
+            if "exclude_from_roster_calculations" in editor_display.columns:
+                editor_display["exclude_from_roster_calculations"] = _truthy_mask(editor_display["exclude_from_roster_calculations"])
             edited = st.data_editor(
                 editor_display,
                 num_rows="dynamic",
@@ -1544,6 +1579,14 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
                     "final_status_term": st.column_config.TextColumn("Final Status Term"),
                     "final_status": st.column_config.TextColumn("Final Status"),
+                    "exclude_from_roster_calculations": st.column_config.CheckboxColumn(
+                        "Exclude From Roster Calculations",
+                        help=(
+                            "Persistently removes matching raw roster rows from canonical roster-based calculations. "
+                            "If Organization Join Term and Final/Leaving Term are supplied, that inclusive term range is removed; "
+                            "if no terms are supplied, all matching rows for the student/org are removed."
+                        ),
+                    ),
                 },
             )
             saved = st.form_submit_button("Save manual corrections", use_container_width=True)

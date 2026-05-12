@@ -3089,6 +3089,7 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
             "leaving_organization_term",
             "final_status_term",
             "final_status",
+            "exclude_from_roster_calculations",
         ]
     ).to_csv(path, index=False)
 
@@ -3134,6 +3135,22 @@ def _manual_term_mask(roster: pd.DataFrame, term_code: str) -> pd.Series:
     if not term_code:
         return pd.Series(False, index=roster.index, dtype="bool")
     return roster["term_code"].fillna("").astype(str).str.strip().eq(term_code)
+
+
+def _manual_term_scope_mask(roster: pd.DataFrame, start_term_code: str, end_term_code: str) -> pd.Series:
+    if not start_term_code and not end_term_code:
+        return pd.Series(True, index=roster.index, dtype="bool")
+
+    term_sort = roster["term_code"].map(sort_term_code)
+    if start_term_code and end_term_code:
+        start_sort = sort_term_code(start_term_code)
+        end_sort = sort_term_code(end_term_code)
+        if start_sort > end_sort:
+            start_sort, end_sort = end_sort, start_sort
+        return term_sort.ge(start_sort) & term_sort.le(end_sort)
+    if start_term_code:
+        return _manual_term_mask(roster, start_term_code)
+    return _manual_term_mask(roster, end_term_code)
 
 
 def _apply_manual_unknown_gap(result: pd.DataFrame, mask: pd.Series, notes: str, organization_name: str) -> None:
@@ -3232,6 +3249,18 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
         leaving_organization_term = _manual_term_code(getattr(correction, "leaving_organization_term", ""))
         final_status_term = _manual_term_code(getattr(correction, "final_status_term", ""))
         final_status = clean_text(getattr(correction, "final_status", ""))
+        exclude_from_roster = _manual_truthy(getattr(correction, "exclude_from_roster_calculations", ""))
+
+        if exclude_from_roster:
+            term_scope_mask = _manual_term_scope_mask(
+                result,
+                organization_join_term or student_join_term,
+                final_status_term or leaving_organization_term,
+            )
+            exclusion_mask = student_mask & (organization_mask if organization_name else pd.Series(True, index=result.index, dtype="bool")) & term_scope_mask
+            if exclusion_mask.any():
+                result = result.loc[~exclusion_mask].copy()
+            continue
 
         result_term_sort = result["term_code"].map(sort_term_code)
         if student_join_term and organization_join_term and sort_term_code(student_join_term) < sort_term_code(organization_join_term):

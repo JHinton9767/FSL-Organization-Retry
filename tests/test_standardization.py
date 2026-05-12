@@ -188,6 +188,44 @@ def test_manual_roster_corrections_mark_between_terms_unknown() -> None:
     assert final["org_status_bucket"] == "Inactive"
 
 
+def test_manual_roster_corrections_exclude_matching_rows_from_roster_calculations() -> None:
+    roster = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000001", "A00000001", "A00000002"],
+            "first_name": ["Jane", "Jane", "Jane", "Alex"],
+            "last_name": ["Doe", "Doe", "Doe", "Smith"],
+            "term_code": ["2025FA", "2026SP", "2026FA", "2026SP"],
+            "term_label": ["Fall 2025", "Spring 2026", "Fall 2026", "Spring 2026"],
+            "chapter": ["Alpha Sigma Phi", "Alpha Sigma Phi", "Beta", "Alpha Sigma Phi"],
+            "chapter_assignment_source": ["original", "original", "original", "original"],
+            "chapter_assignment_confidence": ["high", "high", "high", "high"],
+            "chapter_assignment_notes": ["", "", "", ""],
+            "org_status_raw": ["Active", "Active", "Active", "Active"],
+            "org_status_bucket": ["Active", "Active", "Active", "Active"],
+            "new_member_flag": ["No", "No", "No", "No"],
+        }
+    )
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "last_name": [""],
+            "first_name": [""],
+            "student_join_term": [""],
+            "organization_join_term": ["Fall 2025"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": [""],
+            "final_status_term": ["Spring 2026"],
+            "final_status": [""],
+            "exclude_from_roster_calculations": ["Yes"],
+        }
+    )
+
+    result = apply_manual_roster_corrections(roster, corrections)
+
+    assert result["student_id"].tolist() == ["A00000001", "A00000002"]
+    assert result.loc[result["student_id"].eq("A00000001"), "chapter"].iloc[0] == "Beta"
+
+
 def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:
     summary = pd.DataFrame({"student_id": ["1"]})
     roster = pd.DataFrame(

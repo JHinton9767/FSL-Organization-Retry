@@ -71,7 +71,32 @@ def test_manual_roster_corrections_default_student_join_term(tmp_path) -> None:
         "leaving_organization_term",
         "final_status_term",
         "final_status",
+        "exclude_from_roster_calculations",
     ]
+
+
+def test_manual_roster_corrections_accept_exclusion_action(tmp_path) -> None:
+    path = tmp_path / "manual_roster_corrections.csv"
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "last_name": ["Doe"],
+            "first_name": ["Jane"],
+            "student_join_term": [""],
+            "organization_join_term": ["Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "leaving_organization_term": [""],
+            "final_status_term": [""],
+            "final_status": [""],
+            "exclude_from_roster_calculations": ["Yes"],
+        }
+    )
+
+    save_manual_roster_corrections(corrections, path)
+    loaded = load_manual_roster_corrections(path)
+
+    assert len(loaded) == 1
+    assert loaded.loc[0, "exclude_from_roster_calculations"] == "Yes"
 
 
 def test_manual_roster_corrections_create_transcript_template(tmp_path) -> None:

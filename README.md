@@ -58,7 +58,7 @@ That launcher opens the app directly in Manual Corrections Mode, skipping the an
 - claim rows with helper initials and set review status / notes
 - use quick final-status buttons for common outcomes such as Inactive, Resigned, Revoked, Suspended, Unknown, or Graduated
 - search for a student by Banner ID, name, or chapter
-- edit the nine-column manual correction row
+- edit the manual correction row
 - save corrections to `config/manual_roster_corrections.csv`
 - track assignment progress in `config/manual_review_queue.csv`
 - create/open matching transcript paste-in files under `data/inbox/transcript_text/Transcripts/`
@@ -332,6 +332,7 @@ Persistent manual roster corrections:
   - `leaving_organization_term`
   - `final_status_term`
   - `final_status`
+  - `exclude_from_roster_calculations`
 
 Manual roster correction behavior:
 
@@ -343,7 +344,18 @@ Manual roster correction behavior:
 6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`; if `student_join_term` is blank, it defaults to `organization_join_term`
 7. `final_status_term` and `final_status` can create or update the final manual status row
 8. saving correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
-9. the app shows an `x` helper column for deleting saved correction rows, but the CSV itself stays in the nine-column format above
+9. the app shows an `x` helper column for deleting saved correction rows, but the `x` column itself is not written to the CSV
+10. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
+
+Roster exclusion behavior:
+
+1. set `exclude_from_roster_calculations` to `Yes`, `True`, `1`, `Remove`, `Delete`, or `Exclude`
+2. match is still by exact `student_id` first, or exact `first_name` + `last_name` if no ID is supplied
+3. if `organization_name` is supplied, only matching rows for that organization are removed
+4. if `organization_join_term` and `final_status_term` or `leaving_organization_term` are supplied, the inclusive term range is removed
+5. if only `organization_join_term` is supplied, only that term is removed
+6. if no terms are supplied, all matching roster rows for that student/org are removed
+7. the app's `x` column is different: it deletes the correction row itself, not the underlying roster record
 
 Manual helper queue behavior:
 

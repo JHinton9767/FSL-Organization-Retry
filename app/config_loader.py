@@ -241,6 +241,7 @@ MANUAL_ROSTER_CORRECTION_COLUMNS = [
     "leaving_organization_term",
     "final_status_term",
     "final_status",
+    "exclude_from_roster_calculations",
 ]
 MANUAL_REVIEW_QUEUE_COLUMNS = [
     "review_key",
@@ -301,6 +302,19 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         "leaving_organization_term": ["leaving_organization_term", "leaving organization term", "last_org_term", "last observed org term"],
         "final_status_term": ["final_status_term", "final status term", "graduation_term", "status term"],
         "final_status": ["final_status", "final status", "status_override", "status override", "status", "member status", "membership status"],
+        "exclude_from_roster_calculations": [
+            "exclude_from_roster_calculations",
+            "exclude from roster calculations",
+            "exclude_from_roster",
+            "exclude from roster",
+            "remove_from_roster",
+            "remove from roster",
+            "delete_from_roster",
+            "delete from roster",
+            "ignore_roster_row",
+            "ignore roster row",
+            "exclude",
+        ],
     }
 
     resolved: Dict[str, str] = {}
@@ -336,6 +350,7 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         | standardized["leaving_organization_term"].ne("")
         | standardized["final_status_term"].ne("")
         | standardized["final_status"].ne("")
+        | standardized["exclude_from_roster_calculations"].str.lower().isin({"yes", "y", "true", "1", "x", "remove", "delete", "exclude"})
     )
     return standardized.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
@@ -369,6 +384,7 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
             | cleaned["leaving_organization_term"].ne("")
             | cleaned["final_status_term"].ne("")
             | cleaned["final_status"].ne("")
+            | cleaned["exclude_from_roster_calculations"].str.lower().isin({"yes", "y", "true", "1", "x", "remove", "delete", "exclude"})
         )
         cleaned = cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
     cleaned.to_csv(candidate, index=False)
@@ -454,6 +470,7 @@ def manual_transcript_template(row: pd.Series) -> str:
             f"Leaving Organization Term: {normalize_text(row.get('leaving_organization_term', ''))}",
             f"Final Status Term: {normalize_text(row.get('final_status_term', ''))}",
             f"Final Status: {normalize_text(row.get('final_status', ''))}",
+            f"Exclude From Roster Calculations: {normalize_text(row.get('exclude_from_roster_calculations', ''))}",
             "",
             "Paste transcript text below. Use term headers such as Spring 2024, then course rows, then the Term at a glance block.",
             "Transcript text is academic evidence only; it does not create a graduation outcome unless graduation is explicitly stated.",
