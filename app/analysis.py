@@ -100,6 +100,32 @@ ROSTER_DISAPPEARANCE_STUDENT_COLUMNS = [
     "Outcome Evidence Source",
     "Data Completeness Rate",
 ]
+RETENTION_DASHBOARD_COLUMNS = [
+    "Group",
+    "Students",
+    "Organization Retention Denominator",
+    "Retained In Organization Next Fall",
+    "Organization Retention Rate",
+    "Academic Continuation Denominator",
+    "Academically Continued Next Fall",
+    "Academic Continuation Rate",
+    "Explicit Graduates",
+    "Still Active",
+    "Unknown / Unresolved",
+]
+GPA_TREND_COLUMNS = [
+    "Observed Term",
+    "Observed Term Sort",
+    "Segment",
+    "Roster Students",
+    "Academic Students",
+    "Students With Term GPA",
+    "Term GPA Coverage",
+    "Average Term GPA",
+    "Average Cumulative GPA",
+    "Average Passed Hours",
+    "Average Cumulative Hours",
+]
 
 
 def _meets_min_n(result: dict[str, object], min_n: int) -> bool:
@@ -1663,6 +1689,118 @@ def build_chapter_health_dashboard(
         "entry_students": entry_students,
         "chapter_rows": chapter_rows,
     }
+
+
+def build_retention_dashboard(summary: pd.DataFrame, group_field: str | None = None, min_denominator: int = 1) -> pd.DataFrame:
+    """Build next-fall organization retention and academic continuation rates with explicit denominators."""
+    if summary.empty:
+        return pd.DataFrame(columns=RETENTION_DASHBOARD_COLUMNS)
+
+    if group_field and group_field in summary.columns:
+        groups = [(_label_or_unknown(group_value), group.copy()) for group_value, group in summary.groupby(group_field, dropna=False)]
+    else:
+        groups = [("Overall", summary.copy())]
+
+    rows: list[dict[str, object]] = []
+    for label, frame in groups:
+        org_measurable = _truthy_filter(frame, "retained_next_fall_measurable")
+        org_denominator = student_count(org_measurable)
+        academic_measurable = _truthy_filter(frame, "continued_next_fall_measurable")
+        academic_denominator = student_count(academic_measurable)
+        if max(org_denominator, academic_denominator) < int(min_denominator):
+            continue
+        org_retained = _truthy_student_count(org_measurable, "retained_next_fall")
+        academic_continued = _truthy_student_count(academic_measurable, "continued_next_fall")
+        rows.append(
+            {
+                "Group": label,
+                "Students": student_count(frame),
+                "Organization Retention Denominator": org_denominator,
+                "Retained In Organization Next Fall": org_retained,
+                "Organization Retention Rate": (org_retained / org_denominator) if org_denominator else np.nan,
+                "Academic Continuation Denominator": academic_denominator,
+                "Academically Continued Next Fall": academic_continued,
+                "Academic Continuation Rate": (academic_continued / academic_denominator) if academic_denominator else np.nan,
+                "Explicit Graduates": _truthy_student_count(frame, "is_graduated"),
+                "Still Active": _truthy_student_count(frame, "is_active_outcome"),
+                "Unknown / Unresolved": _truthy_student_count(frame, "is_unknown_outcome"),
+            }
+        )
+
+    result = pd.DataFrame(rows, columns=RETENTION_DASHBOARD_COLUMNS)
+    if result.empty:
+        return result
+    return result.sort_values(
+        ["Organization Retention Denominator", "Organization Retention Rate", "Group"],
+        ascending=[False, False, True],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
+def build_gpa_trend_with_coverage(longitudinal: pd.DataFrame, segment_field: str | None = None) -> pd.DataFrame:
+    """Build term GPA trend rows with explicit roster-to-GPA coverage."""
+    if longitudinal.empty or "observed_term" not in longitudinal.columns:
+        return pd.DataFrame(columns=GPA_TREND_COLUMNS)
+
+    frame = longitudinal.copy()
+    if "observed_term_sort" not in frame.columns:
+        frame["observed_term_sort"] = frame["observed_term"].map(lambda value: parse_term_label(value)["sort_value"])
+    if segment_field and segment_field not in frame.columns:
+        segment_field = None
+    group_fields = ["observed_term", "observed_term_sort"] + ([segment_field] if segment_field else [])
+
+    rows: list[dict[str, object]] = []
+    for group_value, group in frame.groupby(group_fields, dropna=False):
+        if not isinstance(group_value, tuple):
+            group_value = (group_value,)
+        observed_term = group_value[0]
+        observed_sort = group_value[1] if len(group_value) > 1 else 999999
+        segment = _label_or_unknown(group_value[2]) if len(group_value) > 2 else "All Students"
+
+        term_gpa = pd.to_numeric(group.get("term_gpa", pd.Series(np.nan, index=group.index)), errors="coerce")
+        cumulative_gpa = pd.to_numeric(group.get("cumulative_gpa", pd.Series(np.nan, index=group.index)), errors="coerce")
+        metric_group = group.assign(_has_term_gpa=term_gpa.notna(), _term_gpa_num=term_gpa, _cumulative_gpa_num=cumulative_gpa)
+        if "student_id" in metric_group.columns:
+            metric_group = (
+                metric_group.sort_values(["_has_term_gpa", "_term_gpa_num"], ascending=[False, False], na_position="last")
+                .drop_duplicates(subset=["student_id"], keep="first")
+                .copy()
+            )
+
+        roster_mask = _truthy_series(metric_group.get("roster_present"), metric_group.index) if "roster_present" in metric_group.columns else pd.Series(True, index=metric_group.index)
+        academic_mask = (
+            _truthy_series(metric_group.get("academic_present"), metric_group.index)
+            if "academic_present" in metric_group.columns
+            else pd.Series(False, index=metric_group.index)
+        )
+        academic_mask = academic_mask | metric_group["_has_term_gpa"] | metric_group["_cumulative_gpa_num"].notna()
+        term_gpa_mask = metric_group["_has_term_gpa"]
+
+        roster_students = student_count(metric_group.loc[roster_mask])
+        academic_students = student_count(metric_group.loc[academic_mask])
+        term_gpa_students = student_count(metric_group.loc[term_gpa_mask])
+        denominator = roster_students or academic_students
+
+        rows.append(
+            {
+                "Observed Term": observed_term,
+                "Observed Term Sort": observed_sort,
+                "Segment": segment,
+                "Roster Students": roster_students,
+                "Academic Students": academic_students,
+                "Students With Term GPA": term_gpa_students,
+                "Term GPA Coverage": (term_gpa_students / denominator) if denominator else np.nan,
+                "Average Term GPA": metric_group.loc[term_gpa_mask, "_term_gpa_num"].mean(),
+                "Average Cumulative GPA": metric_group["_cumulative_gpa_num"].dropna().mean(),
+                "Average Passed Hours": pd.to_numeric(metric_group.get("term_passed_hours", pd.Series(np.nan, index=metric_group.index)), errors="coerce").dropna().mean(),
+                "Average Cumulative Hours": pd.to_numeric(metric_group.get("cumulative_hours", pd.Series(np.nan, index=metric_group.index)), errors="coerce").dropna().mean(),
+            }
+        )
+
+    result = pd.DataFrame(rows, columns=GPA_TREND_COLUMNS)
+    if result.empty:
+        return result
+    return result.sort_values(["Observed Term Sort", "Segment"]).reset_index(drop=True)
 
 
 def build_advisor_intervention_queue(summary: pd.DataFrame) -> dict[str, object]:

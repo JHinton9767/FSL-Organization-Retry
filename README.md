@@ -131,6 +131,7 @@ The app manifest now points to canonical outputs as the preferred prepared datas
 Recent app additions:
 
 - `Persistence & Graduation` includes a graduation-rate denominator toggle for the selected cohort/council view, with `Resolved Outcomes Only`, `Full Population`, and side-by-side tables.
+- `Retention & GPA` separates next-fall organization retention from academic continuation and shows GPA trend coverage so incomplete grade files stay visible.
 - `Roster Disappearances` isolates students in the `Roster Dissapeared/Unknown` bucket, with chapter rollups, join-term timing, last-observed timing, and downloadable student detail.
 - `Chapter Health` keeps roster-disappeared unknowns visible beside resolved graduation rates so disappeared rosters do not silently become graduations.
 
@@ -177,6 +178,13 @@ Graduation-focused views now expose two denominator styles:
 Use `Resolved Outcomes Only` for most final-outcome interpretation.
 Use `Full Population` when you need to show the broader unresolved burden alongside the rate.
 The app-level denominator toggle does not change the underlying classifications; it only changes which denominator is highlighted for display.
+
+Retention-focused views also keep denominator definitions explicit:
+
+- `Organization Retention Rate`: students retained on a roster at the next-fall checkpoint divided by students with a measurable next-fall roster checkpoint.
+- `Academic Continuation Rate`: students with academic evidence at the next-fall checkpoint divided by students with a measurable next-fall academic checkpoint.
+
+GPA trend views show coverage as `students with term GPA / roster students` for each term/segment so missing grade files do not silently bias the average.
 
 ## Graduation evidence rules
 

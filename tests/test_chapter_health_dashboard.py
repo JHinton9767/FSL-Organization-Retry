@@ -3,7 +3,9 @@ import pandas as pd
 from app.analysis import (
     build_advisor_intervention_queue,
     build_chapter_health_dashboard,
+    build_gpa_trend_with_coverage,
     build_graduation_denominator_comparison,
+    build_retention_dashboard,
     build_roster_disappearance_tracker,
     chapter_health_options,
 )
@@ -235,3 +237,56 @@ def test_graduation_denominator_comparison_keeps_full_and_resolved_rates_separat
     assert alpha["Graduation Rate (Resolved Outcomes Only)"] == 0.5
     assert alpha["Graduation Rate (Full Population)"] == 1 / 3
     assert beta["Graduation Rate (Resolved Outcomes Only)"] == 1.0
+
+
+def test_retention_dashboard_separates_organization_and_academic_continuation() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3", "4"],
+            "initial_chapter": ["Alpha", "Alpha", "Beta", "Beta"],
+            "retained_next_fall_measurable": ["Yes", "Yes", "Yes", ""],
+            "retained_next_fall": ["Yes", "No", "Yes", ""],
+            "continued_next_fall_measurable": ["Yes", "Yes", "Yes", "Yes"],
+            "continued_next_fall": ["Yes", "Yes", "No", "Yes"],
+            "is_graduated": [False, False, True, False],
+            "is_active_outcome": [True, False, False, False],
+            "is_unknown_outcome": [False, True, False, True],
+        }
+    )
+
+    table = build_retention_dashboard(summary, "initial_chapter", min_denominator=1)
+    alpha = table.loc[table["Group"].eq("Alpha")].iloc[0]
+    beta = table.loc[table["Group"].eq("Beta")].iloc[0]
+
+    assert alpha["Organization Retention Denominator"] == 2
+    assert alpha["Retained In Organization Next Fall"] == 1
+    assert alpha["Organization Retention Rate"] == 0.5
+    assert alpha["Academic Continuation Rate"] == 1.0
+    assert beta["Academic Continuation Denominator"] == 2
+    assert beta["Academic Continuation Rate"] == 0.5
+
+
+def test_gpa_trend_with_coverage_dedupes_student_term_rows_and_reports_coverage() -> None:
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["1", "1", "2", "3"],
+            "observed_term": ["Fall 2025", "Fall 2025", "Fall 2025", "Spring 2026"],
+            "observed_term_sort": [20253, 20253, 20253, 20261],
+            "chapter": ["Alpha", "Alpha", "Alpha", "Alpha"],
+            "roster_present": ["Yes", "Yes", "Yes", "Yes"],
+            "academic_present": ["No", "Yes", "No", "Yes"],
+            "term_gpa": [pd.NA, 3.4, pd.NA, 3.0],
+            "cumulative_gpa": [pd.NA, 3.2, pd.NA, 3.1],
+            "term_passed_hours": [pd.NA, 12, pd.NA, 15],
+            "cumulative_hours": [pd.NA, 45, pd.NA, 60],
+        }
+    )
+
+    trend = build_gpa_trend_with_coverage(longitudinal, "chapter")
+    fall = trend.loc[trend["Observed Term"].eq("Fall 2025")].iloc[0]
+
+    assert fall["Roster Students"] == 2
+    assert fall["Academic Students"] == 1
+    assert fall["Students With Term GPA"] == 1
+    assert fall["Term GPA Coverage"] == 0.5
+    assert fall["Average Term GPA"] == 3.4

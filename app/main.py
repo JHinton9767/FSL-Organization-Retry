@@ -18,7 +18,9 @@ from app.analysis import (
     build_comparison_table,
     build_controlled_comparison,
     build_distribution_table,
+    build_gpa_trend_with_coverage,
     build_observed_term_series,
+    build_retention_dashboard,
     build_roster_disappearance_tracker,
     build_scatter_frame,
     build_summary_time_series,
@@ -701,6 +703,195 @@ def _render_roster_disappearance_tracker(bundle) -> None:
                 mime="text/csv",
                 use_container_width=True,
             )
+
+
+def _render_retention_and_gpa_dashboard(bundle) -> None:
+    summary = bundle.summary.copy()
+    longitudinal = bundle.longitudinal.copy()
+
+    st.title("Retention & GPA Trends")
+    st.caption(
+        "This view separates organization retention, academic continuation, and GPA coverage. "
+        "Rates use explicit measurable denominators, and GPA trends show how much of the roster actually has grade data."
+    )
+
+    retention_group_options = {
+        "Overall": None,
+        "Initial Chapter": "initial_chapter",
+        "Latest Chapter": "chapter",
+        "Council": "council",
+        "Fraternity / Sorority": "org_type",
+        "Join Term": "join_term",
+    }
+    gpa_group_options = {
+        "Overall": None,
+        "Chapter": "chapter",
+        "Council": "council",
+        "Fraternity / Sorority": "org_type",
+    }
+
+    retention_tab, gpa_tab = st.tabs(["Retention Rates", "GPA Trends"])
+
+    with retention_tab:
+        control_cols = st.columns([1.2, 1])
+        with control_cols[0]:
+            retention_group_label = st.selectbox(
+                "Retention breakdown",
+                options=list(retention_group_options.keys()),
+                index=1,
+                key="retention_dashboard_group",
+            )
+        with control_cols[1]:
+            retention_min_n = st.slider("Minimum measurable denominator", min_value=1, max_value=100, value=5, key="retention_dashboard_min_n")
+
+        retention_table = build_retention_dashboard(
+            summary,
+            group_field=retention_group_options[retention_group_label],
+            min_denominator=retention_min_n,
+        )
+        if retention_table.empty:
+            st.warning("No retention groups met the current measurable-denominator rule.")
+        else:
+            metric_cols = st.columns(4)
+            overall = build_retention_dashboard(summary, group_field=None, min_denominator=1)
+            overall_row = overall.iloc[0] if not overall.empty else pd.Series(dtype="object")
+            with metric_cols[0]:
+                st.metric("Org retention denominator", f"{int(overall_row.get('Organization Retention Denominator', 0) or 0):,}")
+            with metric_cols[1]:
+                st.metric("Org retention", _display_metric_value(overall_row.get("Organization Retention Rate"), "percent"))
+            with metric_cols[2]:
+                st.metric("Academic continuation denominator", f"{int(overall_row.get('Academic Continuation Denominator', 0) or 0):,}")
+            with metric_cols[3]:
+                st.metric("Academic continuation", _display_metric_value(overall_row.get("Academic Continuation Rate"), "percent"))
+
+            chart_source = retention_table.head(25).melt(
+                id_vars=["Group"],
+                value_vars=["Organization Retention Rate", "Academic Continuation Rate"],
+                var_name="Rate Type",
+                value_name="Rate",
+            )
+            retention_chart = bar_chart(
+                chart_source,
+                x="Group",
+                y="Rate",
+                color="Rate Type",
+                title="Next-fall organization retention versus academic continuation",
+                y_format="percent",
+            )
+            st.plotly_chart(retention_chart, use_container_width=True)
+            _save_chart_downloads(retention_chart, "retention_rate_comparison")
+
+            st.dataframe(
+                _format_display_frame(
+                    retention_table,
+                    percent_cols=["Organization Retention Rate", "Academic Continuation Rate"],
+                    integer_cols=[
+                        "Students",
+                        "Organization Retention Denominator",
+                        "Retained In Organization Next Fall",
+                        "Academic Continuation Denominator",
+                        "Academically Continued Next Fall",
+                        "Explicit Graduates",
+                        "Still Active",
+                        "Unknown / Unresolved",
+                    ],
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.download_button(
+                "Download retention table CSV",
+                data=dataframe_to_csv_bytes(retention_table),
+                file_name="retention_rates.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        st.info(
+            "Organization retention means the student appears on a roster in the next-fall checkpoint. "
+            "Academic continuation means the student has academic evidence in that checkpoint. "
+            "They answer different questions, so the app keeps them side by side instead of blending them."
+        )
+
+    with gpa_tab:
+        gpa_controls = st.columns([1, 1, 1])
+        with gpa_controls[0]:
+            gpa_group_label = st.selectbox("GPA segment", options=list(gpa_group_options.keys()), index=1, key="gpa_dashboard_group")
+        gpa_table = build_gpa_trend_with_coverage(longitudinal, segment_field=gpa_group_options[gpa_group_label])
+        with gpa_controls[1]:
+            gpa_measure = st.selectbox(
+                "Trend measure",
+                options=["Average Term GPA", "Average Cumulative GPA", "Term GPA Coverage"],
+                key="gpa_dashboard_measure",
+            )
+        with gpa_controls[2]:
+            available_segments = _unique_text_options(gpa_table, "Segment")
+            default_segments = available_segments[:6] if gpa_group_label != "Overall" else available_segments
+            selected_segments = st.multiselect(
+                "Segments",
+                options=available_segments,
+                default=default_segments,
+                key="gpa_dashboard_segments",
+            )
+
+        if gpa_table.empty:
+            st.warning("No GPA trend rows were available in the longitudinal canonical table.")
+        else:
+            gpa_view = gpa_table.copy()
+            if selected_segments:
+                gpa_view = gpa_view.loc[gpa_view["Segment"].isin(selected_segments)].copy()
+            elif gpa_group_label != "Overall":
+                gpa_view = gpa_view.iloc[0:0].copy()
+
+            coverage_cols = st.columns(4)
+            with coverage_cols[0]:
+                st.metric("Terms shown", f"{gpa_view['Observed Term'].nunique():,}" if not gpa_view.empty else "0")
+            with coverage_cols[1]:
+                st.metric("Roster student-term rows", f"{int(gpa_view['Roster Students'].sum()):,}" if not gpa_view.empty else "0")
+            with coverage_cols[2]:
+                st.metric("Rows with term GPA", f"{int(gpa_view['Students With Term GPA'].sum()):,}" if not gpa_view.empty else "0")
+            with coverage_cols[3]:
+                weighted_denominator = float(gpa_view["Roster Students"].replace(0, pd.NA).dropna().sum()) if not gpa_view.empty else 0
+                weighted_coverage = (float(gpa_view["Students With Term GPA"].sum()) / weighted_denominator) if weighted_denominator else pd.NA
+                st.metric("Weighted GPA coverage", _display_metric_value(weighted_coverage, "percent"))
+
+            if gpa_view.empty:
+                st.caption("No GPA segments match the current selection.")
+            else:
+                gpa_chart = line_chart(
+                    gpa_view,
+                    x="Observed Term",
+                    y=gpa_measure,
+                    color="Segment",
+                    title=f"{gpa_measure} over time",
+                    y_format="percent" if gpa_measure == "Term GPA Coverage" else "",
+                )
+                st.plotly_chart(gpa_chart, use_container_width=True)
+                _save_chart_downloads(gpa_chart, "gpa_trend_with_coverage")
+
+                st.dataframe(
+                    _format_display_frame(
+                        gpa_view,
+                        percent_cols=["Term GPA Coverage"],
+                        decimal_cols=["Average Term GPA", "Average Cumulative GPA"],
+                        one_decimal_cols=["Average Passed Hours", "Average Cumulative Hours"],
+                        integer_cols=["Roster Students", "Academic Students", "Students With Term GPA"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    "Download GPA trend CSV",
+                    data=dataframe_to_csv_bytes(gpa_view),
+                    file_name="gpa_trends_with_coverage.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+        st.info(
+            "GPA coverage is `students with term GPA / roster students` when roster rows exist for a segment-term. "
+            "This keeps years with incomplete grade files from looking cleaner than they really are."
+        )
 
 
 def _render_advisor_help_dashboard(bundle) -> None:
@@ -2244,6 +2435,9 @@ def _render_advanced_analytics(
             "Group Summary": group_summary,
             "Comparison Table": comparison_table,
             "Controlled Comparison": controlled_table,
+            "Retention Rates": build_retention_dashboard(filtered_summary, group_field, st.session_state["min_n"]),
+            "GPA Trends With Coverage": build_gpa_trend_with_coverage(filtered_longitudinal, group_field if group_field in filtered_longitudinal.columns else None),
+            "Roster Disappearance Students": build_roster_disappearance_tracker(filtered_summary)["student_table"],
             "Filtered Longitudinal": filtered_longitudinal,
             "Audit Tables": pd.concat(audit_tables.values(), ignore_index=True) if audit_tables else pd.DataFrame(),
         }
@@ -2546,12 +2740,15 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, chapter_health_tab, roster_disappearance_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
-        ["Persistence & Graduation", "Chapter Health", "Roster Disappearances", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
+    landing_tab, retention_gpa_tab, chapter_health_tab, roster_disappearance_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
+        ["Persistence & Graduation", "Retention & GPA", "Chapter Health", "Roster Disappearances", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
     )
 
     with landing_tab:
         _render_persistence_and_graduation_view(bundle)
+
+    with retention_gpa_tab:
+        _render_retention_and_gpa_dashboard(bundle)
 
     with chapter_health_tab:
         _render_chapter_health_dashboard(bundle)
