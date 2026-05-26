@@ -83,19 +83,43 @@ def _to_path(value: str, values: Dict[str, str]) -> Path:
     return path.resolve()
 
 
+def _resolve_user_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    return path.resolve()
+
+
+def _git_bash_collapsed_config_path(value: str | Path) -> Optional[Path]:
+    """Recover from Git Bash commands like --config config/local_paths.yaml.
+
+    In Git Bash, an unquoted backslash can be consumed before Python sees the
+    argument, so config/local_paths.yaml can arrive as configlocal_paths.yaml.
+    """
+    text = str(value).strip().replace("\\", "/")
+    if "/" in text:
+        return None
+    lowered = text.lower()
+    known = {
+        "configlocal_paths.yaml": DEFAULT_CONFIG_PATH,
+        "configexample_paths.yaml": EXAMPLE_CONFIG_PATH,
+    }
+    return known.get(lowered)
+
+
 def _select_config_path(config_path: Optional[str | Path] = None) -> tuple[Path, bool]:
     if config_path:
-        path = Path(config_path).expanduser()
-        if not path.is_absolute():
-            path = ROOT / path
-        return path.resolve(), False
+        recovered = _git_bash_collapsed_config_path(config_path)
+        if recovered and recovered.exists():
+            return recovered.resolve(), recovered == EXAMPLE_CONFIG_PATH
+        return _resolve_user_path(config_path), False
 
     env_value = os.getenv(PATH_CONFIG_ENV, "").strip()
     if env_value:
-        path = Path(env_value).expanduser()
-        if not path.is_absolute():
-            path = ROOT / path
-        return path.resolve(), False
+        recovered = _git_bash_collapsed_config_path(env_value)
+        if recovered and recovered.exists():
+            return recovered.resolve(), recovered == EXAMPLE_CONFIG_PATH
+        return _resolve_user_path(env_value), False
 
     if DEFAULT_CONFIG_PATH.exists():
         return DEFAULT_CONFIG_PATH.resolve(), False
