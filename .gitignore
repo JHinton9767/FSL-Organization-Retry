@@ -1,19 +1,67 @@
-data/inbox/academic/*
-!data/inbox/academic/.gitkeep
-data/inbox/current_snapshot/*
-!data/inbox/current_snapshot/.gitkeep
-data/inbox/rosters/*
-!data/inbox/rosters/.gitkeep
-data/inbox/transcript_text/**/*.txt
-!data/inbox/transcript_text/README.md
-!data/inbox/transcript_text/Transcripts/.gitkeep
-data/raw/
-data/processed/
-output/
-.venv/
-.uv-cache/
-.uv-python/
-Yearly/
+# Python/runtime noise
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.venv/
+.uv-cache/
+.uv-python/
+
+# Local machine config
+.env
+config/local_paths.yaml
+
+# Raw/source student data. Keep this out of Git and point the code to the
+# shared-drive copy through config/local_paths.yaml instead.
+Copy of Rosters/
+Rosters/
+raw/
+data/raw/
+data/inbox/
+source_data/
+grade_reports/
+graduation_files/
+reference_files/
+*.pdf
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.docx
+*.csv
+
+# Allow tracked config/documentation templates even though CSV/YAML data files
+# are ignored by default.
+!config/
+!config/README.md
+!config/example_paths.yaml
+!config/*.example.csv
+!docs/
+!docs/templates/
+!docs/templates/*.csv
+!data/
+!data/inbox/
+!data/inbox/**/
+!data/inbox/**/.gitkeep
+!data/inbox/transcript_text/README.md
+data/processed/
+
+# Generated/private outputs and caches
+outputs/
+output/
+reports/
+exports/
+cache/
+.cache/
+build/
+dist/
+Yearly/
+*.pkl
+*.parquet
+*.feather
+*.sqlite
+*.db
+
+# Office temp/lock files
+~$*
+*.tmp
+*.bak

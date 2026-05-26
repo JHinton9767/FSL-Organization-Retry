@@ -16,7 +16,7 @@ All future analytics are expected to flow from exactly six authoritative tables:
 These are produced by:
 
 ```powershell
-py run_canonical_pipeline.py
+py run_canonical_pipeline.py --config config\local_paths.yaml
 ```
 
 The output is written to:
@@ -26,22 +26,24 @@ The output is written to:
 
 ## Canonical workflow
 
-Use this order when rebuilding from source files:
+Use this order when rebuilding from source files. Raw student files should live
+outside the Git checkout, usually on the shared/community drive, and the local
+repo should point to them through `config/local_paths.yaml`.
 
-1. Place roster files in `Copy of Rosters/` and/or `data/inbox/rosters/`
-2. Place term-level academic files in `data/inbox/academic/`
-3. Optionally place transcript-style text exports in `data/inbox/transcript_text/`
+1. Copy `config/example_paths.yaml` to `config/local_paths.yaml`.
+2. Edit `config/local_paths.yaml` so `raw_data_root` points at the shared-drive source-data folder.
+3. Keep roster files, grade reports, graduation lists, reference workbooks, and transcript text under that shared raw-data root.
+4. Optionally place transcript-style text exports in the configured `transcript_text_root`.
    These are parsed into transcript term summaries, transcript course detail, and transcript-backed academic term rows.
-4. Optionally place graduation lists in `data/inbox/graduation/`
-5. Optionally place current one-row snapshot files such as `New Member (1)` in `data/inbox/academic/`
-6. Optionally place a single combined workbook such as `Reference Data.xlsx` in `data/inbox/reference_data/`
+5. Optionally place current one-row snapshot files such as `New Member (1)` in the configured grade-report or snapshot folder.
+6. Optionally place a single combined workbook such as `Reference Data.xlsx` in the configured reference folder.
    The canonical run will scan mixed reference sheets for chapter counts, new-member counts, chapter GPA trends, benchmark GPA trends, and retention-style reference rows.
 7. Optionally use the specialized folders instead:
-   `data/inbox/membership_reference/`, `data/inbox/gpa_reference/`, and `data/inbox/gpa_benchmark_reference/`
+   `membership_reference_root`, `gpa_reference_root`, and `gpa_benchmark_root`.
 8. Run:
 
 ```powershell
-py run_canonical_pipeline.py
+py run_canonical_pipeline.py --config config\local_paths.yaml
 ```
 
 After the canonical bundle exists, use the application for review, filtering, exports, chapter health, advisor queues, and audit tables.
@@ -61,7 +63,7 @@ That launcher opens the app directly in Manual Corrections Mode, skipping the an
 - edit or stage manual correction rows
 - save corrections to `config/manual_roster_corrections.csv`
 - track assignment progress in `config/manual_review_queue.csv`
-- create/open matching transcript paste-in files under `data/inbox/transcript_text/Transcripts/`
+- create/open matching transcript paste-in files under the configured `transcript_text_root/Transcripts/`
 - download `manual_corrections_package.zip` to send corrections, queue progress, and transcript text back
 - import returned helper packages and review duplicate/conflicting corrections before the next canonical rebuild
 
@@ -72,6 +74,55 @@ For the full analytics app, use:
 - `Start_FSL_Analytics_App.bat`
 
 Both launchers prefer `uv run --with-requirements requirements.txt ...` when `uv` is installed, then fall back to `.venv`, then `py`.
+
+## Recommended Windows/shared-drive workflow
+
+The safest setup is to keep Git and raw data separate:
+
+- Work from a short local repo path on each computer, for example `C:\FSL`.
+- Keep the raw FSL student data on the community/shared drive.
+- Use GitHub to sync code, config templates, tests, and documentation.
+- Do not commit roster PDFs, roster spreadsheets, grade reports, graduation files, exports, generated outputs, caches, or student records.
+- Create `config/local_paths.yaml` locally on each computer. This file is ignored by Git.
+- Point `raw_data_root` and the optional source-folder roots in `config/local_paths.yaml` to the shared-drive raw-data location.
+- Run `git config --global core.longpaths true` once on each Windows computer.
+
+First-time setup:
+
+```powershell
+git clone <repo-url> C:\FSL
+cd C:\FSL
+git config --global core.longpaths true
+copy config\example_paths.yaml config\local_paths.yaml
+notepad config\local_paths.yaml
+py run_canonical_pipeline.py --config config\local_paths.yaml
+```
+
+You can also set `FSL_PATH_CONFIG` instead of passing `--config`:
+
+```powershell
+$env:FSL_PATH_CONFIG = "C:\FSL\config\local_paths.yaml"
+py run_canonical_pipeline.py --config config\local_paths.yaml
+```
+
+To check whether the repo is clean of raw/private files, run:
+
+```powershell
+py scripts\check_repo_hygiene.py --config config\local_paths.yaml
+```
+
+If old raw folders are already tracked by Git, do not delete them from disk.
+Untrack them after reviewing the `.gitignore` changes:
+
+```powershell
+git rm -r --cached "Copy of Rosters"
+git rm -r --cached "Rosters"
+git rm -r --cached "data/inbox"
+git rm -r --cached "output"
+```
+
+Then commit only the code/config-template changes. Raw files stay where they
+are on the shared drive.
 
 ## Faster reruns
 
@@ -94,13 +145,13 @@ This means unchanged source files no longer force the pipeline to redo the most 
 Use:
 
 ```powershell
-py run_canonical_pipeline.py
+py run_canonical_pipeline.py --config config\local_paths.yaml
 ```
 
 If you changed raw parsing logic and want to force the source files to be re-read, use:
 
 ```powershell
-py run_canonical_pipeline.py --refresh-source-cache
+py run_canonical_pipeline.py --config config\local_paths.yaml --refresh-source-cache
 ```
 
 Each canonical run now also writes a small performance report to:
@@ -188,11 +239,11 @@ GPA trend views show coverage as `students with term GPA / roster students` for 
 
 ## Graduation evidence rules
 
-Graduation is now evidence-gated. A student is counted as `Graduated` only when the pipeline has a confirmed manual graduation signal from `Copy of Rosters`, such as:
+Graduation is now evidence-gated. A student is counted as `Graduated` only when the pipeline has a confirmed manual graduation signal from the configured roster source, historically `Copy of Rosters`, such as:
 
-- a roster status explicitly marked as graduated in `Copy of Rosters`
+- a roster status explicitly marked as graduated in the configured roster source
 
-Graduation lists can still be loaded for audit and comparison, but they no longer mark a student as graduated unless `Copy of Rosters` also shows that student as graduated. The pipeline does not treat disappearance, high cumulative hours, good standing, final observed term, or transcript completion history as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
+Graduation lists can still be loaded for audit and comparison, but they no longer mark a student as graduated unless the configured roster source also shows that student as graduated. The pipeline does not treat disappearance, high cumulative hours, good standing, final observed term, or transcript completion history as graduation evidence. If a student disappears without confirmed graduation or another resolved exit, the outcome remains `Truly Unknown / Unresolved`.
 
 Graduation-rate views keep two denominator definitions:
 
@@ -205,8 +256,8 @@ Graduation metrics are calculated at the unique-student level so repeated term r
 
 Transcript-style text files are now supported from:
 
-- `data/inbox/transcript_text/`
-- app-created manual correction transcript templates in `data/inbox/transcript_text/Transcripts/`
+- configured `transcript_text_root`
+- app-created manual correction transcript templates in `transcript_text_root/Transcripts/`
 
 The canonical pipeline scans `.txt` files in that folder and writes:
 
@@ -344,7 +395,7 @@ Manual roster correction behavior:
 6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`; if `student_join_term` is blank, it defaults to `organization_join_term`
 7. `final_status_term` and `final_status` can create or update the final manual status row
 8. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
-9. saving or committing correction rows in the app creates missing transcript paste-in templates under `data/inbox/transcript_text/Transcripts/`
+9. saving or committing correction rows in the app creates missing transcript paste-in templates under the configured `transcript_text_root/Transcripts/`
 10. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
 11. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
 
@@ -407,7 +458,7 @@ If supplemental benchmark GPA workbooks are provided, the canonical run also wri
 - `gpa_benchmark_reference_values.csv`
 - `gpa_benchmark_validation.csv`
 
-The canonical pipeline now also scans `data/inbox/reference_data/` as a shared reference-workbook location, so a single workbook can contain:
+The canonical pipeline now also scans the configured `reference_root` as a shared reference-workbook location, so a single workbook can contain:
 
 - chapter membership counts
 - chapter new-member counts

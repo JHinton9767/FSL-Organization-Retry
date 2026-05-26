@@ -9,6 +9,7 @@ import pandas as pd
 from app.config_loader import load_chapter_mapping, load_dataset_manifest, stringify_notes
 from app.io_utils import ROOT
 from app.models import AnalysisBundle, DataFileStatus, DataSourceStatus, DatasetVersion, MetricDefinition
+from src.path_config import resolve_canonical_output_root
 from src.shared_utils import apply_chapter_mapping_overrides
 
 
@@ -123,7 +124,8 @@ def scan_preloaded_sources() -> List[DataSourceStatus]:
         if source_key != "canonical":
             continue
         label = source_cfg.get("label", "Canonical Analytics Run")
-        root = ROOT / source_cfg.get("root", "output/canonical")
+        configured_root = resolve_canonical_output_root()
+        root = configured_root if source_cfg.get("root", "output/canonical") == "output/canonical" else ROOT / source_cfg.get("root", "output/canonical")
         selected = _latest_run_folder(root, source_cfg.get("run_prefix", "run_"))
         warnings: List[str] = []
         files: List[DataFileStatus] = []
@@ -159,7 +161,7 @@ def scan_preloaded_sources() -> List[DataSourceStatus]:
     if statuses:
         return statuses
 
-    root = ROOT / "output" / "canonical"
+    root = resolve_canonical_output_root()
     selected = _latest_run_folder(root, "run_")
     files = [
         _status_from_path(filename, _preferred_canonical_path(selected or root, filename), True)

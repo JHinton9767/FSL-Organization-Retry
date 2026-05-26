@@ -9,7 +9,7 @@ from src.shared_utils import clean_text
 
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_INPUT_ROOT = ROOT / "Copy of Rosters"
+DEFAULT_INPUT_ROOT = ROOT / "data" / "inbox" / "rosters"
 SUPPORTED_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm"}
 ROSTER_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".pdf"})
 SEMESTER_FOLDER_RE = re.compile(r"^(Fall|Spring)\s+(20\d{2})$", re.IGNORECASE)
@@ -698,4 +698,3 @@ def pdf_table_rows(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]
     if not table_sources and not issues:
         issues.append(f"PDF skipped because no extractable table/text rows were found in {path}.")
     return table_sources, issues
-

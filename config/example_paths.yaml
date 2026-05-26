@@ -1,0 +1,22 @@
+# Copy this file to config/local_paths.yaml on each computer and edit the
+# roots for that machine. config/local_paths.yaml is intentionally ignored by
+# Git so shared-drive and user-specific paths do not get committed.
+
+raw_data_root: "S:/SS/SIE/SIE-Shares/Fraternity and Sorority Life/Administration/Student Workers/Jacob Hinton/Raw FSL Data"
+
+# Keep the canonical output location compatible with the current app.
+output_root: "output/canonical"
+cache_root: "output/canonical/_source_cache"
+
+# Source folders. These can be absolute paths or paths relative to
+# raw_data_root using ${raw_data_root}.
+rosters_root: "${raw_data_root}/Rosters"
+roster_inbox_root: "${raw_data_root}/Rosters"
+grade_reports_root: "${raw_data_root}/Grade Reports"
+transcript_text_root: "${raw_data_root}/Transcript Text"
+graduation_root: "${raw_data_root}/Graduation Files"
+snapshot_root: "${raw_data_root}/Current Snapshot"
+reference_root: "${raw_data_root}/Reference Files"
+membership_reference_root: "${raw_data_root}/Membership Reference"
+gpa_reference_root: "${raw_data_root}/GPA Reference"
+gpa_benchmark_root: "${raw_data_root}/GPA Benchmark Reference"

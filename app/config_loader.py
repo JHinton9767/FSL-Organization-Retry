@@ -15,6 +15,7 @@ import pandas as pd
 from app.io_utils import ROOT, canonical_headers, normalize_text, read_tabular_file
 from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
+from src.path_config import load_path_config
 
 
 CONFIG_DIR = ROOT / "config"
@@ -28,7 +29,16 @@ MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
 MANUAL_ROSTER_CORRECTIONS_PATH = CONFIG_DIR / "manual_roster_corrections.csv"
 MANUAL_ADJUSTMENTS_PATH = CONFIG_DIR / "manual_adjustments.csv"
 MANUAL_REVIEW_QUEUE_PATH = CONFIG_DIR / "manual_review_queue.csv"
-TRANSCRIPT_TEXT_ROOT = ROOT / "data" / "inbox" / "transcript_text"
+
+
+def _configured_transcript_text_root() -> Path:
+    try:
+        return load_path_config().transcript_text_root
+    except Exception:
+        return ROOT / "data" / "inbox" / "transcript_text"
+
+
+TRANSCRIPT_TEXT_ROOT = _configured_transcript_text_root()
 MANUAL_TRANSCRIPTS_PATH = TRANSCRIPT_TEXT_ROOT / "Transcripts"
 
 

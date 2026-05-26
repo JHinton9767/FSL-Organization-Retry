@@ -57,6 +57,7 @@ from src.build_master_roster import (
     source_context_indicates_new_member,
     should_upgrade_to_new_member_status,
 )
+from src.path_config import load_path_config, validate_path_config
 from src.shared_utils import (
     apply_chapter_mapping_overrides,
     bucket_30_hours,
@@ -412,17 +413,18 @@ def parse_args() -> argparse.Namespace:
             "Authoritative outputs: roster_term, academic_term, master_longitudinal, student_summary, cohort_metrics, qa_checks."
         )
     )
-    parser.add_argument("--roster-root", default=str(DEFAULT_ROSTER_ROOT))
-    parser.add_argument("--roster-inbox", default=str(DEFAULT_ROSTER_INBOX))
-    parser.add_argument("--academic-root", default=str(DEFAULT_ACADEMIC_ROOT))
-    parser.add_argument("--transcript-text-root", default=str(DEFAULT_TRANSCRIPT_TEXT_ROOT))
-    parser.add_argument("--graduation-root", default=str(DEFAULT_GRADUATION_ROOT))
-    parser.add_argument("--reference-data-root", default=str(DEFAULT_REFERENCE_DATA_ROOT))
-    parser.add_argument("--membership-reference-root", default=str(DEFAULT_MEMBERSHIP_REFERENCE_ROOT))
-    parser.add_argument("--gpa-reference-root", default=str(DEFAULT_GPA_REFERENCE_ROOT))
-    parser.add_argument("--gpa-benchmark-root", default=str(DEFAULT_GPA_BENCHMARK_ROOT))
-    parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
-    parser.add_argument("--cache-root", default=str(DEFAULT_CACHE_ROOT))
+    parser.add_argument("--config", default=None, help="Path to config/local_paths.yaml. Defaults to FSL_PATH_CONFIG, then config/local_paths.yaml, then config/example_paths.yaml.")
+    parser.add_argument("--roster-root", default=None)
+    parser.add_argument("--roster-inbox", default=None)
+    parser.add_argument("--academic-root", default=None)
+    parser.add_argument("--transcript-text-root", default=None)
+    parser.add_argument("--graduation-root", default=None)
+    parser.add_argument("--reference-data-root", default=None)
+    parser.add_argument("--membership-reference-root", default=None)
+    parser.add_argument("--gpa-reference-root", default=None)
+    parser.add_argument("--gpa-benchmark-root", default=None)
+    parser.add_argument("--output-root", default=None)
+    parser.add_argument("--cache-root", default=None)
     parser.add_argument("--refresh-source-cache", action="store_true", help="Force raw source files to be re-read instead of using cached normalized source tables.")
     return parser.parse_args()
 
@@ -6796,18 +6798,55 @@ def build_canonical_pipeline(
 
 def main() -> None:
     args = parse_args()
+    path_config = load_path_config(args.config)
+
+    def configured_path(cli_value: Optional[str], configured: Path, fallback: Path) -> Path:
+        selected = Path(cli_value) if cli_value else configured
+        if not selected:
+            selected = fallback
+        return selected.expanduser().resolve()
+
+    selected_roster_root = configured_path(args.roster_root, path_config.rosters_root, DEFAULT_ROSTER_ROOT)
+    selected_roster_inbox = configured_path(args.roster_inbox, path_config.roster_inbox_root, DEFAULT_ROSTER_INBOX)
+    selected_academic_root = configured_path(args.academic_root, path_config.grade_reports_root, DEFAULT_ACADEMIC_ROOT)
+    selected_transcript_text_root = configured_path(args.transcript_text_root, path_config.transcript_text_root, DEFAULT_TRANSCRIPT_TEXT_ROOT)
+    selected_graduation_root = configured_path(args.graduation_root, path_config.graduation_root, DEFAULT_GRADUATION_ROOT)
+    selected_reference_data_root = configured_path(args.reference_data_root, path_config.reference_root, DEFAULT_REFERENCE_DATA_ROOT)
+    selected_membership_reference_root = configured_path(args.membership_reference_root, path_config.membership_reference_root, DEFAULT_MEMBERSHIP_REFERENCE_ROOT)
+    selected_gpa_reference_root = configured_path(args.gpa_reference_root, path_config.gpa_reference_root, DEFAULT_GPA_REFERENCE_ROOT)
+    selected_gpa_benchmark_root = configured_path(args.gpa_benchmark_root, path_config.gpa_benchmark_root, DEFAULT_GPA_BENCHMARK_ROOT)
+    selected_output_root = configured_path(args.output_root, path_config.output_root, DEFAULT_OUTPUT_ROOT)
+    selected_cache_root = configured_path(args.cache_root, path_config.cache_root, DEFAULT_CACHE_ROOT)
+
+    path_issues = validate_path_config(path_config, required_source_keys=["raw_data_root"])
+    missing_selected_required = [
+        f"ERROR: roster_root does not exist: {selected_roster_root}" if not selected_roster_root.exists() else "",
+        f"ERROR: academic_root does not exist: {selected_academic_root}" if not selected_academic_root.exists() else "",
+    ]
+    hard_errors = [issue for issue in path_issues + missing_selected_required if issue.startswith("ERROR")]
+    if hard_errors:
+        message = "\n".join(hard_errors)
+        raise SystemExit(
+            "Raw data folder not found. Create config/local_paths.yaml from "
+            "config/example_paths.yaml and set raw_data_root to the community-drive folder.\n"
+            f"{message}"
+        )
+    for warning in path_issues:
+        if warning.startswith("WARNING"):
+            print(f"Path config warning: {warning}")
+
     result = build_canonical_pipeline(
-        roster_root=Path(args.roster_root).expanduser().resolve(),
-        roster_inbox=Path(args.roster_inbox).expanduser().resolve(),
-        academic_root=Path(args.academic_root).expanduser().resolve(),
-        transcript_text_root=Path(args.transcript_text_root).expanduser().resolve(),
-        graduation_root=Path(args.graduation_root).expanduser().resolve(),
-        reference_data_root=Path(args.reference_data_root).expanduser().resolve(),
-        membership_reference_root=Path(args.membership_reference_root).expanduser().resolve(),
-        gpa_reference_root=Path(args.gpa_reference_root).expanduser().resolve(),
-        gpa_benchmark_root=Path(args.gpa_benchmark_root).expanduser().resolve(),
-        output_root=Path(args.output_root).expanduser().resolve(),
-        cache_root=Path(args.cache_root).expanduser().resolve(),
+        roster_root=selected_roster_root,
+        roster_inbox=selected_roster_inbox,
+        academic_root=selected_academic_root,
+        transcript_text_root=selected_transcript_text_root,
+        graduation_root=selected_graduation_root,
+        reference_data_root=selected_reference_data_root,
+        membership_reference_root=selected_membership_reference_root,
+        gpa_reference_root=selected_gpa_reference_root,
+        gpa_benchmark_root=selected_gpa_benchmark_root,
+        output_root=selected_output_root,
+        cache_root=selected_cache_root,
         refresh_source_cache=args.refresh_source_cache,
     )
     print(f"Canonical outputs written to: {result.output_folder}")
