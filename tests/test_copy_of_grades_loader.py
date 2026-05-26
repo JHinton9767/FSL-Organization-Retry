@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 
 from src.build_canonical_pipeline import (
     ensure_columns,
@@ -107,6 +108,89 @@ def test_load_academic_term_table_parses_multi_section_copy_of_grades_report(tmp
     assert status_by_last_name["Smith"] == "Active"
     assert status_by_last_name["Jones"] == "New Member"
     assert status_by_last_name["Doe"] == "Inactive"
+
+
+def test_load_academic_term_table_uses_column_k_count_notes(tmp_path: Path) -> None:
+    root = tmp_path
+    report_path = root / "Copy of Grades" / "2026" / "Spring 2026" / "IFC" / "Alpha Sigma Phi LOGI.xlsx"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Spring 2026"
+    worksheet.append(
+        [
+            "Last Name",
+            "First Name",
+            "Banner ID",
+            "Email",
+            "Student Status",
+            "Major",
+            "Current Academic Standing",
+            "Term GPA",
+            "Term Passed Hours",
+            "Semester Hours",
+            "TxState Cumulative GPA",
+        ]
+    )
+    worksheet.append(["Count", "Casey", "A05233818", "casey@example.com", "Active", "Finance", "Good Standing", 3.5, 12, 12, 3.4])
+    worksheet["K2"].comment = Comment("Counted", "FSL")
+    worksheet.append(["Skipgpa", "Sam", "A05233819", "sam@example.com", "Active", "Finance", "Good Standing", 4.0, 15, 15, 3.9])
+    worksheet["K3"].comment = Comment("Not Counted", "FSL")
+    worksheet.append(["Notstudent", "Noah", "A05233820", "noah@example.com", "Active", "Finance", "Good Standing", 4.0, 15, 15, "Not a student"])
+    worksheet.append(["Lastsemester", "Lee", "A05233821", "lee@example.com", "Active", "Finance", "Good Standing", 2.5, 9, 9, "Last Semester"])
+    workbook.save(report_path)
+    workbook.close()
+
+    academic, exceptions = load_academic_term_table(root)
+
+    by_last = academic.set_index("last_name")
+    assert "Notstudent" not in set(academic["last_name"])
+    assert by_last.loc["Count", "term_gpa"] == 3.5
+    assert pd.isna(by_last.loc["Skipgpa", "term_gpa"])
+    assert pd.isna(by_last.loc["Skipgpa", "institutional_cumulative_gpa"])
+    assert pd.isna(by_last.loc["Lastsemester", "term_gpa"])
+    assert set(exceptions["exception_type"]) == {"academic_row_gpa_not_counted", "academic_row_excluded_by_count_note"}
+
+
+def test_load_academic_term_table_parses_spring_2026_council_raw_data_layout(tmp_path: Path) -> None:
+    root = tmp_path
+    report_path = root / "Spring 2026" / "IFC Raw Data" / "Alpha Sigma Phi Raw Data.xlsx"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "IFC"
+    worksheet.append(
+        [
+            "Last Name",
+            "First Name",
+            "Banner ID",
+            "Email",
+            "Student Status",
+            "Major",
+            "Current Academic Standing",
+            "Term GPA",
+            "Term Passed Hours",
+            "Semester Hours",
+            "TxState Cumulative GPA",
+        ]
+    )
+    worksheet.append(["Angus", "Alexander", "A05487070", "tcf56@txstate.edu", "AS - Active", "Finance", "GS - Good Standing", 3.2, 12, 12, 3.1])
+    worksheet["K2"].comment = Comment("Counted", "FSL")
+    worksheet.append(["Later", "Lana", "A05487071", "lana@txstate.edu", "AS - Active", "Finance", "GS - Good Standing", 3.8, 15, 15, "Last Semester"])
+    workbook.save(report_path)
+    workbook.close()
+
+    academic, exceptions = load_academic_term_table(root)
+
+    assert set(academic["term_code"]) == {"2026SP"}
+    assert set(academic["term_source_basis"]) == {"council_raw_grade_report"}
+    angus = academic.loc[academic["last_name"].eq("Angus")].iloc[0]
+    later = academic.loc[academic["last_name"].eq("Later")].iloc[0]
+    assert angus["student_id"] == "A05487070"
+    assert angus["academic_standing_bucket"] == "Good Standing"
+    assert angus["term_gpa"] == 3.2
+    assert pd.isna(later["term_gpa"])
+    assert set(exceptions["exception_type"]) == {"academic_row_gpa_not_counted"}
 
 
 def test_dedupe_table_prefers_copy_of_grades_academic_rows() -> None:

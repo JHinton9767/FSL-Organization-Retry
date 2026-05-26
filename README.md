@@ -124,6 +124,123 @@ git rm -r --cached "output"
 Then commit only the code/config-template changes. Raw files stay where they
 are on the shared drive.
 
+## Banner ID Request Batches
+
+Use `scripts/build_banner_id_batches.py` when you need request lists for future
+Academic Reports. The script scans configured source folders and existing
+canonical outputs, finds possible Banner ID columns, keeps only strict Banner
+IDs matching `^A0\d{7}$`, deduplicates them, sorts them, and writes request
+batches of 999 IDs.
+
+Run:
+
+```powershell
+uv run --with-requirements requirements.txt python scripts\build_banner_id_batches.py --config config\local_paths.yaml
+```
+
+Useful options:
+
+```powershell
+uv run --with-requirements requirements.txt python scripts\build_banner_id_batches.py --batch-size 999
+uv run --with-requirements requirements.txt python scripts\build_banner_id_batches.py --include-raw
+uv run --with-requirements requirements.txt python scripts\build_banner_id_batches.py --include-canonical
+uv run --with-requirements requirements.txt python scripts\build_banner_id_batches.py --dry-run --verbose
+```
+
+If neither `--include-raw` nor `--include-canonical` is passed, the script scans
+both configured raw/source roots and canonical output folders. Supported source
+files are `.csv`, `.xlsx`, `.xls`, and `.xlsm`; temporary Excel lock files such
+as `~$file.xlsx` are skipped.
+
+Outputs are written to:
+
+- `data/outgoing/banner_id_batches/banner_ids_master.csv`
+- `data/outgoing/banner_id_batches/requested_banner_ids_master.csv`
+- `data/outgoing/banner_id_batches/banner_ids_batch_001.csv`
+- `data/outgoing/banner_id_batches/banner_ids_batch_001.txt`
+- `data/outgoing/banner_id_batches/rejected_banner_id_values.csv`
+- `data/outgoing/banner_id_batches/banner_id_batch_summary.json`
+- `data/outgoing/banner_id_batches/banner_id_batch_summary.csv`
+- placeholder future comparison files for returned Academic Reports
+- `data/outgoing/banner_id_batches/manual_review_candidates.csv`
+
+Each batch CSV has exactly one column, `Banner ID`; each matching TXT file has
+one Banner ID per line with no header for copy/paste request workflows.
+
+The current files under `data/inbox/academic` are examples of what returned
+Academic Reports may look like later. Blank early academic values are expected:
+they may simply mean a student had not started at the university yet. Future
+report comparison should use `requested_banner_ids_master.csv` to identify
+returned IDs, missing IDs, first academic appearance, last academic appearance,
+and stale unchanged academic records. Stale records should be flagged for review
+and must not be treated as graduation evidence unless a source explicitly says
+the student graduated.
+
+Academic report ingestion also respects the LOGI count-control notes used in
+the grade reports. When column K contains or has an Excel note/comment saying
+`Counted`, the GPA/hour values are treated as valid. When column K says
+`Not Counted` or `Last Semester`, the row is kept for evidence but the
+GPA/hour values are blanked so they do not affect GPA averages or counted GPA
+totals. When column K says `Not a student`, the row is excluded from the
+academic load.
+
+For Spring 2026, the supported incoming grade-report layout is:
+
+```text
+data\inbox\academic\Spring 2026\
+  IFC Raw Data\
+  PHC Raw Data\
+  MGC Raw Data\
+  NPHC Raw Data\
+```
+
+Each council folder can contain the chapter Excel files. Expected columns match
+the LOGI-style raw data export, including `Last Name`, `First Name`, `Banner ID`,
+`Email`, `Student Status`, `Major`, `Current Academic Standing`, `Term GPA`,
+`Term Passed Hours`, and `TxState Cumulative GPA`. These files are treated as
+real grade reports, not as NetID-only raw data.
+
+## Community and Chapter Grade Reports
+
+After adding new LOGI / grade reports and updated rosters, run the canonical
+pipeline first so the report builder can use the normalized `academic_term`,
+`roster_term`, and `master_longitudinal` tables:
+
+```powershell
+uv run --with-requirements requirements.txt python run_canonical_pipeline.py --config config\local_paths.yaml --refresh-source-cache
+```
+
+Then build the grade-report workbooks:
+
+```powershell
+uv run --with-requirements requirements.txt python scripts\build_grade_reports.py --config config\local_paths.yaml --term "Spring 2025"
+```
+
+The report builder writes a community workbook and one chapter workbook per
+chapter to:
+
+```text
+data/outgoing/grade_reports/<term>/
+```
+
+Generated files include:
+
+- `community_grade_report_<term>.xlsx`
+- `community_grade_summary_<term>.csv`
+- `chapter_reports/<chapter>_grade_report_<term>.xlsx`
+
+The community workbook follows the council summary style of the FSL Community
+Grade Report: separate council sheets, new-member GPA/count, initiated-member
+GPA/count, overall chapter GPA/count, and previous-term GPA change where prior
+term data exists. The chapter workbooks follow the chapter report style:
+member detail sections for active members, new members, and members not
+enrolled / GPA not counted, plus a summary block with active/new/chapter
+averages and membership numbers.
+
+These files are generated outputs and are ignored by Git. If PDFs are needed,
+open the workbook in Excel and use `File > Export > Create PDF/XPS` or
+`Save As > PDF`.
+
 ## Faster reruns
 
 `run_canonical_pipeline.py` now keeps a persistent source cache under `output/canonical/_source_cache/`.

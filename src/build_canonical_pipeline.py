@@ -87,6 +87,7 @@ ROSTER_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv", ".pdf"})
 TABULAR_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv"})
 ACADEMIC_SOURCE_EXTENSIONS = SUPPORTED_EXTENSIONS.union({".csv", ".pdf"})
 TEXT_SOURCE_EXTENSIONS = {".txt"}
+ACADEMIC_COUNT_NOTE_COLUMN_INDEX = 10
 
 TERM_RE = re.compile(r"(Winter|Spring|Summer|Fall)\s+(19\d{2}|20\d{2})", re.IGNORECASE)
 TERM_CODE_RE = re.compile(r"^(19\d{2}|20\d{2})(WI|SP|SU|FA)$", re.IGNORECASE)
@@ -794,12 +795,19 @@ def is_copy_of_grades_netid_only_path(path: Path) -> bool:
     return "2025" in normalized_parts and "fall 2025" in normalized_parts and "fsl raw data" in normalized_parts
 
 
+def is_council_raw_grade_report_path(path: Path) -> bool:
+    normalized_parts = [clean_text(part).lower() for part in path.parts]
+    return any(part in {"ifc raw data", "phc raw data", "pc raw data", "mgc raw data", "mcg raw data", "nphc raw data"} for part in normalized_parts)
+
+
 def academic_source_priority(source_file: object, term_source_basis: object = "") -> int:
     context = f"{clean_text(source_file)} {clean_text(term_source_basis)}".lower()
     if "copy of grades" in context:
         if "logi" in context:
             return 40
         return 35
+    if "council_raw_grade_report" in context:
+        return 38
     if "transcript_text" in context:
         return 25
     return 10
@@ -819,10 +827,12 @@ def grade_term_source_basis(path: Path, sheet_name: str, section_context: str = 
         if "logi" in context:
             return "copy_of_grades_logi"
         return "copy_of_grades_section"
+    if is_council_raw_grade_report_path(path):
+        return "council_raw_grade_report"
     return "filename_or_sheet"
 
 
-def academic_table_sources(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]]], List[dict]]:
+def academic_table_sources(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]], Dict[int, str]]], List[dict]]:
     issues: List[dict] = []
     if path.suffix.lower() == ".pdf":
         table_sources, pdf_issues = pdf_table_rows(path)
@@ -836,10 +846,10 @@ def academic_table_sources(path: Path) -> Tuple[List[Tuple[str, List[Tuple[objec
                     "details": issue,
                 }
             )
-        return table_sources, issues
+        return [(sheet_name, table_rows, {}) for sheet_name, table_rows in table_sources], issues
 
     try:
-        workbook = load_workbook(path, data_only=True, read_only=True)
+        workbook = load_workbook(path, data_only=True, read_only=False)
     except Exception as exc:
         issues.append(
             {
@@ -852,13 +862,42 @@ def academic_table_sources(path: Path) -> Tuple[List[Tuple[str, List[Tuple[objec
         )
         return [], issues
 
-    table_sources: List[Tuple[str, List[Tuple[object, ...]]]] = []
+    table_sources: List[Tuple[str, List[Tuple[object, ...]], Dict[int, str]]] = []
     try:
         for ws in workbook.worksheets:
-            table_sources.append((ws.title, [tuple(row) for row in ws.iter_rows(values_only=True)]))
+            table_rows: List[Tuple[object, ...]] = []
+            count_note_map: Dict[int, str] = {}
+            for row_idx, row_cells in enumerate(ws.iter_rows(), start=0):
+                table_rows.append(tuple(cell.value for cell in row_cells))
+                if len(row_cells) > ACADEMIC_COUNT_NOTE_COLUMN_INDEX:
+                    control_cell = row_cells[ACADEMIC_COUNT_NOTE_COLUMN_INDEX]
+                    note_parts = [clean_text(control_cell.value)]
+                    if control_cell.comment is not None:
+                        note_parts.append(clean_text(control_cell.comment.text))
+                    note_text = " ".join(part for part in note_parts if part)
+                    if note_text:
+                        count_note_map[row_idx] = note_text
+            table_sources.append((ws.title, table_rows, count_note_map))
     finally:
         workbook.close()
     return table_sources, issues
+
+
+def academic_count_decision(row: Tuple[object, ...], note_text: object = "") -> Tuple[str, str]:
+    control_value = get_cell(row, ACADEMIC_COUNT_NOTE_COLUMN_INDEX)
+    text = f"{clean_text(control_value)} {clean_text(note_text)}".lower()
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "counted", ""
+    if re.search(r"\bnot\s+a\s+student\b", text):
+        return "skip", "not_a_student"
+    if re.search(r"\blast\s+semester\b", text):
+        return "not_counted", "last_semester"
+    if re.search(r"\bnot\s+counted\b", text):
+        return "not_counted", "not_counted"
+    if re.search(r"\bcounted\b", text):
+        return "counted", "counted"
+    return "counted", ""
 
 
 def extract_academic_rows_from_table_rows(
@@ -866,6 +905,7 @@ def extract_academic_rows_from_table_rows(
     source_label: str,
     sheet_name: str,
     table_rows: List[Tuple[object, ...]],
+    count_note_map: Optional[Dict[int, str]],
     term_code: str,
     term_label: str,
     term_year: object,
@@ -906,7 +946,8 @@ def extract_academic_rows_from_table_rows(
         default_status = grade_section_default_status(path, sheet_name, section_context)
         term_source_basis = grade_term_source_basis(path, sheet_name, section_context)
 
-        for row in table_rows[header_row_idx + 1 : next_header_row_idx]:
+        for absolute_row_idx in range(header_row_idx + 1, next_header_row_idx):
+            row = table_rows[absolute_row_idx]
             if all(not clean_text(cell) for cell in row):
                 break
             first_name = clean_text(get_cell(row, header_map.get("First Name")))
@@ -919,6 +960,38 @@ def extract_academic_rows_from_table_rows(
             banner_raw = clean_text(get_cell(row, header_map.get("Banner ID")))
             explicit_status = clean_text(get_cell(row, header_map.get("Student Status")))
             academic_status = explicit_status or default_status
+            count_decision, count_reason = academic_count_decision(row, (count_note_map or {}).get(absolute_row_idx, ""))
+            if count_decision == "skip":
+                issues.append(
+                    {
+                        "exception_type": "academic_row_excluded_by_count_note",
+                        "source_file": source_label,
+                        "student_id": normalize_banner_id(banner_raw),
+                        "term_code": term_code,
+                        "details": f"Row excluded from academic load because column K indicated {count_reason}.",
+                    }
+                )
+                continue
+            term_gpa = get_cell(row, header_map.get("Term GPA"))
+            institutional_gpa = get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")) or get_cell(row, header_map.get("Overall GPA"))
+            overall_gpa = get_cell(row, header_map.get("Overall Cumulative GPA")) or get_cell(row, header_map.get("Overall GPA")) or get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA"))
+            attempted_hours = get_cell(row, header_map.get("Semester Hours"))
+            earned_hours = get_cell(row, header_map.get("Term Passed Hours"))
+            if count_decision == "not_counted":
+                issues.append(
+                    {
+                        "exception_type": "academic_row_gpa_not_counted",
+                        "source_file": source_label,
+                        "student_id": normalize_banner_id(banner_raw),
+                        "term_code": term_code,
+                        "details": f"GPA/hour values blanked because column K indicated {count_reason}.",
+                    }
+                )
+                term_gpa = ""
+                institutional_gpa = ""
+                overall_gpa = ""
+                attempted_hours = ""
+                earned_hours = ""
 
             rows.append(
                 {
@@ -938,12 +1011,12 @@ def extract_academic_rows_from_table_rows(
                     "term_source_basis": term_source_basis,
                     "academic_status_raw": academic_status,
                     "major": clean_text(get_cell(row, header_map.get("Major"))),
-                    "term_gpa": get_cell(row, header_map.get("Term GPA")),
-                    "institutional_cumulative_gpa": get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")) or get_cell(row, header_map.get("Overall GPA")),
-                    "overall_cumulative_gpa": get_cell(row, header_map.get("Overall Cumulative GPA")) or get_cell(row, header_map.get("Overall GPA")) or get_cell(row, header_map.get("TxState Cumulative GPA")) or get_cell(row, header_map.get("Texas State GPA")),
+                    "term_gpa": term_gpa,
+                    "institutional_cumulative_gpa": institutional_gpa,
+                    "overall_cumulative_gpa": overall_gpa,
                     "transfer_gpa": get_cell(row, header_map.get("Transfer GPA")),
-                    "attempted_hours_term": get_cell(row, header_map.get("Semester Hours")),
-                    "earned_hours_term": get_cell(row, header_map.get("Term Passed Hours")),
+                    "attempted_hours_term": attempted_hours,
+                    "earned_hours_term": earned_hours,
                     "institutional_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
                     "total_cumulative_hours": get_cell(row, header_map.get("Cumulative Hours")),
                     "academic_standing_raw": clean_text(get_cell(row, header_map.get("Current Academic Standing"))),
@@ -2803,7 +2876,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
         table_sources, table_issues = academic_table_sources(path)
         exceptions.extend(table_issues)
-        for sheet_name, table_rows in table_sources:
+        for sheet_name, table_rows, count_note_map in table_sources:
             term_label = parse_grade_term(path, sheet_name)
             if not term_label:
                 continue
@@ -2813,6 +2886,7 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
                 source_label,
                 sheet_name,
                 table_rows,
+                count_note_map,
                 term_code,
                 term_label,
                 term_year,
