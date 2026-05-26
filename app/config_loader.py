@@ -401,6 +401,35 @@ def save_manual_adjustments(frame: pd.DataFrame, path: Optional[Path] = None) ->
     return candidate
 
 
+def append_manual_adjustments(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
+    candidate = path or MANUAL_ADJUSTMENTS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    incoming = normalize_manual_adjustments(frame)
+    if incoming.empty:
+        if not candidate.exists():
+            empty_manual_adjustments().to_csv(candidate, index=False)
+        return {"path": candidate, "incoming_rows": 0, "appended_rows": 0, "skipped_rows": 0}
+
+    existing_ids: set[str] = set()
+    if candidate.exists() and candidate.stat().st_size:
+        try:
+            existing = pd.read_csv(candidate, usecols=["adjustment_id"], dtype=str)
+            existing_ids = set(existing["adjustment_id"].fillna("").astype(str).str.strip())
+        except (ValueError, pd.errors.EmptyDataError):
+            existing_ids = set()
+
+    incoming = incoming.loc[~incoming["adjustment_id"].isin(existing_ids)].copy()
+    skipped = int(len(normalize_manual_adjustments(frame)) - len(incoming))
+    if incoming.empty:
+        if not candidate.exists():
+            empty_manual_adjustments().to_csv(candidate, index=False)
+        return {"path": candidate, "incoming_rows": skipped, "appended_rows": 0, "skipped_rows": skipped}
+
+    write_header = not candidate.exists() or candidate.stat().st_size == 0
+    incoming.to_csv(candidate, mode="a", header=write_header, index=False)
+    return {"path": candidate, "incoming_rows": skipped + len(incoming), "appended_rows": len(incoming), "skipped_rows": skipped}
+
+
 def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
     if {"student_join_term", "organization_join_term"}.issubset(frame.columns):
         missing_student_join = frame["student_join_term"].fillna("").astype(str).str.strip().eq("")
@@ -500,6 +529,40 @@ def save_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = N
     cleaned = normalize_manual_roster_corrections(frame)
     cleaned.to_csv(candidate, index=False)
     return candidate
+
+
+def append_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
+    candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    incoming = normalize_manual_roster_corrections(frame)
+    if incoming.empty:
+        if not candidate.exists():
+            empty_manual_roster_corrections().to_csv(candidate, index=False)
+        return {"path": candidate, "incoming_rows": 0, "appended_rows": 0, "skipped_rows": 0}
+
+    incoming_keys = incoming[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str).agg("\u241f".join, axis=1)
+    existing_keys: set[str] = set()
+    if candidate.exists() and candidate.stat().st_size:
+        try:
+            existing = pd.read_csv(candidate, dtype=str)
+            for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
+                if column not in existing.columns:
+                    existing[column] = ""
+            existing_keys = set(existing[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str).agg("\u241f".join, axis=1))
+        except pd.errors.EmptyDataError:
+            existing_keys = set()
+
+    append_mask = ~incoming_keys.isin(existing_keys)
+    to_append = incoming.loc[append_mask].copy()
+    skipped = int((~append_mask).sum())
+    if to_append.empty:
+        if not candidate.exists():
+            empty_manual_roster_corrections().to_csv(candidate, index=False)
+        return {"path": candidate, "incoming_rows": len(incoming), "appended_rows": 0, "skipped_rows": skipped}
+
+    write_header = not candidate.exists() or candidate.stat().st_size == 0
+    to_append.to_csv(candidate, mode="a", header=write_header, index=False)
+    return {"path": candidate, "incoming_rows": len(incoming), "appended_rows": len(to_append), "skipped_rows": skipped}
 
 
 def load_manual_review_queue(path: Optional[Path] = None) -> pd.DataFrame:

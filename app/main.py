@@ -42,13 +42,14 @@ from app.config_loader import (
     MANUAL_ROSTER_CORRECTIONS_PATH,
     MANUAL_TRANSCRIPTS_PATH,
     REVIEW_STATUS_OPTIONS,
+    append_manual_adjustments,
+    append_manual_roster_corrections,
     build_manual_corrections_package,
     empty_manual_roster_corrections,
     ensure_manual_transcript_files,
     find_manual_correction_conflicts,
     import_manual_corrections_package,
     load_manual_roster_corrections,
-    load_manual_adjustments,
     load_manual_review_queue,
     load_metric_catalog,
     load_settings,
@@ -57,7 +58,6 @@ from app.config_loader import (
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
     save_manual_review_queue,
-    save_manual_adjustments,
     save_manual_roster_corrections,
 )
 from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
@@ -1295,8 +1295,7 @@ def _append_manual_adjustments_from_corrections(corrections: pd.DataFrame, revie
     adjustments = _manual_adjustments_from_corrections(corrections, reviewer=reviewer, reason=reason)
     if adjustments.empty:
         return
-    combined = pd.concat([load_manual_adjustments(), adjustments], ignore_index=True)
-    save_manual_adjustments(combined)
+    append_manual_adjustments(adjustments)
 
 
 def _manual_correction_key_series(frame: pd.DataFrame) -> pd.Series:
@@ -1370,14 +1369,13 @@ def _commit_staged_manual_corrections(assigned_to: str = "") -> dict[str, object
     if staged.empty:
         return {"saved_path": None, "saved_rows": 0, "created_transcripts": []}
 
-    combined = pd.concat([load_manual_roster_corrections(), staged], ignore_index=True)
-    combined = combined.drop_duplicates(subset=MANUAL_ROSTER_CORRECTION_COLUMNS, keep="last").reset_index(drop=True)
-    saved_path = save_manual_roster_corrections(combined)
+    append_result = append_manual_roster_corrections(staged)
+    saved_path = append_result["path"]
     _append_manual_adjustments_from_corrections(staged, reviewer=assigned_to, reason="Manual correction committed from staged changes.")
     created_transcripts = ensure_manual_transcript_files(staged)
     _mark_manual_queue_corrected(staged, assigned_to=assigned_to, note="Manual correction committed from staged changes.")
     _clear_staged_manual_corrections()
-    return {"saved_path": saved_path, "saved_rows": len(staged), "created_transcripts": created_transcripts}
+    return {"saved_path": saved_path, "saved_rows": append_result["appended_rows"], "created_transcripts": created_transcripts}
 
 
 def _manual_save_mode_is_staged() -> bool:
@@ -1389,13 +1387,12 @@ def _save_manual_correction_batch(corrections: pd.DataFrame, assigned_to: str = 
     if cleaned.empty:
         return {"saved_path": None, "saved_rows": 0, "created_transcripts": []}
 
-    combined = pd.concat([load_manual_roster_corrections(), cleaned], ignore_index=True)
-    combined = combined.drop_duplicates(subset=MANUAL_ROSTER_CORRECTION_COLUMNS, keep="last").reset_index(drop=True)
-    saved_path = save_manual_roster_corrections(combined)
+    append_result = append_manual_roster_corrections(cleaned)
+    saved_path = append_result["path"]
     _append_manual_adjustments_from_corrections(cleaned, reviewer=assigned_to, reason=note or "Manual correction batch saved.")
     created_transcripts = ensure_manual_transcript_files(cleaned)
     _mark_manual_queue_corrected(cleaned, assigned_to=assigned_to, note=note)
-    return {"saved_path": saved_path, "saved_rows": len(cleaned), "created_transcripts": created_transcripts}
+    return {"saved_path": saved_path, "saved_rows": append_result["appended_rows"], "created_transcripts": created_transcripts}
 
 
 def _manual_correction_review_tables(bundle) -> dict[str, pd.DataFrame]:

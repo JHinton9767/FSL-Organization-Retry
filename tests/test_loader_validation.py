@@ -4,6 +4,8 @@ import pandas as pd
 import pytest
 
 from app.config_loader import (
+    append_manual_adjustments,
+    append_manual_roster_corrections,
     build_manual_corrections_package,
     find_manual_correction_conflicts,
     import_manual_corrections_package,
@@ -100,6 +102,72 @@ def test_manual_roster_corrections_accept_exclusion_action(tmp_path) -> None:
 
     assert len(loaded) == 1
     assert loaded.loc[0, "exclude_from_roster_calculations"] == "Yes"
+
+
+def test_append_manual_roster_corrections_only_adds_new_rows(tmp_path) -> None:
+    path = tmp_path / "manual_roster_corrections.csv"
+    first = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "last_name": ["Doe"],
+            "first_name": ["Jane"],
+            "organization_join_term": ["Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "final_status_term": ["Fall 2026"],
+            "final_status": ["Inactive"],
+        }
+    )
+    second = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "last_name": ["Doe", "Smith"],
+            "first_name": ["Jane", "John"],
+            "organization_join_term": ["Spring 2026", "Spring 2026"],
+            "organization_name": ["Alpha Sigma Phi", "Lambda Chi Alpha"],
+            "final_status_term": ["Fall 2026", "Fall 2026"],
+            "final_status": ["Inactive", "Unknown"],
+        }
+    )
+
+    first_result = append_manual_roster_corrections(first, path)
+    second_result = append_manual_roster_corrections(second, path)
+    loaded = load_manual_roster_corrections(path)
+
+    assert first_result["appended_rows"] == 1
+    assert second_result["appended_rows"] == 1
+    assert second_result["skipped_rows"] == 1
+    assert loaded["student_id"].tolist() == ["A00000001", "A00000002"]
+
+
+def test_append_manual_adjustments_only_adds_new_rows(tmp_path) -> None:
+    path = tmp_path / "manual_adjustments.csv"
+    first = pd.DataFrame(
+        {
+            "adjustment_id": ["adj-1"],
+            "student_id": ["A00000001"],
+            "normalized_student_id": ["A00000001"],
+            "field_to_override": ["final_outcome_bucket"],
+            "adjusted_value": ["Inactive"],
+        }
+    )
+    second = pd.DataFrame(
+        {
+            "adjustment_id": ["adj-1", "adj-2"],
+            "student_id": ["A00000001", "A00000002"],
+            "normalized_student_id": ["A00000001", "A00000002"],
+            "field_to_override": ["final_outcome_bucket", "final_outcome_bucket"],
+            "adjusted_value": ["Inactive", "Unknown"],
+        }
+    )
+
+    first_result = append_manual_adjustments(first, path)
+    second_result = append_manual_adjustments(second, path)
+    loaded = load_manual_adjustments(path)
+
+    assert first_result["appended_rows"] == 1
+    assert second_result["appended_rows"] == 1
+    assert second_result["skipped_rows"] == 1
+    assert loaded["adjustment_id"].tolist() == ["adj-1", "adj-2"]
 
 
 def test_manual_roster_correction_normalizer_removes_deleted_rows() -> None:
