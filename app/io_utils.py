@@ -3,15 +3,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable
 
 import pandas as pd
 
-from src.shared_utils import coerce_numeric
-
 
 ROOT = Path(__file__).resolve().parent.parent
-SUPPORTED_TABULAR_SUFFIXES = {".csv", ".xlsx", ".xls", ".xlsm", ".parquet"}
 SEASON_CODES = {
     "winter": "WI",
     "spring": "SP",
@@ -81,31 +78,6 @@ def read_tabular_file(path: Path) -> pd.DataFrame:
     raise ValueError(f"Unsupported file type: {path.suffix}")
 
 
-def write_dataframe_cache(frame: pd.DataFrame, csv_path: Path, parquet_path: Optional[Path] = None) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(csv_path, index=False)
-    if parquet_path is not None:
-        frame.to_parquet(parquet_path, index=False)
-
-def bool_from_flag(value: object) -> Optional[bool]:
-    text = normalize_text(value).lower()
-    if not text:
-        return None
-    if text in {"yes", "y", "true", "1", "active", "matched"}:
-        return True
-    if text in {"no", "n", "false", "0", "inactive", "unmatched"}:
-        return False
-    return None
-
-
-def category_from_bool(value: Optional[bool], yes_label: str, no_label: str, unknown_label: str = "Unknown") -> str:
-    if value is True:
-        return yes_label
-    if value is False:
-        return no_label
-    return unknown_label
-
-
 def parse_term(value: object) -> TermParts:
     if pd.isna(value):
         return TermParts(year=None, season="unknown")
@@ -149,27 +121,6 @@ def parse_term_label(value: object) -> dict[str, object]:
         "code": code,
         "sort_value": sort_value,
     }
-
-
-def first_non_empty(*values: object) -> str:
-    for value in values:
-        text = normalize_text(value)
-        if text:
-            return text
-    return ""
-
-
-def first_non_null_numeric(*values: object) -> float | None:
-    for value in values:
-        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-        if pd.notna(numeric):
-            return float(numeric)
-    return None
-
-
-def unique_values(series: pd.Series) -> list[str]:
-    cleaned = series.fillna("").astype(str).str.strip()
-    return sorted(value for value in cleaned.unique().tolist() if value)
 
 
 def canonical_headers(columns: Iterable[object]) -> list[str]:
