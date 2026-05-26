@@ -87,6 +87,19 @@ def test_community_summary_splits_new_and_initiated_members() -> None:
     assert summary.iloc[0]["Previous Term Change"] == 1.0
 
 
+def test_community_summary_defaults_blank_council_and_org_type() -> None:
+    current = _canonical_frame().loc[lambda frame: frame["term_code"].eq("2025SP")].copy()
+    current["status_group"] = ["Active Member", "New Member", "Active Member"]
+    current["term_gpa_num"] = pd.to_numeric(current["term_gpa"], errors="coerce")
+    current["council"] = ""
+    current["org_type"] = pd.NA
+
+    summary = build_community_summary(current, pd.DataFrame())
+
+    assert summary.iloc[0]["Council"] == "Unknown"
+    assert summary.iloc[0]["Organization Type"] == "Organization"
+
+
 def test_build_grade_reports_writes_community_and_chapter_workbooks(tmp_path: Path) -> None:
     canonical = tmp_path / "canonical"
     canonical.mkdir()

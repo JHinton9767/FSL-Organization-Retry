@@ -245,6 +245,14 @@ def _count_gpa(values: pd.Series) -> object:
     return count if count else "N/A"
 
 
+def _first_nonblank(group: pd.DataFrame, column: str, default: str) -> str:
+    if column not in group.columns:
+        return default
+    values = group[column].dropna().astype(str).str.strip()
+    values = values.loc[values.ne("")]
+    return values.iloc[0] if not values.empty else default
+
+
 def _chapter_community_row(chapter: str, group: pd.DataFrame, previous: pd.DataFrame, council: str, org_type: str) -> dict[str, object]:
     gpa_rows = group.loc[group["term_gpa_num"].notna()].copy()
     new_rows = gpa_rows.loc[gpa_rows["status_group"].eq("New Member")]
@@ -278,8 +286,8 @@ def build_community_summary(frame: pd.DataFrame, previous_frame: pd.DataFrame) -
     rows: List[dict[str, object]] = []
     for chapter, group in frame.groupby("chapter", dropna=False):
         chapter_name = str(chapter or "").strip() or "Unknown"
-        council = str(group.get("council", pd.Series(["Unknown"])).dropna().astype(str).replace("", "Unknown").iloc[0])
-        org_type = str(group.get("org_type", pd.Series(["Organization"])).dropna().astype(str).replace("", "Organization").iloc[0])
+        council = _first_nonblank(group, "council", "Unknown")
+        org_type = _first_nonblank(group, "org_type", "Organization")
         rows.append(_chapter_community_row(chapter_name, group, previous_frame, council, org_type))
     return pd.DataFrame(rows, columns=COMMUNITY_COLUMNS).sort_values(["Council", "Organization Type", "Chapter"]).reset_index(drop=True)
 
