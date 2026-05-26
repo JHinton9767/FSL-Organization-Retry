@@ -150,6 +150,40 @@ def _yes_mask(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str).str.strip().str.lower().isin({"yes", "true", "1", "y"})
 
 
+def _term_frame(frame: pd.DataFrame, term_code: str) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    if term_code and "term_code" in frame.columns:
+        return frame.loc[frame["term_code"].fillna("").astype(str).str.upper().eq(term_code)].copy()
+    return frame.copy()
+
+
+def _ensure_columns(frame: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = ""
+    return result
+
+
+def _student_key(series: pd.Series) -> pd.Series:
+    return series.fillna("").astype(str).str.strip().str.upper()
+
+
+def _dedupe_academic_for_report(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "student_id" not in frame.columns:
+        return pd.DataFrame()
+    working = frame.copy()
+    working["_student_key"] = _student_key(working["student_id"])
+    working = working.loc[working["_student_key"].ne("")]
+    if working.empty:
+        return working
+    working["_has_gpa"] = _numeric(working.get("term_gpa", pd.Series("", index=working.index))).notna().astype(int)
+    working["_has_hours"] = _numeric(working.get("attempted_hours_term", pd.Series("", index=working.index))).notna().astype(int)
+    working = working.sort_values(["_student_key", "_has_gpa", "_has_hours"], ascending=[True, False, False])
+    return working.drop_duplicates(subset=["_student_key"], keep="first").drop(columns=["_has_gpa", "_has_hours"], errors="ignore")
+
+
 def _status_group(row: pd.Series) -> str:
     text = " ".join(
         str(row.get(column, "") or "")
@@ -165,10 +199,81 @@ def _status_group(row: pd.Series) -> str:
     return "Active Member"
 
 
-def _load_grade_source(canonical_dir: Path, term_code: str) -> pd.DataFrame:
-    master = _read_table(canonical_dir, "master_longitudinal")
-    academic = _read_table(canonical_dir, "academic_term")
-    roster = _read_table(canonical_dir, "roster_term")
+def _roster_logi_report_frame(roster: pd.DataFrame, academic: pd.DataFrame, term_code: str) -> pd.DataFrame:
+    roster_term = _term_frame(roster, term_code)
+    academic_term = _term_frame(academic, term_code)
+    if roster_term.empty or academic_term.empty or "student_id" not in roster_term.columns or "student_id" not in academic_term.columns:
+        return pd.DataFrame()
+
+    roster_columns = [
+        "student_id",
+        "first_name",
+        "last_name",
+        "chapter",
+        "term_code",
+        "term_label",
+        "term_year",
+        "term_season",
+        "org_status_bucket",
+        "org_status_raw",
+        "new_member_flag",
+    ]
+    academic_columns = [
+        "student_id",
+        "first_name",
+        "last_name",
+        "email",
+        "major",
+        "term_code",
+        "term_label",
+        "term_year",
+        "term_season",
+        "academic_status_raw",
+        "term_gpa",
+        "institutional_cumulative_gpa",
+        "overall_cumulative_gpa",
+        "attempted_hours_term",
+        "source_file",
+        "source_sheet",
+    ]
+    roster_term = _ensure_columns(roster_term, roster_columns)
+    academic_term = _ensure_columns(academic_term, academic_columns)
+    roster_term = roster_term[roster_columns].copy()
+    academic_term = _dedupe_academic_for_report(academic_term[academic_columns].copy())
+    if academic_term.empty:
+        return pd.DataFrame()
+
+    roster_term["_student_key"] = _student_key(roster_term["student_id"])
+    roster_term = roster_term.loc[roster_term["_student_key"].ne("")]
+    if roster_term.empty:
+        return pd.DataFrame()
+    roster_term = roster_term.drop_duplicates(subset=["_student_key", "chapter"], keep="first")
+
+    merged = roster_term.merge(academic_term, on="_student_key", how="left", suffixes=("_roster", "_academic"))
+    result = pd.DataFrame(index=merged.index)
+    result["student_id"] = merged["student_id_roster"].where(merged["student_id_roster"].fillna("").astype(str).str.strip().ne(""), merged["student_id_academic"])
+    for column in ["first_name", "last_name", "term_code", "term_label", "term_year", "term_season"]:
+        roster_col = f"{column}_roster"
+        academic_col = f"{column}_academic"
+        result[column] = merged[academic_col].where(merged[academic_col].fillna("").astype(str).str.strip().ne(""), merged[roster_col])
+    for column in [
+        "email",
+        "major",
+        "academic_status_raw",
+        "term_gpa",
+        "institutional_cumulative_gpa",
+        "overall_cumulative_gpa",
+        "attempted_hours_term",
+        "source_file",
+        "source_sheet",
+    ]:
+        result[column] = merged.get(column, "")
+    for column in ["chapter", "org_status_bucket", "org_status_raw", "new_member_flag"]:
+        result[column] = merged[column]
+    return result
+
+
+def _legacy_grade_source(canonical_dir: Path, term_code: str, master: pd.DataFrame, academic: pd.DataFrame, roster: pd.DataFrame) -> pd.DataFrame:
 
     if term_code and not master.empty and "term_code" in master.columns:
         frame = master.loc[master["term_code"].fillna("").astype(str).str.upper().eq(term_code)].copy()
@@ -188,6 +293,17 @@ def _load_grade_source(canonical_dir: Path, term_code: str) -> pd.DataFrame:
                         frame[column] = frame[roster_col]
                     else:
                         frame[column] = frame[column].where(frame[column].fillna("").astype(str).str.strip().ne(""), frame[roster_col])
+    return frame
+
+
+def _load_grade_source(canonical_dir: Path, term_code: str) -> pd.DataFrame:
+    master = _read_table(canonical_dir, "master_longitudinal")
+    academic = _read_table(canonical_dir, "academic_term")
+    roster = _read_table(canonical_dir, "roster_term")
+
+    frame = _roster_logi_report_frame(roster, academic, term_code)
+    if frame.empty:
+        frame = _legacy_grade_source(canonical_dir, term_code, master, academic, roster)
 
     required = [
         "student_id",
@@ -204,9 +320,7 @@ def _load_grade_source(canonical_dir: Path, term_code: str) -> pd.DataFrame:
         "academic_status_raw",
         "new_member_flag",
     ]
-    for column in required:
-        if column not in frame.columns:
-            frame[column] = ""
+    frame = _ensure_columns(frame, required)
     if not frame.empty:
         frame["status_group"] = frame.apply(_status_group, axis=1)
         frame["term_gpa_num"] = _numeric(frame["term_gpa"])

@@ -892,9 +892,9 @@ def academic_count_decision(row: Tuple[object, ...], note_text: object = "") -> 
     if re.search(r"\bnot\s+a\s+student\b", text):
         return "skip", "not_a_student"
     if re.search(r"\blast\s+semester\b", text):
-        return "not_counted", "last_semester"
+        return "counted", "last_semester_ignored"
     if re.search(r"\bnot\s+counted\b", text):
-        return "not_counted", "not_counted"
+        return "counted", "not_counted_ignored"
     if re.search(r"\bcounted\b", text):
         return "counted", "counted"
     return "counted", ""

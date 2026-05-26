@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import load_workbook
 
-from scripts.build_grade_reports import build_community_summary, build_grade_reports
+from scripts.build_grade_reports import _load_grade_source, build_community_summary, build_grade_reports
 
 
 def _canonical_frame() -> pd.DataFrame:
@@ -98,6 +98,71 @@ def test_community_summary_defaults_blank_council_and_org_type() -> None:
 
     assert summary.iloc[0]["Council"] == "Unknown"
     assert summary.iloc[0]["Organization Type"] == "Organization"
+
+
+def test_grade_source_uses_roster_status_and_logi_academic_values(tmp_path: Path) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "student_id": "A00000001",
+                "first_name": "Amy",
+                "last_name": "Alpha",
+                "term_code": "2025SP",
+                "chapter": "Alpha Sigma Phi",
+                "org_status_bucket": "Active",
+                "org_status_raw": "Active",
+                "new_member_flag": "No",
+            },
+            {
+                "student_id": "A00000002",
+                "first_name": "Nina",
+                "last_name": "New",
+                "term_code": "2025SP",
+                "chapter": "Alpha Sigma Phi",
+                "org_status_bucket": "Active",
+                "org_status_raw": "Active",
+                "new_member_flag": "Yes",
+            },
+        ]
+    ).to_csv(canonical / "roster_term.csv", index=False)
+    pd.DataFrame(
+        [
+            {
+                "student_id": "A00000001",
+                "first_name": "Amy",
+                "last_name": "Alpha",
+                "term_code": "2025SP",
+                "academic_status_raw": "AS - Active",
+                "major": "Biology",
+                "term_gpa": 3.0,
+                "institutional_cumulative_gpa": 3.1,
+                "overall_cumulative_gpa": 3.1,
+                "attempted_hours_term": 12,
+            },
+            {
+                "student_id": "A00000002",
+                "first_name": "Nina",
+                "last_name": "New",
+                "term_code": "2025SP",
+                "academic_status_raw": "AS - Active",
+                "major": "History",
+                "term_gpa": 4.0,
+                "institutional_cumulative_gpa": 3.8,
+                "overall_cumulative_gpa": 3.8,
+                "attempted_hours_term": 15,
+            },
+        ]
+    ).to_csv(canonical / "academic_term.csv", index=False)
+
+    frame = _load_grade_source(canonical, "2025SP")
+
+    by_id = frame.set_index("student_id")
+    assert by_id.loc["A00000001", "status_group"] == "Active Member"
+    assert by_id.loc["A00000002", "status_group"] == "New Member"
+    assert by_id.loc["A00000002", "term_gpa_num"] == 4.0
+    assert by_id.loc["A00000002", "hours_num"] == 15
 
 
 def test_build_grade_reports_writes_community_and_chapter_workbooks(tmp_path: Path) -> None:

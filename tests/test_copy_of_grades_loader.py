@@ -146,10 +146,10 @@ def test_load_academic_term_table_uses_column_k_count_notes(tmp_path: Path) -> N
     by_last = academic.set_index("last_name")
     assert "Notstudent" not in set(academic["last_name"])
     assert by_last.loc["Count", "term_gpa"] == 3.5
-    assert pd.isna(by_last.loc["Skipgpa", "term_gpa"])
-    assert pd.isna(by_last.loc["Skipgpa", "institutional_cumulative_gpa"])
-    assert pd.isna(by_last.loc["Lastsemester", "term_gpa"])
-    assert set(exceptions["exception_type"]) == {"academic_row_gpa_not_counted", "academic_row_excluded_by_count_note"}
+    assert by_last.loc["Skipgpa", "term_gpa"] == 4.0
+    assert by_last.loc["Skipgpa", "institutional_cumulative_gpa"] == 3.9
+    assert by_last.loc["Lastsemester", "term_gpa"] == 2.5
+    assert set(exceptions["exception_type"]) == {"academic_row_excluded_by_count_note"}
 
 
 def test_load_academic_term_table_parses_spring_2026_council_raw_data_layout(tmp_path: Path) -> None:
@@ -189,8 +189,8 @@ def test_load_academic_term_table_parses_spring_2026_council_raw_data_layout(tmp
     assert angus["student_id"] == "A05487070"
     assert angus["academic_standing_bucket"] == "Good Standing"
     assert angus["term_gpa"] == 3.2
-    assert pd.isna(later["term_gpa"])
-    assert set(exceptions["exception_type"]) == {"academic_row_gpa_not_counted"}
+    assert later["term_gpa"] == 3.8
+    assert exceptions.empty
 
 
 def test_dedupe_table_prefers_copy_of_grades_academic_rows() -> None:
