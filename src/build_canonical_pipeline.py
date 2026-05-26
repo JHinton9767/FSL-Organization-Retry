@@ -22,9 +22,12 @@ from app.config_loader import (
     APP_SETTINGS_PATH,
     DEFAULT_CHAPTER_GROUPS_PATH,
     EXAMPLE_CHAPTER_GROUPS_PATH,
+    MANUAL_ADJUSTMENT_COLUMNS,
     MANUAL_CHAPTER_ASSIGNMENTS_PATH,
+    MANUAL_ADJUSTMENTS_PATH,
     MANUAL_ROSTER_CORRECTIONS_PATH,
     load_chapter_mapping,
+    load_manual_adjustments,
     load_manual_chapter_assignments,
     load_manual_roster_corrections,
     load_settings,
@@ -163,6 +166,152 @@ GRADUATION_COLUMNS = [
 ]
 
 QA_COLUMNS = ["Check Group", "Check", "Status", "Value", "Notes"]
+
+OUTCOME_GRADUATED_CONFIRMED = "Graduated Confirmed"
+OUTCOME_STILL_ACTIVE = "Still Active / Currently Active"
+OUTCOME_RETAINED_PERSISTED = "Retained / Persisted"
+OUTCOME_NOT_RETAINED = "Not Retained / Disappeared"
+OUTCOME_TRANSFERRED_LEFT = "Transferred / Left Institution"
+OUTCOME_INACTIVE_EXIT = "Inactive / Resigned / Suspended / Revoked"
+OUTCOME_UNKNOWN_REVIEW = "Unknown / Manual Review Required"
+OUTCOME_SOURCE_PROBLEM = "Roster Problem / Source Problem"
+
+FINAL_OUTCOME_BUCKETS = [
+    OUTCOME_GRADUATED_CONFIRMED,
+    OUTCOME_STILL_ACTIVE,
+    OUTCOME_RETAINED_PERSISTED,
+    OUTCOME_NOT_RETAINED,
+    OUTCOME_TRANSFERRED_LEFT,
+    OUTCOME_INACTIVE_EXIT,
+    OUTCOME_UNKNOWN_REVIEW,
+    OUTCOME_SOURCE_PROBLEM,
+]
+
+STUDENT_SOURCE_APPEARANCE_COLUMNS = [
+    "student_id",
+    "normalized_student_id",
+    "source_file",
+    "source_sheet",
+    "source_type",
+    "term",
+    "term_code",
+    "academic_year",
+    "organization",
+    "chapter",
+    "raw_status",
+    "normalized_status",
+    "name_raw",
+    "email_raw",
+    "banner_id_raw",
+    "row_number",
+    "parsing_warnings",
+    "input_group_id",
+]
+
+STUDENT_LONGITUDINAL_TRACKING_COLUMNS = [
+    "student_id",
+    "normalized_student_id",
+    "name_keys_seen",
+    "emails_seen",
+    "organizations_seen",
+    "chapters_seen",
+    "terms_seen",
+    "first_seen_term",
+    "last_seen_term",
+    "first_roster_term",
+    "last_roster_term",
+    "first_grade_report_term",
+    "last_grade_report_term",
+    "first_academic_term",
+    "last_academic_term",
+    "source_files_seen",
+    "source_sheets_seen",
+    "statuses_seen",
+    "latest_known_status",
+    "latest_known_org",
+    "latest_known_chapter",
+    "explicit_graduation_evidence",
+    "graduation_evidence_source",
+    "graduation_term",
+    "final_outcome_bucket",
+    "outcome_confidence",
+    "ambiguity_flags",
+    "manual_review_required",
+    "manual_review_reason",
+    "org_entry_cohort",
+    "manual_adjustments_applied",
+]
+
+INPUT_GROUP_OUTCOME_BUCKET_COLUMNS = [
+    "input_group_id",
+    "source_file",
+    "source_sheet",
+    "source_type",
+    "term",
+    "academic_year",
+    "organization",
+    "chapter",
+    "cohort_definition",
+    "unique_student_count",
+    "confirmed_graduated_count",
+    "still_active_count",
+    "retained_persisted_count",
+    "not_retained_disappeared_count",
+    "inactive_resigned_suspended_revoked_count",
+    "transferred_left_count",
+    "unknown_manual_review_count",
+    "source_problem_count",
+    "graduation_rate_conservative",
+    "graduation_rate_resolved_only",
+    "retention_rate",
+    "denominator_conservative",
+    "denominator_resolved_only",
+    "manual_review_required",
+    "warnings",
+]
+
+GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS = [
+    "review_id",
+    "review_type",
+    "priority",
+    "student_id",
+    "normalized_student_id",
+    "input_group_id",
+    "source_file",
+    "source_sheet",
+    "organization",
+    "chapter",
+    "term",
+    "issue_type",
+    "issue_description",
+    "evidence_summary",
+    "suggested_action",
+    "current_outcome_bucket",
+    "manual_adjustment_status",
+    "manual_adjusted_outcome",
+    "manual_adjusted_org",
+    "manual_adjusted_term",
+    "reviewer_notes",
+    "reviewed_by",
+    "reviewed_at",
+]
+
+YEARLY_UNIQUE_ID_CHECKLIST_COLUMNS = [
+    "academic_year",
+    "cohort_year",
+    "term",
+    "organization",
+    "chapter",
+    "input_group_id",
+    "student_id",
+    "normalized_student_id",
+    "final_outcome_bucket",
+    "manual_review_required",
+    "manual_review_reason",
+    "source_files_seen",
+    "last_seen_term",
+    "graduation_evidence_source",
+]
 
 GRADE_COLUMN_ALIASES = {
     "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid", "netid", "net id"},
@@ -4030,6 +4179,744 @@ def build_graduation_maps(graduation: pd.DataFrame) -> Tuple[Dict[str, Tuple[str
     return id_map, name_map
 
 
+def _clean_display(value: object) -> str:
+    text = clean_text(value)
+    return "" if text.lower() in {"", "nan", "none", "nat", "<na>"} else text
+
+
+def _unique_join(values: Sequence[object]) -> str:
+    cleaned = sorted({_clean_display(value) for value in values if _clean_display(value)})
+    return " | ".join(cleaned)
+
+
+def _first_non_blank(values: Sequence[object]) -> str:
+    for value in values:
+        text = _clean_display(value)
+        if text:
+            return text
+    return ""
+
+
+def _last_non_blank(values: Sequence[object]) -> str:
+    for value in reversed(list(values)):
+        text = _clean_display(value)
+        if text:
+            return text
+    return ""
+
+
+def _input_group_id(source_file: object, source_sheet: object, source_type: object, term_code: object, chapter: object) -> str:
+    parts = [_clean_display(source_type), _clean_display(source_file), _clean_display(source_sheet), _clean_display(term_code), _clean_display(chapter)]
+    raw = "||".join(parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _appearance_name(row: pd.Series) -> str:
+    first = _clean_display(row.get("first_name", row.get("First Name", "")))
+    last = _clean_display(row.get("last_name", row.get("Last Name", "")))
+    return f"{first} {last}".strip()
+
+
+def _appearance_row(
+    *,
+    student_id: object,
+    source_file: object,
+    source_sheet: object = "",
+    source_type: str,
+    term_code: object = "",
+    term: object = "",
+    academic_year: object = "",
+    organization: object = "",
+    chapter: object = "",
+    raw_status: object = "",
+    normalized_status: object = "",
+    name_raw: object = "",
+    email_raw: object = "",
+    banner_id_raw: object = "",
+    row_number: object = "",
+    parsing_warnings: object = "",
+) -> dict:
+    normalized_student_id = normalize_banner_id(student_id)
+    parsed_term, parsed_label, parsed_year, _ = parse_term_code(term_code or term)
+    final_term_code = _clean_display(parsed_term or term_code)
+    final_term = _clean_display(term or parsed_label or final_term_code)
+    final_year = _clean_display(academic_year if _clean_display(academic_year) else parsed_year)
+    final_chapter = _clean_display(chapter or organization)
+    return {
+        "student_id": _clean_display(student_id),
+        "normalized_student_id": normalized_student_id,
+        "source_file": _clean_display(source_file),
+        "source_sheet": _clean_display(source_sheet),
+        "source_type": source_type,
+        "term": final_term,
+        "term_code": final_term_code,
+        "academic_year": final_year,
+        "organization": _clean_display(organization or final_chapter),
+        "chapter": final_chapter,
+        "raw_status": _clean_display(raw_status),
+        "normalized_status": _clean_display(normalized_status),
+        "name_raw": _clean_display(name_raw),
+        "email_raw": _clean_display(email_raw).lower(),
+        "banner_id_raw": _clean_display(banner_id_raw or student_id),
+        "row_number": _clean_display(row_number),
+        "parsing_warnings": _clean_display(parsing_warnings),
+        "input_group_id": _input_group_id(source_file, source_sheet, source_type, final_term_code, final_chapter),
+    }
+
+
+def build_student_source_appearances(
+    roster: pd.DataFrame,
+    academic: pd.DataFrame,
+    graduation: pd.DataFrame,
+    snapshot: pd.DataFrame,
+    transcript_terms: pd.DataFrame,
+) -> pd.DataFrame:
+    rows: List[dict] = []
+
+    if not roster.empty:
+        for row_number, row in roster.reset_index(drop=True).iterrows():
+            rows.append(
+                _appearance_row(
+                    student_id=row.get("student_id", ""),
+                    source_file=row.get("source_file", ""),
+                    source_sheet=row.get("source_sheet", ""),
+                    source_type="roster",
+                    term_code=row.get("term_code", ""),
+                    term=row.get("term_label", ""),
+                    academic_year=row.get("term_year", ""),
+                    organization=row.get("chapter", ""),
+                    chapter=row.get("chapter", ""),
+                    raw_status=row.get("org_status_raw", ""),
+                    normalized_status=row.get("org_status_bucket", ""),
+                    name_raw=_appearance_name(row),
+                    email_raw=row.get("email", ""),
+                    banner_id_raw=row.get("student_id_raw", row.get("student_id", "")),
+                    row_number=row_number + 1,
+                    parsing_warnings=row.get("chapter_assignment_notes", ""),
+                )
+            )
+
+    if not academic.empty:
+        for row_number, row in academic.reset_index(drop=True).iterrows():
+            rows.append(
+                _appearance_row(
+                    student_id=row.get("student_id", ""),
+                    source_file=row.get("source_file", ""),
+                    source_sheet=row.get("source_sheet", ""),
+                    source_type="grade_report",
+                    term_code=row.get("term_code", ""),
+                    term=row.get("term_label", ""),
+                    academic_year=row.get("term_year", ""),
+                    raw_status=row.get("academic_status_raw", row.get("academic_standing_raw", "")),
+                    normalized_status=row.get("academic_standing_bucket", ""),
+                    name_raw=_appearance_name(row),
+                    email_raw=row.get("email", ""),
+                    banner_id_raw=row.get("student_id_raw", row.get("student_id", "")),
+                    row_number=row_number + 1,
+                )
+            )
+
+    if not graduation.empty:
+        for row_number, row in graduation.reset_index(drop=True).iterrows():
+            rows.append(
+                _appearance_row(
+                    student_id=row.get("Student ID", ""),
+                    source_file=row.get("Graduation Source File", ""),
+                    source_sheet="Graduation",
+                    source_type="graduation",
+                    term=row.get("Graduation Term", ""),
+                    raw_status=row.get("Outcome", "Graduated"),
+                    normalized_status=OUTCOME_GRADUATED_CONFIRMED,
+                    name_raw=f"{_clean_display(row.get('First Name', ''))} {_clean_display(row.get('Last Name', ''))}".strip(),
+                    banner_id_raw=row.get("Student ID", ""),
+                    row_number=row_number + 1,
+                )
+            )
+
+    if not snapshot.empty and "Student ID" in snapshot.columns:
+        for row_number, row in snapshot.reset_index(drop=True).iterrows():
+            rows.append(
+                _appearance_row(
+                    student_id=row.get("Student ID", ""),
+                    source_file=row.get("Snapshot Source File", ""),
+                    source_sheet="Snapshot",
+                    source_type="snapshot",
+                    raw_status=row.get("Student Status", ""),
+                    normalized_status=row.get("Student Status", ""),
+                    name_raw=f"{_clean_display(row.get('First Name', ''))} {_clean_display(row.get('Last Name', ''))}".strip(),
+                    banner_id_raw=row.get("Student ID", ""),
+                    row_number=row_number + 1,
+                )
+            )
+
+    if transcript_terms is not None and not transcript_terms.empty:
+        for row_number, row in transcript_terms.reset_index(drop=True).iterrows():
+            status = row.get("summary_graduation_signal_text", "") or row.get("summary_academic_standing", "")
+            normalized_status = OUTCOME_GRADUATED_CONFIRMED if has_confirmed_graduation_text(status) else row.get("summary_academic_standing", "")
+            rows.append(
+                _appearance_row(
+                    student_id=row.get("student_id", ""),
+                    source_file=row.get("source_file", ""),
+                    source_sheet="Transcript Text",
+                    source_type="transcript_text",
+                    term_code=row.get("term_code", ""),
+                    term=row.get("term_label", ""),
+                    academic_year=row.get("term_year", ""),
+                    raw_status=status,
+                    normalized_status=normalized_status,
+                    name_raw=f"{_clean_display(row.get('first_name', ''))} {_clean_display(row.get('last_name', ''))}".strip(),
+                    banner_id_raw=row.get("student_id_raw", row.get("student_id", "")),
+                    row_number=row_number + 1,
+                )
+            )
+
+    appearances = ensure_columns(pd.DataFrame(rows), STUDENT_SOURCE_APPEARANCE_COLUMNS)
+    if appearances.empty:
+        return appearances
+    appearances["normalized_student_id"] = appearances["normalized_student_id"].where(
+        appearances["normalized_student_id"].fillna("").astype(str).str.strip().ne(""),
+        "missing_id::" + appearances.index.astype(str),
+    )
+    return appearances.reset_index(drop=True)
+
+
+def manual_roster_corrections_to_manual_adjustments(corrections: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "adjustment_id",
+        "student_id",
+        "normalized_student_id",
+        "adjustment_type",
+        "field_to_override",
+        "original_value",
+        "adjusted_value",
+        "reason",
+        "evidence",
+        "source_file",
+        "source_sheet",
+        "reviewer",
+        "created_at",
+        "active",
+    ]
+    if corrections is None or corrections.empty:
+        return pd.DataFrame(columns=columns)
+    rows: List[dict] = []
+    for idx, correction in corrections.reset_index(drop=True).iterrows():
+        student_id = normalize_banner_id(correction.get("student_id", ""))
+        source_file = str(MANUAL_ROSTER_CORRECTIONS_PATH)
+        base = {
+            "student_id": student_id,
+            "normalized_student_id": student_id,
+            "reason": "Converted from config/manual_roster_corrections.csv for outcome tracking compatibility.",
+            "evidence": "Manual roster correction",
+            "source_file": source_file,
+            "source_sheet": "Manual Corrections",
+            "reviewer": "",
+            "created_at": "",
+            "active": "Yes",
+        }
+        final_status = _clean_display(correction.get("final_status", ""))
+        if final_status:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_id": f"legacy_outcome_{idx}_{student_id}",
+                    "adjustment_type": "outcome_override",
+                    "field_to_override": "final_outcome_bucket",
+                    "original_value": "",
+                    "adjusted_value": final_status,
+                }
+            )
+        organization = _clean_display(correction.get("organization_name", ""))
+        if organization:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_id": f"legacy_chapter_{idx}_{student_id}",
+                    "adjustment_type": "chapter_override",
+                    "field_to_override": "latest_known_chapter",
+                    "original_value": "",
+                    "adjusted_value": organization,
+                }
+            )
+    return ensure_columns(pd.DataFrame(rows), columns)
+
+
+def _manual_active_mask(frame: pd.DataFrame) -> pd.Series:
+    if frame.empty:
+        return pd.Series(False, index=frame.index, dtype="bool")
+    return ~frame.get("active", pd.Series("Yes", index=frame.index)).fillna("Yes").astype(str).str.strip().str.lower().isin({"no", "n", "false", "0", "inactive"})
+
+
+def _outcome_bucket_from_manual_value(value: object) -> str:
+    text = _clean_display(value)
+    upper = text.upper()
+    if not text:
+        return ""
+    if has_confirmed_graduation_text(text) or upper in {"G", "GRAD", "GRADUATED", OUTCOME_GRADUATED_CONFIRMED.upper()}:
+        return OUTCOME_GRADUATED_CONFIRMED
+    if "TRANSFER" in upper or "LEFT INSTITUTION" in upper:
+        return OUTCOME_TRANSFERRED_LEFT
+    if any(token in upper for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW"]):
+        return OUTCOME_INACTIVE_EXIT
+    if "ACTIVE" in upper or "CURRENT" in upper or "NEW MEMBER" in upper:
+        return OUTCOME_STILL_ACTIVE
+    if "RETAIN" in upper or "PERSIST" in upper:
+        return OUTCOME_RETAINED_PERSISTED
+    if "DISAPPEAR" in upper or "NOT RETAIN" in upper:
+        return OUTCOME_NOT_RETAINED
+    if "SOURCE" in upper or "ROSTER PROBLEM" in upper:
+        return OUTCOME_SOURCE_PROBLEM
+    if "UNKNOWN" in upper or "REVIEW" in upper:
+        return OUTCOME_UNKNOWN_REVIEW
+    return text if text in FINAL_OUTCOME_BUCKETS else OUTCOME_UNKNOWN_REVIEW
+
+
+def classify_student_outcome(row: pd.Series) -> Tuple[str, str, str, str]:
+    flags: List[str] = []
+    manual_review_reasons: List[str] = []
+    statuses = _clean_display(row.get("statuses_seen", "")).upper()
+    latest_status = _clean_display(row.get("latest_known_status", "")).upper()
+    explicit_grad = _clean_display(row.get("explicit_graduation_evidence", "")).lower() == "yes"
+    has_current_active = _clean_display(row.get("current_active_flag", "")).lower() == "yes"
+    has_roster = bool(_clean_display(row.get("first_roster_term", "")))
+    first_roster_sort = sort_term_code(row.get("first_roster_term_code", ""))
+    last_grade_sort = sort_term_code(row.get("last_grade_report_term_code", ""))
+    latest_status_text = " ".join([statuses, latest_status])
+
+    if _clean_display(row.get("missing_id_flag", "")).lower() == "yes":
+        flags.append("missing_or_malformed_student_id")
+        manual_review_reasons.append("Student/source row has missing or malformed student ID.")
+        return OUTCOME_SOURCE_PROBLEM, "low", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if _clean_display(row.get("manual_outcome_bucket", "")):
+        bucket = _clean_display(row.get("manual_outcome_bucket", ""))
+        return bucket, "manual", "manual_adjustment_applied", ""
+
+    if explicit_grad:
+        return OUTCOME_GRADUATED_CONFIRMED, "high", "", ""
+
+    if "GRAD" in latest_status_text:
+        flags.append("graduation_claim_without_confirmed_evidence")
+        manual_review_reasons.append("A source appears to claim graduation, but no explicit accepted graduation evidence was present.")
+
+    if has_current_active:
+        return OUTCOME_STILL_ACTIVE, "high", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if "TRANSFER" in latest_status_text:
+        return OUTCOME_TRANSFERRED_LEFT, "high", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if any(token in latest_status_text for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL"]):
+        return OUTCOME_INACTIVE_EXIT, "high", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if has_roster and last_grade_sort < 999999 and first_roster_sort < 999999 and last_grade_sort > first_roster_sort:
+        return OUTCOME_RETAINED_PERSISTED, "medium", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if has_roster and _clean_display(row.get("last_seen_term", "")) and _clean_display(row.get("first_seen_term", "")):
+        return OUTCOME_NOT_RETAINED, "low", "; ".join(flags), "; ".join(manual_review_reasons or ["No later academic, grade-report, roster, or graduation evidence found."])
+
+    manual_review_reasons.append("Insufficient evidence to assign a resolved outcome.")
+    return OUTCOME_UNKNOWN_REVIEW, "low", "; ".join(flags), "; ".join(manual_review_reasons)
+
+
+def build_student_longitudinal_tracking(
+    appearances: pd.DataFrame,
+    summary: pd.DataFrame,
+    manual_adjustments: pd.DataFrame,
+) -> pd.DataFrame:
+    if appearances.empty:
+        return pd.DataFrame(columns=STUDENT_LONGITUDINAL_TRACKING_COLUMNS)
+
+    app = appearances.copy()
+    app["_term_sort"] = app["term_code"].map(sort_term_code)
+    app["_has_term"] = app["_term_sort"].lt(999999)
+    app["_normalized_student_id"] = app["normalized_student_id"].fillna("").astype(str).str.strip()
+
+    summary_lookup = pd.DataFrame()
+    if summary is not None and not summary.empty:
+        summary_lookup = summary.copy()
+        summary_lookup["_normalized_student_id"] = summary_lookup["student_id"].map(normalize_banner_id)
+        summary_lookup = summary_lookup.drop_duplicates(subset=["_normalized_student_id"], keep="first").set_index("_normalized_student_id")
+
+    active_adjustments = manual_adjustments.loc[_manual_active_mask(manual_adjustments)].copy() if manual_adjustments is not None and not manual_adjustments.empty else pd.DataFrame()
+    if not active_adjustments.empty:
+        active_adjustments["_normalized_student_id"] = active_adjustments["normalized_student_id"].where(
+            active_adjustments["normalized_student_id"].fillna("").astype(str).str.strip().ne(""),
+            active_adjustments["student_id"],
+        ).map(normalize_banner_id)
+
+    rows: List[dict] = []
+    for normalized_id, group in app.groupby("_normalized_student_id", dropna=False, sort=False):
+        ordered = group.sort_values(["_term_sort", "source_type", "source_file", "source_sheet"], na_position="last")
+        roster_rows = ordered.loc[ordered["source_type"].eq("roster")]
+        grade_rows = ordered.loc[ordered["source_type"].isin(["grade_report", "transcript_text"])]
+        grad_rows = ordered.loc[ordered["source_type"].eq("graduation")]
+        first_term_row = ordered.loc[ordered["_has_term"]].head(1)
+        last_term_row = ordered.loc[ordered["_has_term"]].tail(1)
+        summary_row = summary_lookup.loc[normalized_id] if not summary_lookup.empty and normalized_id in summary_lookup.index else pd.Series(dtype="object")
+        first_roster_code = _first_non_blank(roster_rows.sort_values("_term_sort")["term_code"].tolist()) if not roster_rows.empty else ""
+        last_roster_code = _last_non_blank(roster_rows.sort_values("_term_sort")["term_code"].tolist()) if not roster_rows.empty else ""
+        first_grade_code = _first_non_blank(grade_rows.sort_values("_term_sort")["term_code"].tolist()) if not grade_rows.empty else ""
+        last_grade_code = _last_non_blank(grade_rows.sort_values("_term_sort")["term_code"].tolist()) if not grade_rows.empty else ""
+
+        graduation_source = ""
+        graduation_term = ""
+        explicit_grad = False
+        if not grad_rows.empty:
+            explicit_grad = True
+            graduation_source = _unique_join(grad_rows["source_file"].tolist()) or "Graduation file"
+            graduation_term = _first_non_blank(grad_rows["term"].tolist())
+        elif bool(summary_row.get("graduation_evidence_confirmed", "") == "Yes"):
+            explicit_grad = True
+            graduation_source = _clean_display(summary_row.get("outcome_evidence_source", ""))
+            graduation_term = _clean_display(summary_row.get("graduation_term", summary_row.get("graduation_term_code", "")))
+
+        manual_rows = active_adjustments.loc[active_adjustments["_normalized_student_id"].eq(normalized_id)] if not active_adjustments.empty else pd.DataFrame()
+        manual_outcome_bucket = ""
+        manual_chapter = ""
+        manual_org = ""
+        manual_applied: List[str] = []
+        if not manual_rows.empty:
+            for manual in manual_rows.itertuples(index=False):
+                field = _clean_display(getattr(manual, "field_to_override", "")).lower()
+                adjusted = _clean_display(getattr(manual, "adjusted_value", ""))
+                if field in {"final_outcome_bucket", "latest_outcome_bucket", "outcome_bucket", "final_status", "status"}:
+                    manual_outcome_bucket = _outcome_bucket_from_manual_value(adjusted)
+                    if manual_outcome_bucket == OUTCOME_GRADUATED_CONFIRMED:
+                        explicit_grad = True
+                        graduation_source = "Manual adjustment"
+                        graduation_term = graduation_term or _clean_display(getattr(manual, "evidence", ""))
+                    manual_applied.append(_clean_display(getattr(manual, "adjustment_id", "")))
+                if field in {"chapter", "latest_known_chapter", "organization", "organization_name"}:
+                    manual_chapter = normalize_chapter_name(adjusted)
+                    manual_org = manual_chapter
+                    manual_applied.append(_clean_display(getattr(manual, "adjustment_id", "")))
+
+        row = {
+            "student_id": _first_non_blank(ordered["student_id"].tolist()),
+            "normalized_student_id": normalized_id,
+            "name_keys_seen": _unique_join(ordered["name_raw"].tolist()),
+            "emails_seen": _unique_join(ordered["email_raw"].tolist()),
+            "organizations_seen": _unique_join(ordered["organization"].tolist()),
+            "chapters_seen": _unique_join(ordered["chapter"].tolist()),
+            "terms_seen": _unique_join(ordered["term"].tolist()),
+            "first_seen_term": _clean_display(first_term_row.iloc[0]["term"]) if not first_term_row.empty else "",
+            "last_seen_term": _clean_display(last_term_row.iloc[0]["term"]) if not last_term_row.empty else "",
+            "first_seen_term_code": _clean_display(first_term_row.iloc[0]["term_code"]) if not first_term_row.empty else "",
+            "last_seen_term_code": _clean_display(last_term_row.iloc[0]["term_code"]) if not last_term_row.empty else "",
+            "first_roster_term": term_label_from_code(first_roster_code),
+            "last_roster_term": term_label_from_code(last_roster_code),
+            "first_roster_term_code": first_roster_code,
+            "last_roster_term_code": last_roster_code,
+            "first_grade_report_term": term_label_from_code(first_grade_code),
+            "last_grade_report_term": term_label_from_code(last_grade_code),
+            "first_academic_term": term_label_from_code(first_grade_code),
+            "last_academic_term": term_label_from_code(last_grade_code),
+            "source_files_seen": _unique_join(ordered["source_file"].tolist()),
+            "source_sheets_seen": _unique_join(ordered["source_sheet"].tolist()),
+            "statuses_seen": _unique_join(ordered["normalized_status"].tolist()),
+            "latest_known_status": _last_non_blank(ordered["normalized_status"].tolist()),
+            "latest_known_org": manual_org or _last_non_blank(ordered["organization"].tolist()),
+            "latest_known_chapter": manual_chapter or _last_non_blank(ordered["chapter"].tolist()),
+            "explicit_graduation_evidence": "Yes" if explicit_grad else "No",
+            "graduation_evidence_source": graduation_source,
+            "graduation_term": graduation_term,
+            "current_active_flag": _clean_display(summary_row.get("current_active_flag", "")),
+            "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
+            "missing_id_flag": "Yes" if normalized_id.startswith("missing_id::") else "No",
+            "manual_outcome_bucket": manual_outcome_bucket,
+            "manual_adjustments_applied": _unique_join(manual_applied),
+        }
+        bucket, confidence, flags, review_reason = classify_student_outcome(pd.Series(row))
+        row.update(
+            {
+                "final_outcome_bucket": bucket,
+                "outcome_confidence": confidence,
+                "ambiguity_flags": flags,
+                "manual_review_required": "Yes" if review_reason or bucket in {OUTCOME_UNKNOWN_REVIEW, OUTCOME_SOURCE_PROBLEM} else "No",
+                "manual_review_reason": review_reason,
+            }
+        )
+        rows.append(row)
+
+    tracking = pd.DataFrame(rows)
+    return ensure_columns(tracking, STUDENT_LONGITUDINAL_TRACKING_COLUMNS).reset_index(drop=True)
+
+
+def apply_tracking_outcomes_to_summary(summary: pd.DataFrame, tracking: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty or tracking.empty:
+        return summary
+    result = summary.copy()
+    tracking_lookup = tracking.copy()
+    tracking_lookup["_normalized_student_id"] = tracking_lookup["normalized_student_id"].map(normalize_banner_id)
+    result["_normalized_student_id"] = result["student_id"].map(normalize_banner_id)
+    mapped = tracking_lookup.drop_duplicates(subset=["_normalized_student_id"], keep="first").set_index("_normalized_student_id")
+    for column in ["final_outcome_bucket", "outcome_confidence", "ambiguity_flags", "manual_review_required", "manual_review_reason", "manual_adjustments_applied"]:
+        result[column] = result["_normalized_student_id"].map(mapped[column]) if column in mapped.columns else ""
+
+    bucket = result["final_outcome_bucket"].fillna("").astype(str)
+    grad = bucket.eq(OUTCOME_GRADUATED_CONFIRMED)
+    active = bucket.eq(OUTCOME_STILL_ACTIVE)
+    non_grad_resolved = bucket.isin([OUTCOME_TRANSFERRED_LEFT, OUTCOME_INACTIVE_EXIT])
+    unknown = bucket.isin([OUTCOME_RETAINED_PERSISTED, OUTCOME_NOT_RETAINED, OUTCOME_UNKNOWN_REVIEW, OUTCOME_SOURCE_PROBLEM, ""])
+    resolved = grad | non_grad_resolved
+
+    result["latest_outcome_bucket"] = bucket.where(bucket.ne(""), OUTCOME_UNKNOWN_REVIEW)
+    result["status_group"] = result["latest_outcome_bucket"]
+    result["outcome_resolution_group"] = result["latest_outcome_bucket"]
+    result["is_graduated"] = grad
+    result["is_active_outcome"] = active
+    result["is_known_non_graduate_exit"] = non_grad_resolved
+    result["is_unknown_outcome"] = unknown
+    result["is_resolved_outcome"] = resolved
+    result["resolved_outcomes_only_flag"] = resolved
+    result["resolved_outcome_flag"] = resolved.map(lambda value: "Yes" if value else "No")
+    result["resolved_outcome_excluded_flag"] = (~resolved).map(lambda value: "Yes" if value else "No")
+    result["resolved_outcome_exclusion_reason"] = result["latest_outcome_bucket"].where(~resolved, "")
+    result["graduation_evidence_confirmed"] = grad.map(lambda value: "Yes" if value else "No")
+    result["graduated_eventual"] = grad.map(lambda value: "Yes" if value else "No")
+    measurable_4 = result.get("graduated_4yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
+    measurable_6 = result.get("graduated_6yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
+    result.loc[~grad & measurable_4, "graduated_4yr"] = "No"
+    result.loc[~grad & measurable_6, "graduated_6yr"] = "No"
+    result = result.drop(columns=["_normalized_student_id"], errors="ignore")
+    return result
+
+
+def build_input_group_outcome_buckets(appearances: pd.DataFrame, tracking: pd.DataFrame) -> pd.DataFrame:
+    if appearances.empty or tracking.empty:
+        return pd.DataFrame(columns=INPUT_GROUP_OUTCOME_BUCKET_COLUMNS)
+    app = appearances.loc[appearances["normalized_student_id"].fillna("").astype(str).str.strip().ne("")].copy()
+    tracking_lookup = tracking[["normalized_student_id", "final_outcome_bucket", "manual_review_required"]].drop_duplicates(subset=["normalized_student_id"])
+    app = app.merge(tracking_lookup, on="normalized_student_id", how="left")
+    rows: List[dict] = []
+    group_columns = ["input_group_id", "source_file", "source_sheet", "source_type", "term", "academic_year", "organization", "chapter"]
+    for keys, group in app.groupby(group_columns, dropna=False, sort=False):
+        values = dict(zip(group_columns, keys))
+        unique_students = group.drop_duplicates(subset=["normalized_student_id"], keep="first")
+        counts = unique_students["final_outcome_bucket"].fillna(OUTCOME_UNKNOWN_REVIEW).value_counts()
+        total = int(unique_students["normalized_student_id"].nunique())
+        graduated = int(counts.get(OUTCOME_GRADUATED_CONFIRMED, 0))
+        still_active = int(counts.get(OUTCOME_STILL_ACTIVE, 0))
+        retained = int(counts.get(OUTCOME_RETAINED_PERSISTED, 0))
+        not_retained = int(counts.get(OUTCOME_NOT_RETAINED, 0))
+        inactive = int(counts.get(OUTCOME_INACTIVE_EXIT, 0))
+        transferred = int(counts.get(OUTCOME_TRANSFERRED_LEFT, 0))
+        unknown = int(counts.get(OUTCOME_UNKNOWN_REVIEW, 0))
+        source_problem = int(counts.get(OUTCOME_SOURCE_PROBLEM, 0))
+        denominator_conservative = total
+        denominator_resolved = max(total - still_active - unknown - source_problem, 0)
+        retention_denominator = max(total - source_problem, 0)
+        retention_numerator = graduated + still_active + retained
+        warnings = []
+        if unknown or source_problem:
+            warnings.append("Unresolved/source-problem students present; use conservative rate for safety.")
+        rows.append(
+            {
+                **values,
+                "cohort_definition": "Unique normalized student IDs appearing in this source group.",
+                "unique_student_count": total,
+                "confirmed_graduated_count": graduated,
+                "still_active_count": still_active,
+                "retained_persisted_count": retained,
+                "not_retained_disappeared_count": not_retained,
+                "inactive_resigned_suspended_revoked_count": inactive,
+                "transferred_left_count": transferred,
+                "unknown_manual_review_count": unknown,
+                "source_problem_count": source_problem,
+                "graduation_rate_conservative": (graduated / denominator_conservative) if denominator_conservative else pd.NA,
+                "graduation_rate_resolved_only": (graduated / denominator_resolved) if denominator_resolved else pd.NA,
+                "retention_rate": (retention_numerator / retention_denominator) if retention_denominator else pd.NA,
+                "denominator_conservative": denominator_conservative,
+                "denominator_resolved_only": denominator_resolved,
+                "manual_review_required": "Yes" if boolish_series(unique_students.get("manual_review_required", pd.Series("", index=unique_students.index))).any() else "No",
+                "warnings": " ".join(warnings),
+            }
+        )
+    return ensure_columns(pd.DataFrame(rows), INPUT_GROUP_OUTCOME_BUCKET_COLUMNS)
+
+
+def build_yearly_unique_id_checklist(appearances: pd.DataFrame, tracking: pd.DataFrame) -> pd.DataFrame:
+    if appearances.empty or tracking.empty:
+        return pd.DataFrame(columns=YEARLY_UNIQUE_ID_CHECKLIST_COLUMNS)
+    app = appearances.drop_duplicates(subset=["input_group_id", "normalized_student_id"], keep="first").copy()
+    tracking_subset = tracking[
+        [
+            "student_id",
+            "normalized_student_id",
+            "final_outcome_bucket",
+            "manual_review_required",
+            "manual_review_reason",
+            "source_files_seen",
+            "last_seen_term",
+            "graduation_evidence_source",
+        ]
+    ].drop_duplicates(subset=["normalized_student_id"], keep="first")
+    checklist = app.merge(tracking_subset, on="normalized_student_id", how="left", suffixes=("", "_tracking"))
+    checklist["cohort_year"] = checklist["academic_year"]
+    checklist["student_id"] = checklist["student_id_tracking"].where(checklist.get("student_id_tracking", pd.Series("", index=checklist.index)).fillna("").astype(str).str.strip().ne(""), checklist["student_id"])
+    return ensure_columns(checklist, YEARLY_UNIQUE_ID_CHECKLIST_COLUMNS)
+
+
+def build_generated_manual_review_queue(appearances: pd.DataFrame, tracking: pd.DataFrame, input_groups: pd.DataFrame) -> pd.DataFrame:
+    rows: List[dict] = []
+    if tracking.empty:
+        return pd.DataFrame(columns=GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS)
+
+    def add_review(row: pd.Series, issue_type: str, description: str, priority: str = "Medium", group_row: Optional[pd.Series] = None) -> None:
+        group_row = group_row if group_row is not None else pd.Series(dtype="object")
+        normalized_id = _clean_display(row.get("normalized_student_id", ""))
+        issue_key = f"{normalized_id}|{issue_type}|{_clean_display(group_row.get('input_group_id', 'student'))}"
+        rows.append(
+            {
+                "review_id": hashlib.sha1(issue_key.encode("utf-8")).hexdigest()[:16],
+                "review_type": "student" if normalized_id else "source",
+                "priority": priority,
+                "student_id": row.get("student_id", ""),
+                "normalized_student_id": normalized_id,
+                "input_group_id": group_row.get("input_group_id", ""),
+                "source_file": group_row.get("source_file", row.get("source_files_seen", "")),
+                "source_sheet": group_row.get("source_sheet", ""),
+                "organization": group_row.get("organization", row.get("latest_known_org", "")),
+                "chapter": group_row.get("chapter", row.get("latest_known_chapter", "")),
+                "term": group_row.get("term", row.get("last_seen_term", "")),
+                "issue_type": issue_type,
+                "issue_description": description,
+                "evidence_summary": row.get("manual_review_reason", "") or row.get("ambiguity_flags", "") or row.get("source_files_seen", ""),
+                "suggested_action": "Review evidence and add a manual adjustment if the automated bucket is wrong.",
+                "current_outcome_bucket": row.get("final_outcome_bucket", ""),
+                "manual_adjustment_status": "Applied" if row.get("manual_adjustments_applied", "") else "Not Started",
+                "manual_adjusted_outcome": "",
+                "manual_adjusted_org": "",
+                "manual_adjusted_term": "",
+                "reviewer_notes": "",
+                "reviewed_by": "",
+                "reviewed_at": "",
+            }
+        )
+
+    for _, row in tracking.iterrows():
+        bucket = _clean_display(row.get("final_outcome_bucket", ""))
+        flags = _clean_display(row.get("ambiguity_flags", ""))
+        if row.get("manual_review_required", "") == "Yes":
+            add_review(row, "manual_review_required", row.get("manual_review_reason", "") or "Student requires manual review.", "High" if bucket == OUTCOME_SOURCE_PROBLEM else "Medium")
+        if bucket in {OUTCOME_UNKNOWN_REVIEW, OUTCOME_NOT_RETAINED, OUTCOME_SOURCE_PROBLEM}:
+            add_review(row, "unresolved_outcome_in_denominator", "Student may enter denominators with unresolved or source-problem outcome.", "High")
+        if "graduation_claim_without_confirmed_evidence" in flags:
+            add_review(row, "graduation_claim_without_evidence", "A source claimed graduation without accepted explicit evidence.", "High")
+        if row.get("first_roster_term", "") and not row.get("first_grade_report_term", ""):
+            add_review(row, "roster_without_grade_report", "Student appears in roster but no grade/academic appearance was found.", "Medium")
+        if row.get("first_grade_report_term", "") and not row.get("first_roster_term", ""):
+            add_review(row, "grade_report_without_roster", "Student appears in grade/academic data but no roster appearance was found.", "Medium")
+
+    if not appearances.empty:
+        roster = appearances.loc[appearances["source_type"].eq("roster")].copy()
+        if not roster.empty:
+            conflicts = (
+                roster.loc[roster["normalized_student_id"].fillna("").astype(str).str.strip().ne("")]
+                .groupby(["normalized_student_id", "term_code"], dropna=False)["chapter"]
+                .nunique()
+                .reset_index(name="chapter_count")
+                .loc[lambda frame: frame["chapter_count"].gt(1)]
+            )
+            tracking_lookup = tracking.drop_duplicates(subset=["normalized_student_id"], keep="first").set_index("normalized_student_id")
+            for conflict in conflicts.itertuples(index=False):
+                if conflict.normalized_student_id in tracking_lookup.index:
+                    add_review(tracking_lookup.loc[conflict.normalized_student_id], "multiple_chapters_same_term", f"Student appears in {int(conflict.chapter_count)} chapters in the same term.", "High")
+
+    if not input_groups.empty:
+        source_problems = input_groups.loc[input_groups["source_problem_count"].fillna(0).astype(float).gt(0)]
+        for _, group_row in source_problems.iterrows():
+            pseudo = pd.Series({"student_id": "", "normalized_student_id": "", "final_outcome_bucket": OUTCOME_SOURCE_PROBLEM, "manual_review_reason": "Source group contains source-problem rows."})
+            add_review(pseudo, "source_problem_count", "Input group contains source-problem student rows.", "High", group_row)
+
+    queue = pd.DataFrame(rows)
+    if queue.empty:
+        return pd.DataFrame(columns=GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS)
+    return ensure_columns(queue.drop_duplicates(subset=["review_id"], keep="first"), GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS)
+
+
+def build_student_outcome_audit_records(tracking: pd.DataFrame) -> List[dict]:
+    records: List[dict] = []
+    if tracking.empty:
+        return records
+    for row in tracking.itertuples(index=False):
+        records.append(
+            {
+                "student_id": getattr(row, "student_id", ""),
+                "normalized_student_id": getattr(row, "normalized_student_id", ""),
+                "final_outcome_bucket": getattr(row, "final_outcome_bucket", ""),
+                "evidence_used": {
+                    "source_files_seen": getattr(row, "source_files_seen", ""),
+                    "statuses_seen": getattr(row, "statuses_seen", ""),
+                    "graduation_evidence_source": getattr(row, "graduation_evidence_source", ""),
+                    "graduation_term": getattr(row, "graduation_term", ""),
+                },
+                "evidence_ignored": "Disappearance, high hours, senior standing, and inactivity are not accepted as graduation evidence.",
+                "flags": getattr(row, "ambiguity_flags", ""),
+                "manual_adjustments_applied": getattr(row, "manual_adjustments_applied", ""),
+                "rates_impacted": "Included through input_group_outcome_buckets and cohort_metrics only.",
+            }
+        )
+    return records
+
+
+def validate_outcome_tracking(tracking: pd.DataFrame, input_groups: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    rows: List[dict] = []
+    failures: List[str] = []
+    if tracking.empty:
+        rows.append(
+            {
+                "Check Group": "Outcome Tracking",
+                "Check": "Student longitudinal tracking rows",
+                "Status": "Review",
+                "Value": 0,
+                "Notes": "No student source appearances were available to build tracking rows.",
+            }
+        )
+    else:
+        duplicate_ids = int(tracking["normalized_student_id"].fillna("").astype(str).duplicated().sum())
+        grad_without_evidence = int((
+            tracking["final_outcome_bucket"].eq(OUTCOME_GRADUATED_CONFIRMED)
+            & ~tracking["explicit_graduation_evidence"].fillna("").astype(str).str.strip().str.lower().eq("yes")
+        ).sum())
+        rows.extend(
+            [
+                {"Check Group": "Outcome Tracking", "Check": "Unique tracking rows", "Status": "Pass" if duplicate_ids == 0 else "Fail", "Value": duplicate_ids, "Notes": "Duplicate normalized IDs in student_longitudinal_tracking."},
+                {"Check Group": "Outcome Tracking", "Check": "Graduated requires explicit evidence", "Status": "Pass" if grad_without_evidence == 0 else "Fail", "Value": grad_without_evidence, "Notes": "Students marked Graduated Confirmed without explicit evidence."},
+            ]
+        )
+        if duplicate_ids:
+            failures.append("Duplicate normalized IDs in student_longitudinal_tracking.")
+        if grad_without_evidence:
+            failures.append("Graduated Confirmed students without explicit evidence.")
+        for bucket in FINAL_OUTCOME_BUCKETS:
+            rows.append({"Check Group": "Outcome Buckets", "Check": bucket, "Status": "Pass", "Value": int(tracking["final_outcome_bucket"].eq(bucket).sum()), "Notes": ""})
+
+    if not input_groups.empty:
+        bucket_sum = (
+            input_groups[
+                [
+                    "confirmed_graduated_count",
+                    "still_active_count",
+                    "retained_persisted_count",
+                    "not_retained_disappeared_count",
+                    "inactive_resigned_suspended_revoked_count",
+                    "transferred_left_count",
+                    "unknown_manual_review_count",
+                    "source_problem_count",
+                ]
+            ]
+            .fillna(0)
+            .astype(float)
+            .sum(axis=1)
+        )
+        mismatch = int(bucket_sum.ne(input_groups["unique_student_count"].fillna(0).astype(float)).sum())
+        rows.append({"Check Group": "Outcome Tracking", "Check": "Input group bucket totals match denominators", "Status": "Pass" if mismatch == 0 else "Fail", "Value": mismatch, "Notes": "Bucket counts must sum to each group denominator."})
+        if mismatch:
+            failures.append("Input group bucket counts do not match unique student denominators.")
+    return ensure_columns(pd.DataFrame(rows), QA_COLUMNS), failures
+
+
 def explicit_exit_reason(latest_outcome_bucket: str, latest_status_bucket: str) -> str:
     outcome = clean_text(latest_outcome_bucket)
     status = clean_text(latest_status_bucket)
@@ -4139,18 +5026,21 @@ def build_student_summary(
         graduation_status_correction_reason = ""
         snapshot_status_text = snapshot_status_by_id.get(student_id, "")
         graduation_list_term = ""
+        graduation_list_source = ""
         if student_id in graduation_by_id:
-            graduation_list_term, _ = graduation_by_id[student_id]
+            graduation_list_term, graduation_list_source = graduation_by_id[student_id]
         else:
             name_key = person_name_key(first_row["first_name"], first_row["last_name"])
             if name_key in graduation_by_name:
-                graduation_list_term, _ = graduation_by_name[name_key]
+                graduation_list_term, graduation_list_source = graduation_by_name[name_key]
         if (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
             explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
             evidence_source = "Roster status"
             graduation_confirmed = True
         elif graduation_list_term:
-            evidence_source = "Graduation list only; no Copy of Rosters confirmation"
+            explicit_grad_term = graduation_list_term
+            evidence_source = graduation_list_source or "Graduation list match"
+            graduation_confirmed = True
 
         latest_status_bucket = clean_text(roster_rows["org_status_bucket"].iloc[-1]) if not roster_rows.empty else "Unknown"
         derived_outcome_bucket, derived_evidence_source = outcome_bucket_from_signals(
@@ -4162,16 +5052,11 @@ def build_student_summary(
         evidence_source = evidence_source or derived_evidence_source
         if graduation_confirmed:
             latest_outcome_bucket = "Graduated"
-        elif derived_outcome_bucket == "Graduated" or graduation_list_term:
+        elif derived_outcome_bucket == "Graduated":
             latest_outcome_bucket = "Unknown"
             evidence_source = evidence_source or "No explicit outcome evidence"
             graduation_status_corrected = True
-            if graduation_list_term:
-                graduation_status_correction_reason = (
-                    "Graduation list matched, but Copy of Rosters did not mark the student as graduated."
-                )
-            else:
-                graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
+            graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
         latest_chapter_value = clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else ""
         if should_mark_roster_disappeared_unknown(
             latest_outcome_bucket,
@@ -4641,19 +5526,39 @@ def build_current_active_fields(
     return result
 
 
-def build_cohort_metrics(summary: pd.DataFrame) -> pd.DataFrame:
+def build_cohort_metrics(summary: pd.DataFrame, tracking: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     rows: List[dict] = []
     if summary.empty:
         return pd.DataFrame(columns=load_schema()["tables"]["cohort_metrics"])
 
+    tracking_frame = tracking.copy() if tracking is not None and not tracking.empty else pd.DataFrame()
     cohorts = ["Overall"] + sorted(value for value in summary["org_entry_cohort"].fillna("").astype(str).unique().tolist() if value)
     for cohort in cohorts:
         frame = summary if cohort == "Overall" else summary.loc[summary["org_entry_cohort"].eq(cohort)].copy()
         if frame.empty:
             continue
+        tracking_cohort = pd.DataFrame()
+        if not tracking_frame.empty:
+            tracking_cohort = tracking_frame if cohort == "Overall" else tracking_frame.loc[tracking_frame["org_entry_cohort"].fillna("").astype(str).eq(cohort)].copy()
 
         def rate_row(label: str, numerator_col: str, denominator_col: str, group: str, notes: str = "") -> None:
             rate_frame = frame.drop_duplicates(subset=["student_id"], keep="first") if group == "Graduation" and "student_id" in frame.columns else frame
+            if group == "Graduation" and not tracking_cohort.empty and label == "Observed Eventual Graduation Rate":
+                unique_tracking = tracking_cohort.drop_duplicates(subset=["normalized_student_id"], keep="first")
+                eligible = int(unique_tracking["normalized_student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+                numerator = int(unique_tracking["final_outcome_bucket"].fillna("").astype(str).eq(OUTCOME_GRADUATED_CONFIRMED).sum())
+                rows.append(
+                    metric_row(
+                        group,
+                        label,
+                        cohort,
+                        eligible,
+                        numerator=numerator,
+                        rate=(numerator / eligible) if eligible else None,
+                        notes=notes or "Derived from student_longitudinal_tracking final outcome buckets.",
+                    )
+                )
+                return
             eligible = int(rate_frame[denominator_col].fillna("").astype(str).eq("Yes").sum())
             numerator = int((rate_frame[numerator_col].fillna("").astype(str).eq("Yes") & rate_frame[denominator_col].fillna("").astype(str).eq("Yes")).sum())
             rows.append(metric_row(group, label, cohort, eligible, numerator=numerator, rate=(numerator / eligible) if eligible else None, notes=notes))
@@ -5242,10 +6147,14 @@ def build_canonical_pipeline(
     chapter_mapping = load_chapter_mapping()
     ensure_manual_chapter_assignment_template()
     ensure_manual_roster_corrections_template()
+    if not MANUAL_ADJUSTMENTS_PATH.exists():
+        MANUAL_ADJUSTMENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS).to_csv(MANUAL_ADJUSTMENTS_PATH, index=False)
     transcript_text_root.mkdir(parents=True, exist_ok=True)
     ensure_transcript_text_manifest_template()
     manual_chapter_assignments = load_manual_chapter_assignments()
     manual_roster_corrections = load_manual_roster_corrections()
+    manual_adjustments = load_manual_adjustments()
     transcript_text_manifest = load_transcript_text_manifest()
     config_manifest = optional_files_manifest(
         [
@@ -5254,6 +6163,7 @@ def build_canonical_pipeline(
             EXAMPLE_CHAPTER_GROUPS_PATH,
             MANUAL_CHAPTER_ASSIGNMENTS_PATH,
             MANUAL_ROSTER_CORRECTIONS_PATH,
+            MANUAL_ADJUSTMENTS_PATH,
             TRANSCRIPT_TEXT_MANIFEST_PATH,
             SCHEMA_PATH,
         ]
@@ -5625,7 +6535,38 @@ def build_canonical_pipeline(
     )
 
     analytics_stage_started = perf_counter()
-    cohort_metrics = build_cohort_metrics(student_summary)
+    combined_manual_adjustments = pd.concat(
+        [
+            manual_adjustments,
+            manual_roster_corrections_to_manual_adjustments(manual_roster_corrections),
+        ],
+        ignore_index=True,
+    ) if not manual_adjustments.empty or not manual_roster_corrections.empty else pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
+    student_source_appearances = build_student_source_appearances(
+        roster_term,
+        academic_term,
+        graduation,
+        snapshot,
+        transcript_term_summary,
+    )
+    student_longitudinal_tracking = build_student_longitudinal_tracking(
+        student_source_appearances,
+        student_summary,
+        combined_manual_adjustments,
+    )
+    student_summary = apply_tracking_outcomes_to_summary(student_summary, student_longitudinal_tracking)
+    master_longitudinal = enrich_master_longitudinal_with_summary(master_longitudinal, student_summary)
+    input_group_outcome_buckets = build_input_group_outcome_buckets(student_source_appearances, student_longitudinal_tracking)
+    yearly_unique_id_checklist = build_yearly_unique_id_checklist(student_source_appearances, student_longitudinal_tracking)
+    generated_manual_review_queue = build_generated_manual_review_queue(
+        student_source_appearances,
+        student_longitudinal_tracking,
+        input_group_outcome_buckets,
+    )
+    tracking_validation_qa, tracking_validation_failures = validate_outcome_tracking(student_longitudinal_tracking, input_group_outcome_buckets)
+    if tracking_validation_failures:
+        raise ValueError("Outcome tracking validation failed: " + " | ".join(tracking_validation_failures))
+    cohort_metrics = build_cohort_metrics(student_summary, student_longitudinal_tracking)
     graduation_status_audit = build_graduation_status_audit(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
     new_member_reference_validation = build_new_member_reference_validation(roster_term, new_member_reference)
@@ -5709,6 +6650,8 @@ def build_canonical_pipeline(
         )
     if not summary_qa.empty:
         qa_checks = pd.concat([qa_checks, ensure_columns(summary_qa, QA_COLUMNS)], ignore_index=True)
+    if not tracking_validation_qa.empty:
+        qa_checks = pd.concat([qa_checks, ensure_columns(tracking_validation_qa, QA_COLUMNS)], ignore_index=True)
     if transcript_qa_rows:
         qa_checks = pd.concat([qa_checks, ensure_columns(pd.DataFrame(transcript_qa_rows), QA_COLUMNS)], ignore_index=True)
     append_stage(
@@ -5717,6 +6660,11 @@ def build_canonical_pipeline(
         analytics_stage_started,
         "rebuilt",
         {
+            "student_source_appearances": student_source_appearances,
+            "student_longitudinal_tracking": student_longitudinal_tracking,
+            "input_group_outcome_buckets": input_group_outcome_buckets,
+            "yearly_unique_id_checklist": yearly_unique_id_checklist,
+            "manual_review_queue": generated_manual_review_queue,
             "cohort_metrics": cohort_metrics,
             "graduation_status_audit": graduation_status_audit,
             "membership_reference_validation": membership_reference_validation,
@@ -5743,6 +6691,12 @@ def build_canonical_pipeline(
         "cohort_metrics": output_folder / "cohort_metrics.csv",
         "qa_checks": output_folder / "qa_checks.csv",
         "graduation_status_audit": output_folder / "graduation_status_audit.csv",
+        "student_source_appearances": output_folder / "student_source_appearances.csv",
+        "student_longitudinal_tracking": output_folder / "student_longitudinal_tracking.csv",
+        "input_group_outcome_buckets": output_folder / "input_group_outcome_buckets.csv",
+        "yearly_unique_id_checklist": output_folder / "yearly_unique_id_checklist.csv",
+        "manual_review_queue": output_folder / "manual_review_queue.csv",
+        "student_outcome_audit": output_folder / "student_outcome_audit.jsonl",
         "reference_inventory": output_folder / "reference_inventory.csv",
         "reference_unclassified_rows": output_folder / "reference_unclassified_rows.csv",
         "membership_reference_counts": output_folder / "membership_reference_counts.csv",
@@ -5775,6 +6729,14 @@ def build_canonical_pipeline(
     write_frame(files["cohort_metrics"], cohort_metrics)
     write_frame(files["qa_checks"], qa_checks)
     write_frame(files["graduation_status_audit"], graduation_status_audit)
+    write_frame(files["student_source_appearances"], student_source_appearances)
+    write_frame(files["student_longitudinal_tracking"], student_longitudinal_tracking)
+    write_frame(files["input_group_outcome_buckets"], input_group_outcome_buckets)
+    write_frame(files["yearly_unique_id_checklist"], yearly_unique_id_checklist)
+    write_frame(files["manual_review_queue"], generated_manual_review_queue)
+    with files["student_outcome_audit"].open("w", encoding="utf-8") as handle:
+        for record in build_student_outcome_audit_records(student_longitudinal_tracking):
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     write_frame(files["reference_inventory"], reference_inventory)
     write_frame(files["reference_unclassified_rows"], reference_unclassified_rows)
     write_frame(files["membership_reference_counts"], membership_reference)

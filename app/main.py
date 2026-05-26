@@ -36,6 +36,7 @@ from app.analysis import (
 from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_milestone_chart, scatter_chart, stacked_bar_chart
 from app.config_loader import (
     MANUAL_ROSTER_CORRECTION_COLUMNS,
+    MANUAL_ADJUSTMENTS_PATH,
     MANUAL_REVIEW_QUEUE_COLUMNS,
     MANUAL_REVIEW_QUEUE_PATH,
     MANUAL_ROSTER_CORRECTIONS_PATH,
@@ -47,6 +48,7 @@ from app.config_loader import (
     find_manual_correction_conflicts,
     import_manual_corrections_package,
     load_manual_roster_corrections,
+    load_manual_adjustments,
     load_manual_review_queue,
     load_metric_catalog,
     load_settings,
@@ -55,6 +57,7 @@ from app.config_loader import (
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
     save_manual_review_queue,
+    save_manual_adjustments,
     save_manual_roster_corrections,
 )
 from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
@@ -1104,6 +1107,56 @@ def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFr
     return queue.drop_duplicates(subset=["review_key"], keep="first").reset_index(drop=True)
 
 
+def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.DataFrame:
+    tables = getattr(bundle, "tables", {})
+    canonical = tables.get("manual_review_queue", pd.DataFrame())
+    if canonical is None or canonical.empty:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    correction_keys = _manual_correction_identity_set(corrections)
+    rows: list[dict[str, object]] = []
+    for _, row in canonical.iterrows():
+        student_id = str(row.get("student_id", "") or "").strip()
+        review_key = str(row.get("review_id", "") or "").strip() or student_id or str(row.get("normalized_student_id", "") or "").strip()
+        if not review_key:
+            continue
+        rows.append(
+            {
+                "review_key": review_key,
+                "student_id": student_id,
+                "last_name": "",
+                "first_name": "",
+                "student_name": "",
+                "chapter": row.get("chapter", ""),
+                "join_term": "",
+                "last_observed_org_term": row.get("term", ""),
+                "latest_outcome_bucket": row.get("current_outcome_bucket", ""),
+                "outcome_resolution_group": row.get("current_outcome_bucket", ""),
+                "academic_year": "",
+                "term": row.get("term", ""),
+                "organization": row.get("organization", ""),
+                "issue_type": row.get("issue_type", ""),
+                "outcome_bucket": row.get("current_outcome_bucket", ""),
+                "priority": row.get("priority", ""),
+                "input_group_id": row.get("input_group_id", ""),
+                "source_file": row.get("source_file", ""),
+                "source_sheet": row.get("source_sheet", ""),
+                "evidence_summary": row.get("evidence_summary", ""),
+                "suggested_action": row.get("suggested_action", ""),
+                "queue_reason": row.get("issue_description", "") or row.get("issue_type", ""),
+                "assigned_to": row.get("reviewed_by", ""),
+                "review_status": "Corrected" if str(row.get("manual_adjustment_status", "")).lower() == "applied" else "Needs Review",
+                "needs_transcript": "No",
+                "review_notes": row.get("reviewer_notes", ""),
+                "has_manual_correction": "Yes" if student_id and student_id.upper() in correction_keys else "No",
+                "transcript_file_exists": "No",
+                "updated_at": row.get("reviewed_at", ""),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    return pd.DataFrame(rows).drop_duplicates(subset=["review_key"], keep="first").reset_index(drop=True)
+
+
 def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> pd.DataFrame:
     if generated.empty:
         return saved if not saved.empty else pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
@@ -1193,6 +1246,59 @@ def _manual_corrections_from_queue_rows(queue_rows: pd.DataFrame, final_status: 
     return normalize_manual_roster_corrections(corrections)
 
 
+def _manual_adjustments_from_corrections(corrections: pd.DataFrame, reviewer: str = "", reason: str = "") -> pd.DataFrame:
+    cleaned = normalize_manual_roster_corrections(corrections)
+    if cleaned.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    created_at = datetime.now().isoformat(timespec="seconds")
+    for _, row in cleaned.iterrows():
+        student_id = str(row.get("student_id", "") or "").strip().upper()
+        base = {
+            "adjustment_id": "",
+            "student_id": student_id,
+            "normalized_student_id": student_id,
+            "reason": reason or "Saved from Manual Roster Corrections app.",
+            "evidence": "Manual reviewer correction",
+            "source_file": str(MANUAL_ROSTER_CORRECTIONS_PATH),
+            "source_sheet": "Manual Corrections App",
+            "reviewer": reviewer,
+            "created_at": created_at,
+            "active": "Yes",
+        }
+        final_status = str(row.get("final_status", "") or "").strip()
+        if final_status:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_type": "outcome_override",
+                    "field_to_override": "final_outcome_bucket",
+                    "original_value": "",
+                    "adjusted_value": final_status,
+                }
+            )
+        organization = str(row.get("organization_name", "") or "").strip()
+        if organization:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_type": "chapter_override",
+                    "field_to_override": "latest_known_chapter",
+                    "original_value": "",
+                    "adjusted_value": organization,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _append_manual_adjustments_from_corrections(corrections: pd.DataFrame, reviewer: str = "", reason: str = "") -> None:
+    adjustments = _manual_adjustments_from_corrections(corrections, reviewer=reviewer, reason=reason)
+    if adjustments.empty:
+        return
+    combined = pd.concat([load_manual_adjustments(), adjustments], ignore_index=True)
+    save_manual_adjustments(combined)
+
+
 def _manual_correction_key_series(frame: pd.DataFrame) -> pd.Series:
     if frame.empty:
         return pd.Series(dtype="object")
@@ -1267,6 +1373,7 @@ def _commit_staged_manual_corrections(assigned_to: str = "") -> dict[str, object
     combined = pd.concat([load_manual_roster_corrections(), staged], ignore_index=True)
     combined = combined.drop_duplicates(subset=MANUAL_ROSTER_CORRECTION_COLUMNS, keep="last").reset_index(drop=True)
     saved_path = save_manual_roster_corrections(combined)
+    _append_manual_adjustments_from_corrections(staged, reviewer=assigned_to, reason="Manual correction committed from staged changes.")
     created_transcripts = ensure_manual_transcript_files(staged)
     _mark_manual_queue_corrected(staged, assigned_to=assigned_to, note="Manual correction committed from staged changes.")
     _clear_staged_manual_corrections()
@@ -1285,6 +1392,7 @@ def _save_manual_correction_batch(corrections: pd.DataFrame, assigned_to: str = 
     combined = pd.concat([load_manual_roster_corrections(), cleaned], ignore_index=True)
     combined = combined.drop_duplicates(subset=MANUAL_ROSTER_CORRECTION_COLUMNS, keep="last").reset_index(drop=True)
     saved_path = save_manual_roster_corrections(combined)
+    _append_manual_adjustments_from_corrections(cleaned, reviewer=assigned_to, reason=note or "Manual correction batch saved.")
     created_transcripts = ensure_manual_transcript_files(cleaned)
     _mark_manual_queue_corrected(cleaned, assigned_to=assigned_to, note=note)
     return {"saved_path": saved_path, "saved_rows": len(cleaned), "created_transcripts": created_transcripts}
@@ -1401,6 +1509,7 @@ def _manual_workspace_summary() -> pd.DataFrame:
     return pd.DataFrame(
         [
             {"Item": "Correction CSV", "Path": str(workspace["corrections_path"])},
+            {"Item": "Manual Adjustments CSV", "Path": str(workspace.get("adjustments_path", MANUAL_ADJUSTMENTS_PATH))},
             {"Item": "Assignment Queue CSV", "Path": str(workspace["review_queue_path"])},
             {"Item": "Transcript Paste-In Folder", "Path": str(workspace["transcript_folder"])},
             {"Item": "Canonical Latest Folder", "Path": str(MANUAL_ROSTER_CORRECTIONS_PATH.parent.parent / "output" / "canonical" / "latest")},
@@ -1421,7 +1530,18 @@ def _render_manual_corrections_editor(bundle) -> None:
     staged_corrections = _staged_manual_corrections()
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
     saved_queue = load_manual_review_queue()
-    generated_queue = _build_manual_assignment_queue(summary, corrections)
+    generated_queue = pd.concat(
+        [
+            _build_manual_assignment_queue(summary, corrections),
+            _canonical_review_queue_for_app(bundle, corrections),
+        ],
+        ignore_index=True,
+    )
+    if not generated_queue.empty:
+        for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+            if column not in generated_queue.columns:
+                generated_queue[column] = ""
+        generated_queue = generated_queue[MANUAL_REVIEW_QUEUE_COLUMNS].drop_duplicates(subset=["review_key"], keep="first")
     review_queue = _merge_saved_review_queue(generated_queue, saved_queue)
     if _manual_review_queue_changed(review_queue, saved_queue):
         save_manual_review_queue(review_queue)
@@ -1560,6 +1680,24 @@ def _render_manual_corrections_editor(bundle) -> None:
         with queue_filters[3]:
             reason_search = st.text_input("Reason contains", placeholder="unknown, inferred, incomplete")
 
+        evidence_filters = st.columns(4)
+        with evidence_filters[0]:
+            year_filter = st.multiselect("Academic year", options=_unique_text_options(review_queue, "academic_year"))
+        with evidence_filters[1]:
+            term_filter = st.multiselect("Term", options=_unique_text_options(review_queue, "term"))
+        with evidence_filters[2]:
+            org_filter = st.multiselect("Organization", options=_unique_text_options(review_queue, "organization"))
+        with evidence_filters[3]:
+            chapter_filter = st.multiselect("Chapter", options=_unique_text_options(review_queue, "chapter"))
+
+        issue_filters = st.columns(3)
+        with issue_filters[0]:
+            issue_filter = st.multiselect("Issue type", options=_unique_text_options(review_queue, "issue_type"))
+        with issue_filters[1]:
+            outcome_filter = st.multiselect("Outcome bucket", options=_unique_text_options(review_queue, "outcome_bucket"))
+        with issue_filters[2]:
+            priority_filter = st.multiselect("Priority", options=_unique_text_options(review_queue, "priority"))
+
         queue_view = review_queue.copy()
         if status_filter:
             queue_view = queue_view.loc[queue_view["review_status"].isin(status_filter)]
@@ -1567,6 +1705,17 @@ def _render_manual_corrections_editor(bundle) -> None:
             queue_view = queue_view.loc[queue_view["assigned_to"].isin(owner_filter)]
         if transcript_filter != "All":
             queue_view = queue_view.loc[queue_view["needs_transcript"].eq(transcript_filter)]
+        for column, selected in [
+            ("academic_year", year_filter),
+            ("term", term_filter),
+            ("organization", org_filter),
+            ("chapter", chapter_filter),
+            ("issue_type", issue_filter),
+            ("outcome_bucket", outcome_filter),
+            ("priority", priority_filter),
+        ]:
+            if selected and column in queue_view.columns:
+                queue_view = queue_view.loc[queue_view[column].isin(selected)]
         if reason_search:
             queue_view = queue_view.loc[queue_view["queue_reason"].fillna("").astype(str).str.contains(reason_search, case=False, regex=False, na=False)]
 
@@ -1595,6 +1744,28 @@ def _render_manual_corrections_editor(bundle) -> None:
         selected_queue_rows = edited_queue.loc[selected_mask].drop(columns=["select_row"], errors="ignore").copy()
         selected_review_keys = selected_queue_rows["review_key"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().tolist()
         st.caption(f"Selected rows: {len(selected_review_keys):,} / visible rows: {len(queue_view):,}")
+        if not selected_queue_rows.empty:
+            first_selected = selected_queue_rows.iloc[0]
+            selected_student_id = str(first_selected.get("student_id", "") or "").strip()
+            selected_normalized_id = str(first_selected.get("normalized_student_id", "") or selected_student_id).strip()
+            evidence_tables = getattr(bundle, "tables", {})
+            with st.expander("Evidence for first selected row", expanded=False):
+                for table_key, label in [
+                    ("student_source_appearances", "Source appearances"),
+                    ("student_longitudinal_tracking", "Longitudinal tracking"),
+                    ("graduation_status_audit", "Graduation audit"),
+                ]:
+                    evidence = evidence_tables.get(table_key, pd.DataFrame())
+                    if evidence is None or evidence.empty:
+                        continue
+                    evidence_view = evidence.copy()
+                    if "normalized_student_id" in evidence_view.columns and selected_normalized_id:
+                        evidence_view = evidence_view.loc[evidence_view["normalized_student_id"].fillna("").astype(str).str.strip().eq(selected_normalized_id)]
+                    elif "student_id" in evidence_view.columns and selected_student_id:
+                        evidence_view = evidence_view.loc[evidence_view["student_id"].fillna("").astype(str).str.strip().eq(selected_student_id)]
+                    if not evidence_view.empty:
+                        st.caption(label)
+                        st.dataframe(evidence_view.head(200), use_container_width=True, hide_index=True)
 
         def _apply_batch_status(final_status: str) -> None:
             batch = _manual_corrections_from_queue_rows(selected_queue_rows, final_status=final_status)
@@ -1762,6 +1933,11 @@ def _render_manual_corrections_editor(bundle) -> None:
         if saved:
             saved_path = save_manual_roster_corrections(edited)
             saved_corrections = load_manual_roster_corrections()
+            _append_manual_adjustments_from_corrections(
+                saved_corrections,
+                reviewer=st.session_state.get("manual_helper_initials", ""),
+                reason="Manual correction sheet saved.",
+            )
             created_transcripts = ensure_manual_transcript_files(saved_corrections)
             open_errors = {path: error for path in created_transcripts if (error := _open_local_text_file(path))}
             st.success(f"Saved corrections to {saved_path}. Rerun `py run_canonical_pipeline.py --refresh-source-cache` when you want these applied to the canonical outputs.")

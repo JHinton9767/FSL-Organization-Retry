@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from io import BytesIO
 from copy import deepcopy
+from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -24,6 +26,7 @@ DEFAULT_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.csv"
 EXAMPLE_CHAPTER_GROUPS_PATH = CONFIG_DIR / "chapter_groups.example.csv"
 MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
 MANUAL_ROSTER_CORRECTIONS_PATH = CONFIG_DIR / "manual_roster_corrections.csv"
+MANUAL_ADJUSTMENTS_PATH = CONFIG_DIR / "manual_adjustments.csv"
 MANUAL_REVIEW_QUEUE_PATH = CONFIG_DIR / "manual_review_queue.csv"
 TRANSCRIPT_TEXT_ROOT = ROOT / "data" / "inbox" / "transcript_text"
 MANUAL_TRANSCRIPTS_PATH = TRANSCRIPT_TEXT_ROOT / "Transcripts"
@@ -118,6 +121,11 @@ def load_dataset_manifest() -> Dict[str, Any]:
                     "missing_evidence_cases.parquet",
                     "unresolved_chapter_review.parquet",
                     "graduation_status_audit.parquet",
+                    "student_source_appearances.parquet",
+                    "student_longitudinal_tracking.parquet",
+                    "input_group_outcome_buckets.parquet",
+                    "yearly_unique_id_checklist.parquet",
+                    "manual_review_queue.parquet",
                     "transcript_term_summary.parquet",
                     "transcript_course_detail.parquet",
                     "transcript_parse_audit.parquet",
@@ -243,6 +251,22 @@ MANUAL_ROSTER_CORRECTION_COLUMNS = [
     "final_status",
     "exclude_from_roster_calculations",
 ]
+MANUAL_ADJUSTMENT_COLUMNS = [
+    "adjustment_id",
+    "student_id",
+    "normalized_student_id",
+    "adjustment_type",
+    "field_to_override",
+    "original_value",
+    "adjusted_value",
+    "reason",
+    "evidence",
+    "source_file",
+    "source_sheet",
+    "reviewer",
+    "created_at",
+    "active",
+]
 MANUAL_REVIEW_QUEUE_COLUMNS = [
     "review_key",
     "student_id",
@@ -254,6 +278,17 @@ MANUAL_REVIEW_QUEUE_COLUMNS = [
     "last_observed_org_term",
     "latest_outcome_bucket",
     "outcome_resolution_group",
+    "academic_year",
+    "term",
+    "organization",
+    "issue_type",
+    "outcome_bucket",
+    "priority",
+    "input_group_id",
+    "source_file",
+    "source_sheet",
+    "evidence_summary",
+    "suggested_action",
     "queue_reason",
     "assigned_to",
     "review_status",
@@ -274,6 +309,96 @@ def empty_manual_roster_corrections() -> pd.DataFrame:
 
 def empty_manual_review_queue() -> pd.DataFrame:
     return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+
+
+def empty_manual_adjustments() -> pd.DataFrame:
+    return pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
+
+
+def _manual_adjustment_id(row: pd.Series) -> str:
+    if normalize_text(row.get("adjustment_id", "")):
+        return normalize_text(row.get("adjustment_id", ""))
+    key = "\u241f".join(normalize_text(row.get(column, "")) for column in MANUAL_ADJUSTMENT_COLUMNS if column != "adjustment_id")
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    return f"adj_{digest}"
+
+
+def normalize_manual_adjustments(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return empty_manual_adjustments()
+
+    cleaned = frame.copy()
+    header_map = dict(zip(cleaned.columns, canonical_headers(cleaned.columns)))
+    cleaned = cleaned.rename(columns=header_map)
+    alias_map = {
+        "adjustment_id": ["adjustment_id", "adjustment id", "id"],
+        "student_id": ["student_id", "student id", "banner id", "banner"],
+        "normalized_student_id": ["normalized_student_id", "normalized student id", "normalized id"],
+        "adjustment_type": ["adjustment_type", "adjustment type", "type"],
+        "field_to_override": ["field_to_override", "field to override", "field", "override field"],
+        "original_value": ["original_value", "original value", "old value"],
+        "adjusted_value": ["adjusted_value", "adjusted value", "new value", "value"],
+        "reason": ["reason", "notes", "note", "reviewer_notes", "reviewer notes"],
+        "evidence": ["evidence", "evidence_summary", "evidence summary"],
+        "source_file": ["source_file", "source file"],
+        "source_sheet": ["source_sheet", "source sheet"],
+        "reviewer": ["reviewer", "reviewed_by", "reviewed by"],
+        "created_at": ["created_at", "created at", "reviewed_at", "reviewed at"],
+        "active": ["active", "enabled", "use", "apply"],
+    }
+    resolved: Dict[str, str] = {}
+    for target, aliases in alias_map.items():
+        source = next((column for column in cleaned.columns if column in aliases), None)
+        if source:
+            resolved[target] = source
+
+    standardized = pd.DataFrame(index=cleaned.index)
+    for column in MANUAL_ADJUSTMENT_COLUMNS:
+        source = resolved.get(column)
+        standardized[column] = cleaned[source] if source else ""
+    standardized = standardized.fillna("").astype(str)
+    for column in MANUAL_ADJUSTMENT_COLUMNS:
+        standardized[column] = standardized[column].str.strip()
+    standardized["normalized_student_id"] = standardized["normalized_student_id"].where(
+        standardized["normalized_student_id"].ne(""),
+        standardized["student_id"],
+    )
+    standardized["adjustment_type"] = standardized["adjustment_type"].where(
+        standardized["adjustment_type"].ne(""),
+        "outcome_override",
+    )
+    standardized["field_to_override"] = standardized["field_to_override"].where(
+        standardized["field_to_override"].ne(""),
+        "final_outcome_bucket",
+    )
+    standardized["created_at"] = standardized["created_at"].where(
+        standardized["created_at"].ne(""),
+        datetime.now().isoformat(timespec="seconds"),
+    )
+    standardized["active"] = standardized["active"].where(standardized["active"].ne(""), "Yes")
+    has_identity = standardized["normalized_student_id"].ne("") | standardized["student_id"].ne("")
+    has_action = standardized["field_to_override"].ne("") & standardized["adjusted_value"].ne("")
+    standardized = standardized.loc[has_identity & has_action].copy()
+    if standardized.empty:
+        return empty_manual_adjustments()
+    standardized["adjustment_id"] = standardized.apply(_manual_adjustment_id, axis=1)
+    return standardized.drop_duplicates(subset=["adjustment_id"], keep="last").reset_index(drop=True)
+
+
+def load_manual_adjustments(path: Optional[Path] = None) -> pd.DataFrame:
+    candidate = path or MANUAL_ADJUSTMENTS_PATH
+    if not candidate.exists():
+        return empty_manual_adjustments()
+    frame = read_tabular_file(candidate)
+    return normalize_manual_adjustments(frame)
+
+
+def save_manual_adjustments(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
+    candidate = path or MANUAL_ADJUSTMENTS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    cleaned = normalize_manual_adjustments(frame)
+    cleaned.to_csv(candidate, index=False)
+    return candidate
 
 
 def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
@@ -419,6 +544,7 @@ def prepare_manual_corrections_workspace(
     review_queue_path: Optional[Path] = None,
 ) -> Dict[str, Path]:
     correction_file = corrections_path or MANUAL_ROSTER_CORRECTIONS_PATH
+    adjustments_file = correction_file.parent / MANUAL_ADJUSTMENTS_PATH.name
     transcripts = transcript_folder or MANUAL_TRANSCRIPTS_PATH
     review_queue = review_queue_path or (correction_file.parent / MANUAL_REVIEW_QUEUE_PATH.name)
     correction_file.parent.mkdir(parents=True, exist_ok=True)
@@ -426,9 +552,16 @@ def prepare_manual_corrections_workspace(
     review_queue.parent.mkdir(parents=True, exist_ok=True)
     if not correction_file.exists():
         empty_manual_roster_corrections().to_csv(correction_file, index=False)
+    if not adjustments_file.exists():
+        empty_manual_adjustments().to_csv(adjustments_file, index=False)
     if not review_queue.exists():
         empty_manual_review_queue().to_csv(review_queue, index=False)
-    return {"corrections_path": correction_file, "transcript_folder": transcripts, "review_queue_path": review_queue}
+    return {
+        "corrections_path": correction_file,
+        "adjustments_path": adjustments_file,
+        "transcript_folder": transcripts,
+        "review_queue_path": review_queue,
+    }
 
 
 def _manual_transcript_filename_part(value: object, fallback: str) -> str:
@@ -507,11 +640,14 @@ def build_manual_corrections_package(
 ) -> bytes:
     workspace = prepare_manual_corrections_workspace(corrections_path, transcript_folder, review_queue_path)
     correction_file = workspace["corrections_path"]
+    adjustments_file = workspace["adjustments_path"]
     transcripts = workspace["transcript_folder"]
     review_queue = workspace["review_queue_path"]
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.write(correction_file, arcname="manual_roster_corrections.csv")
+        if adjustments_file.exists():
+            archive.write(adjustments_file, arcname="manual_adjustments.csv")
         if review_queue.exists():
             archive.write(review_queue, arcname="manual_review_queue.csv")
         for path in sorted(transcripts.glob("*.txt")):
@@ -598,6 +734,10 @@ def import_manual_corrections_package(package_bytes: bytes) -> Dict[str, object]
             combined_queue = pd.concat([load_manual_review_queue(), incoming_queue], ignore_index=True)
             save_manual_review_queue(combined_queue)
             review_rows = len(load_manual_review_queue())
+        if "manual_adjustments.csv" in names:
+            incoming_adjustments = pd.read_csv(archive.open("manual_adjustments.csv"))
+            combined_adjustments = pd.concat([load_manual_adjustments(), incoming_adjustments], ignore_index=True)
+            save_manual_adjustments(combined_adjustments)
         for name in sorted(names):
             if not name.lower().startswith("transcripts/") or not name.lower().endswith(".txt"):
                 continue

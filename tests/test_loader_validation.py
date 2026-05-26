@@ -8,8 +8,10 @@ from app.config_loader import (
     find_manual_correction_conflicts,
     import_manual_corrections_package,
     ensure_manual_transcript_files,
+    load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_queue,
+    save_manual_adjustments,
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
     save_manual_review_queue,
@@ -159,6 +161,7 @@ def test_manual_workspace_and_package_are_helper_ready(tmp_path) -> None:
     with ZipFile(package_path) as archive:
         assert sorted(archive.namelist()) == [
             "Transcripts/A00000001_Doe_Jane.txt",
+            "manual_adjustments.csv",
             "manual_review_queue.csv",
             "manual_roster_corrections.csv",
         ]
@@ -187,9 +190,11 @@ def test_manual_correction_conflict_detection() -> None:
 
 def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monkeypatch) -> None:
     corrections_path = tmp_path / "config" / "manual_roster_corrections.csv"
+    adjustments_path = tmp_path / "config" / "manual_adjustments.csv"
     review_path = tmp_path / "config" / "manual_review_queue.csv"
     transcript_folder = tmp_path / "transcript_text" / "Transcripts"
     monkeypatch.setattr("app.config_loader.MANUAL_ROSTER_CORRECTIONS_PATH", corrections_path)
+    monkeypatch.setattr("app.config_loader.MANUAL_ADJUSTMENTS_PATH", adjustments_path)
     monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_QUEUE_PATH", review_path)
     monkeypatch.setattr("app.config_loader.MANUAL_TRANSCRIPTS_PATH", transcript_folder)
 
@@ -210,6 +215,17 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
         corrections_path,
     )
     save_manual_review_queue(pd.DataFrame({"review_key": ["A00000001"], "review_status": ["Corrected"]}), review_path)
+    save_manual_adjustments(
+        pd.DataFrame(
+            {
+                "student_id": ["A00000001"],
+                "normalized_student_id": ["A00000001"],
+                "field_to_override": ["final_outcome_bucket"],
+                "adjusted_value": ["Inactive"],
+            }
+        ),
+        adjustments_path,
+    )
     transcript_folder.mkdir(parents=True, exist_ok=True)
     (transcript_folder / "A00000001_Doe_Jane.txt").write_text("Spring 2026\nCredits: 3\n", encoding="utf-8")
     package_bytes = build_manual_corrections_package(corrections_path, transcript_folder, review_path)
@@ -220,4 +236,5 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     assert result["merged_rows"] == 1
     assert result["transcript_skipped"] == 1
     assert len(load_manual_roster_corrections(corrections_path)) == 1
+    assert len(load_manual_adjustments(adjustments_path)) == 1
     assert len(load_manual_review_queue(review_path)) == 1

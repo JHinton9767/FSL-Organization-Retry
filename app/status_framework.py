@@ -96,6 +96,9 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
 
 CONFIRMED_GRADUATION_EVIDENCE_PATTERNS = [
     r"roster status",
+    r"graduation list",
+    r"graduation file",
+    r"graduation source",
 ]
 
 EXPLICIT_GRADUATION_TEXT_COLUMNS = [
