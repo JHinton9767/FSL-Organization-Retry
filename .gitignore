@@ -28,6 +28,7 @@ reference_files/
 *.xlsb
 *.docx
 *.csv
+*.txt
 
 # Allow tracked config/documentation templates even though CSV/YAML data files
 # are ignored by default.
@@ -55,13 +56,30 @@ cache/
 build/
 dist/
 Yearly/
+__pycache__/
 *.pkl
 *.parquet
 *.feather
 *.sqlite
 *.db
+*.pyc
 
 # Office temp/lock files
 ~$*
 *.tmp
 *.bak
+
+# Local machine config
+config/local_paths.yaml
+.env
+ 
+# Ignore all raw inbox data
+data/inbox/
+ 
+# Ignore copied grade folders anywhere
+**/Copy of Grades/
+**/Copy of Rosters/
+**/Rosters/
+**/Grades/
+**/Grade Reports/
+**/Transcripts/
