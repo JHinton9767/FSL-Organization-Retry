@@ -75,6 +75,57 @@ def test_disappearance_without_graduation_is_not_graduated() -> None:
     assert tracking.loc[0, "final_outcome_bucket"] != OUTCOME_GRADUATED_CONFIRMED
 
 
+def test_transcript_graduation_counts_when_roster_has_no_graduation() -> None:
+    roster = _roster("A00000007", status="Active")
+    transcript_terms = pd.DataFrame(
+        {
+            "student_id": ["A00000007"],
+            "student_id_raw": ["A00000007"],
+            "first_name": ["Jane"],
+            "last_name": ["Doe"],
+            "source_file": ["A00000007_Doe_Jane.txt"],
+            "term_code": ["2024SP"],
+            "term_label": ["Spring 2024"],
+            "term_year": [2024],
+            "summary_graduation_term_code": ["2024SP"],
+            "summary_graduation_signal_text": [""],
+            "summary_academic_standing": ["Good Standing"],
+        }
+    )
+
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), transcript_terms)
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000007"), pd.DataFrame())
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_GRADUATED_CONFIRMED
+    assert tracking.loc[0, "explicit_graduation_evidence"] == "Yes"
+    assert "Transcript" in tracking.loc[0, "graduation_evidence_source"]
+
+
+def test_roster_graduation_source_takes_priority_over_transcript() -> None:
+    roster = _roster("A00000008", status="G")
+    transcript_terms = pd.DataFrame(
+        {
+            "student_id": ["A00000008"],
+            "student_id_raw": ["A00000008"],
+            "first_name": ["Jane"],
+            "last_name": ["Doe"],
+            "source_file": ["A00000008_Doe_Jane.txt"],
+            "term_code": ["2025SP"],
+            "term_label": ["Spring 2025"],
+            "term_year": [2025],
+            "summary_graduation_term_code": ["2025SP"],
+            "summary_graduation_signal_text": [""],
+            "summary_academic_standing": ["Good Standing"],
+        }
+    )
+
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), transcript_terms)
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000008"), pd.DataFrame())
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_GRADUATED_CONFIRMED
+    assert tracking.loc[0, "graduation_evidence_source"] == "Roster status"
+
+
 def test_source_appearances_exclude_rows_without_valid_student_id() -> None:
     roster = pd.concat([_roster("A00000002"), _roster("")], ignore_index=True)
 

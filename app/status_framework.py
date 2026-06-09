@@ -96,6 +96,8 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
 
 CONFIRMED_GRADUATION_EVIDENCE_PATTERNS = [
     r"roster status",
+    r"transcript graduation",
+    r"transcript text graduation",
     r"graduation list",
     r"graduation file",
     r"graduation source",

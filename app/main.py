@@ -1030,6 +1030,8 @@ def _manual_correction_identity_set(corrections: pd.DataFrame) -> set[str]:
 
 def _queue_reason_for_row(row: pd.Series) -> str:
     reasons: list[str] = []
+    if not _graduation_mentioned_for_row(row):
+        reasons.append("No graduation mention found")
     unknown_value = str(row.get("is_unknown_outcome", "") or "").strip().lower()
     is_unknown = unknown_value in {"true", "1", "yes", "y"}
     if is_unknown or str(row.get("outcome_resolution_group", "")).lower().find("unknown") >= 0:
@@ -1046,28 +1048,42 @@ def _queue_reason_for_row(row: pd.Series) -> str:
     return "; ".join(reasons) or "Review recommended"
 
 
+def _graduation_mentioned_for_row(row: pd.Series) -> bool:
+    if str(row.get("is_graduated", "") or "").strip().lower() in {"true", "1", "yes", "y"}:
+        return True
+    if str(row.get("graduation_evidence_confirmed", "") or "").strip().lower() in {"yes", "true", "1", "y"}:
+        return True
+    if str(row.get("graduation_status_without_evidence", "") or "").strip().lower() in {"yes", "true", "1", "y"}:
+        return True
+    text = " ".join(
+        str(row.get(column, "") or "")
+        for column in [
+            "latest_outcome_bucket",
+            "latest_roster_status_bucket",
+            "outcome_evidence_source",
+            "graduation_term",
+            "graduation_term_code",
+            "graduated_eventual",
+            "graduated_4yr",
+            "graduated_5yr",
+            "graduated_6yr",
+            "ambiguity_flags",
+            "manual_review_reason",
+        ]
+    ).lower()
+    return "graduat" in text or "degree awarded" in text or "degree confer" in text
+
+
 def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFrame) -> pd.DataFrame:
     if summary.empty:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
 
-    masks: list[pd.Series] = []
-    if "is_unknown_outcome" in summary.columns:
-        masks.append(_truthy_mask(summary["is_unknown_outcome"]))
-    if "outcome_resolution_group" in summary.columns:
-        masks.append(summary["outcome_resolution_group"].fillna("").astype(str).str.contains("unknown|unresolved|unmapped", case=False, na=False))
-    if "chapter_assignment_source" in summary.columns:
-        masks.append(summary["chapter_assignment_source"].fillna("").astype(str).str.contains("unresolved|inferred", case=False, na=False))
-    if "data_completeness_rate" in summary.columns:
-        masks.append(pd.to_numeric(summary["data_completeness_rate"], errors="coerce").lt(0.75))
-    if "student_id" in summary.columns:
-        masks.append(summary["student_id"].fillna("").astype(str).str.strip().eq(""))
-    if not masks:
+    if "student_id" not in summary.columns:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
 
-    combined = masks[0]
-    for mask in masks[1:]:
-        combined = combined | mask
-    candidates = summary.loc[combined].copy()
+    has_student_id = summary["student_id"].fillna("").astype(str).str.strip().ne("")
+    graduation_mentioned = summary.apply(_graduation_mentioned_for_row, axis=1)
+    candidates = summary.loc[has_student_id & ~graduation_mentioned].copy()
     correction_keys = _manual_correction_identity_set(corrections)
 
     rows: list[dict[str, object]] = []
@@ -1111,9 +1127,17 @@ def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.Dat
     if canonical is None or canonical.empty:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
     correction_keys = _manual_correction_identity_set(corrections)
+    summary = getattr(bundle, "summary", pd.DataFrame()).copy()
+    summary_lookup = {}
+    if not summary.empty and "student_id" in summary.columns:
+        for _, summary_row in summary.iterrows():
+            student_id = str(summary_row.get("student_id", "") or "").strip().upper()
+            if student_id and student_id not in summary_lookup:
+                summary_lookup[student_id] = summary_row
     rows: list[dict[str, object]] = []
     for _, row in canonical.iterrows():
         student_id = str(row.get("student_id", "") or "").strip()
+        summary_row = summary_lookup.get(student_id.upper(), pd.Series(dtype="object"))
         review_key = str(row.get("review_id", "") or "").strip() or student_id or str(row.get("normalized_student_id", "") or "").strip()
         if not review_key:
             continue
@@ -1123,11 +1147,11 @@ def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.Dat
                 "student_id": student_id,
                 "last_name": "",
                 "first_name": "",
-                "student_name": "",
-                "chapter": row.get("chapter", ""),
-                "join_term": "",
-                "last_observed_org_term": row.get("term", ""),
-                "latest_outcome_bucket": row.get("current_outcome_bucket", ""),
+                "student_name": summary_row.get("student_name", ""),
+                "chapter": row.get("chapter", "") or summary_row.get("chapter", ""),
+                "join_term": summary_row.get("join_term", ""),
+                "last_observed_org_term": summary_row.get("last_observed_org_term", row.get("term", "")),
+                "latest_outcome_bucket": row.get("current_outcome_bucket", "") or summary_row.get("latest_outcome_bucket", ""),
                 "outcome_resolution_group": row.get("current_outcome_bucket", ""),
                 "academic_year": "",
                 "term": row.get("term", ""),
@@ -1673,23 +1697,27 @@ def _render_manual_corrections_editor(bundle) -> None:
         with queue_filters[3]:
             reason_search = st.text_input("Reason contains", placeholder="unknown, inferred, incomplete")
 
-        evidence_filters = st.columns(4)
+        evidence_filters = st.columns(5)
         with evidence_filters[0]:
-            year_filter = st.multiselect("Academic year", options=_unique_text_options(review_queue, "academic_year"))
+            join_filter = st.multiselect("Join semester", options=sorted(_unique_text_options(review_queue, "join_term"), key=persistence_cohort_sort_key))
         with evidence_filters[1]:
-            term_filter = st.multiselect("Term", options=_unique_text_options(review_queue, "term"))
+            year_filter = st.multiselect("Academic year", options=_unique_text_options(review_queue, "academic_year"))
         with evidence_filters[2]:
-            org_filter = st.multiselect("Organization", options=_unique_text_options(review_queue, "organization"))
+            term_filter = st.multiselect("Term", options=_unique_text_options(review_queue, "term"))
         with evidence_filters[3]:
+            org_filter = st.multiselect("Organization", options=_unique_text_options(review_queue, "organization"))
+        with evidence_filters[4]:
             chapter_filter = st.multiselect("Chapter", options=_unique_text_options(review_queue, "chapter"))
 
-        issue_filters = st.columns(3)
+        issue_filters = st.columns(4)
         with issue_filters[0]:
             issue_filter = st.multiselect("Issue type", options=_unique_text_options(review_queue, "issue_type"))
         with issue_filters[1]:
             outcome_filter = st.multiselect("Outcome bucket", options=_unique_text_options(review_queue, "outcome_bucket"))
         with issue_filters[2]:
             priority_filter = st.multiselect("Priority", options=_unique_text_options(review_queue, "priority"))
+        with issue_filters[3]:
+            queue_sort = st.selectbox("Sort", options=["Join semester", "Priority", "Status", "Chapter"], index=0)
 
         queue_view = review_queue.copy()
         if status_filter:
@@ -1699,6 +1727,7 @@ def _render_manual_corrections_editor(bundle) -> None:
         if transcript_filter != "All":
             queue_view = queue_view.loc[queue_view["needs_transcript"].eq(transcript_filter)]
         for column, selected in [
+            ("join_term", join_filter),
             ("academic_year", year_filter),
             ("term", term_filter),
             ("organization", org_filter),
@@ -1711,6 +1740,19 @@ def _render_manual_corrections_editor(bundle) -> None:
                 queue_view = queue_view.loc[queue_view[column].isin(selected)]
         if reason_search:
             queue_view = queue_view.loc[queue_view["queue_reason"].fillna("").astype(str).str.contains(reason_search, case=False, regex=False, na=False)]
+        if not queue_view.empty:
+            queue_view = queue_view.copy()
+            queue_view["_join_sort"] = queue_view["join_term"].map(persistence_cohort_sort_key)
+            if queue_sort == "Priority":
+                queue_view["_priority_sort"] = queue_view["priority"].map({"High": 0, "Medium": 1, "Monitor": 2}).fillna(9)
+                queue_view = queue_view.sort_values(["_priority_sort", "_join_sort", "student_name", "student_id"], na_position="last")
+            elif queue_sort == "Status":
+                queue_view = queue_view.sort_values(["review_status", "_join_sort", "student_name", "student_id"], na_position="last")
+            elif queue_sort == "Chapter":
+                queue_view = queue_view.sort_values(["chapter", "_join_sort", "student_name", "student_id"], na_position="last")
+            else:
+                queue_view = queue_view.sort_values(["_join_sort", "student_name", "student_id"], na_position="last")
+            queue_view = queue_view.drop(columns=["_join_sort", "_priority_sort"], errors="ignore")
 
         st.subheader("Editable assignment queue")
         st.caption("Check one or more rows, then click one outcome button once. Stage mode keeps this fast by avoiding a CSV write until you commit staged changes.")

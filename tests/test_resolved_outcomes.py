@@ -100,6 +100,27 @@ def test_graduation_list_counts_as_confirmed_explicit_evidence() -> None:
     assert bool(result.loc[0, "graduation_status_without_evidence"]) is False
 
 
+def test_transcript_graduation_evidence_counts_as_confirmed_explicit_evidence() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "latest_outcome_bucket": ["Graduated"],
+            "latest_roster_status_bucket": ["Unknown"],
+            "active_flag": ["No"],
+            "graduated_eventual": ["Yes"],
+            "graduation_term_code": ["2024SP"],
+            "outcome_evidence_source": ["Transcript graduation evidence: A00000001_Doe_Jane.txt"],
+            "source_logic": ["canonical_pipeline"],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Graduated"
+    assert bool(result.loc[0, "is_graduated"]) is True
+    assert bool(result.loc[0, "graduation_status_without_evidence"]) is False
+
+
 def test_unconfirmed_graduation_flags_do_not_count_without_explicit_evidence() -> None:
     frame = pd.DataFrame(
         {

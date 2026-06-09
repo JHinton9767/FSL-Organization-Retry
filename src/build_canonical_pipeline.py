@@ -4161,6 +4161,39 @@ def build_graduation_maps(graduation: pd.DataFrame) -> Dict[str, Tuple[str, str]
     return id_map
 
 
+def transcript_graduation_evidence(academic_rows: pd.DataFrame) -> Tuple[str, str]:
+    if academic_rows.empty:
+        return "", ""
+    source_sheet = academic_rows.get("source_sheet", pd.Series("", index=academic_rows.index)).fillna("").astype(str).str.strip().str.lower()
+    source_basis = academic_rows.get("term_source_basis", pd.Series("", index=academic_rows.index)).fillna("").astype(str).str.strip().str.lower()
+    transcript_rows = academic_rows.loc[source_sheet.eq("transcript_text") | source_basis.eq("transcript_text")].copy()
+    if transcript_rows.empty:
+        return "", ""
+
+    transcript_rows["_grad_term_sort"] = transcript_rows.get("graduation_term_code", pd.Series("", index=transcript_rows.index)).map(
+        lambda value: sort_term_code(parse_term_code(value)[0]) if clean_text(value) else 999999
+    )
+    term_rows = transcript_rows.loc[transcript_rows["_grad_term_sort"].lt(999999)].copy()
+    if not term_rows.empty:
+        term_rows = term_rows.sort_values(["_grad_term_sort", "source_file"], na_position="last")
+        row = term_rows.iloc[0]
+        term_code = parse_term_code(row.get("graduation_term_code", ""))[0]
+        source = clean_text(row.get("source_file", "")) or "transcript text"
+        return term_code, f"Transcript graduation evidence: {source}"
+
+    status_rows = transcript_rows.loc[
+        transcript_rows.get("academic_status_raw", pd.Series("", index=transcript_rows.index)).map(has_confirmed_graduation_text)
+    ].copy()
+    if status_rows.empty:
+        return "", ""
+    status_rows["_term_sort"] = status_rows.get("term_code", pd.Series("", index=status_rows.index)).map(sort_term_code)
+    status_rows = status_rows.sort_values(["_term_sort", "source_file"], na_position="last")
+    row = status_rows.iloc[0]
+    term_code = clean_text(row.get("term_code", ""))
+    source = clean_text(row.get("source_file", "")) or "transcript text"
+    return term_code, f"Transcript graduation evidence: {source}"
+
+
 def _clean_display(value: object) -> str:
     text = clean_text(value)
     return "" if text.lower() in {"", "nan", "none", "nat", "<na>"} else text
@@ -4333,8 +4366,9 @@ def build_student_source_appearances(
 
     if transcript_terms is not None and not transcript_terms.empty:
         for row_number, row in transcript_terms.reset_index(drop=True).iterrows():
-            status = row.get("summary_graduation_signal_text", "") or row.get("summary_academic_standing", "")
-            normalized_status = OUTCOME_GRADUATED_CONFIRMED if has_confirmed_graduation_text(status) else row.get("summary_academic_standing", "")
+            grad_term_code = clean_text(row.get("summary_graduation_term_code", ""))
+            status = row.get("summary_graduation_signal_text", "") or ("Graduated" if grad_term_code else row.get("summary_academic_standing", ""))
+            normalized_status = OUTCOME_GRADUATED_CONFIRMED if grad_term_code or has_confirmed_graduation_text(status) else row.get("summary_academic_standing", "")
             rows.append(
                 _appearance_row(
                     student_id=row.get("student_id", ""),
@@ -4535,7 +4569,28 @@ def build_student_longitudinal_tracking(
         graduation_source = ""
         graduation_term = ""
         explicit_grad = False
-        if not grad_rows.empty:
+        roster_grad_rows = roster_rows.loc[
+            [
+                has_explicit_roster_graduation_status(raw_status, normalized_status)
+                for raw_status, normalized_status in zip(roster_rows.get("raw_status", pd.Series("", index=roster_rows.index)), roster_rows.get("normalized_status", pd.Series("", index=roster_rows.index)))
+            ]
+        ].copy() if not roster_rows.empty else pd.DataFrame()
+        transcript_grad_rows = grade_rows.loc[
+            grade_rows["source_type"].eq("transcript_text")
+            & (
+                grade_rows.get("normalized_status", pd.Series("", index=grade_rows.index)).fillna("").astype(str).eq(OUTCOME_GRADUATED_CONFIRMED)
+                | grade_rows.get("raw_status", pd.Series("", index=grade_rows.index)).map(has_confirmed_graduation_text)
+            )
+        ].copy() if not grade_rows.empty else pd.DataFrame()
+        if not roster_grad_rows.empty:
+            explicit_grad = True
+            graduation_source = "Roster status"
+            graduation_term = _last_non_blank(roster_grad_rows.sort_values("_term_sort")["term"].tolist())
+        elif not transcript_grad_rows.empty:
+            explicit_grad = True
+            graduation_source = "Transcript graduation evidence: " + (_unique_join(transcript_grad_rows["source_file"].tolist()) or "transcript text")
+            graduation_term = _first_non_blank(transcript_grad_rows.sort_values("_term_sort")["term"].tolist())
+        elif not grad_rows.empty:
             explicit_grad = True
             graduation_source = _unique_join(grad_rows["source_file"].tolist()) or "Graduation file"
             graduation_term = _first_non_blank(grad_rows["term"].tolist())
@@ -5004,9 +5059,14 @@ def build_student_summary(
         graduation_list_source = ""
         if student_id in graduation_by_id:
             graduation_list_term, graduation_list_source = graduation_by_id[student_id]
+        transcript_grad_term, transcript_grad_source = transcript_graduation_evidence(academic_rows)
         if (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
             explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
             evidence_source = "Roster status"
+            graduation_confirmed = True
+        elif transcript_grad_term:
+            explicit_grad_term = transcript_grad_term
+            evidence_source = transcript_grad_source
             graduation_confirmed = True
         elif graduation_list_term:
             explicit_grad_term = graduation_list_term
