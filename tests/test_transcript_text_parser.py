@@ -136,3 +136,32 @@ def test_transcript_text_parser_reads_inline_summary_values(tmp_path: Path) -> N
     assert transcript_terms.iloc[0]["summary_term_gpa"] == 3.31
     assert transcript_terms.iloc[0]["summary_cumulative_gpa"] == 2.97
     assert transcript_academic.iloc[0]["academic_standing_raw"] == "Good Standing"
+
+
+def test_transcript_text_parser_skips_files_without_valid_banner_id(tmp_path: Path) -> None:
+    transcript_dir = tmp_path / "transcript_text"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    transcript_file = transcript_dir / "jdoe123_Doe_Jane.txt"
+    transcript_file.write_text(
+        "\n".join(
+            [
+                "Spring 2024",
+                "3 ENG1310|LEC COLLEGE WRITING I A",
+                "Term at a glance:",
+                "Credits: 3",
+                "Academic Standing: Good Standing",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    transcript_terms, transcript_courses, transcript_audit, transcript_issues, transcript_academic = build_transcript_text_cache_bundle(
+        transcript_dir,
+        pd.DataFrame(columns=["source_file", "student_id", "first_name", "last_name", "notes"]),
+    )
+
+    assert transcript_terms.empty
+    assert transcript_courses.empty
+    assert transcript_academic.empty
+    assert transcript_audit.iloc[0]["parse_status"] == "skipped"
+    assert transcript_issues.iloc[0]["exception_type"] == "transcript_text_missing_or_invalid_student_id"

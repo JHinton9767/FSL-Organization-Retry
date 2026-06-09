@@ -127,11 +127,38 @@ def test_roster_graduation_source_takes_priority_over_transcript() -> None:
 
 
 def test_source_appearances_exclude_rows_without_valid_student_id() -> None:
-    roster = pd.concat([_roster("A00000002"), _roster("")], ignore_index=True)
+    roster = pd.concat([_roster("A00000002"), _roster(""), _roster("jdoe123"), _roster("A12345678")], ignore_index=True)
 
     appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     assert appearances["normalized_student_id"].tolist() == ["A00000002"]
+    assert appearances["student_id"].tolist() == ["A00000002"]
+
+
+def test_tracking_excludes_invalid_normalized_student_ids() -> None:
+    appearances = pd.DataFrame(
+        {
+            "student_id": ["A00000002", "jdoe123", "A12345678"],
+            "normalized_student_id": ["A00000002", "jdoe123", ""],
+            "source_type": ["roster", "roster", "roster"],
+            "term_code": ["2020FA", "2020FA", "2020FA"],
+            "term": ["Fall 2020", "Fall 2020", "Fall 2020"],
+            "source_file": ["roster.xlsx", "roster.xlsx", "roster.xlsx"],
+            "source_sheet": ["Alpha", "Alpha", "Alpha"],
+            "organization": ["Alpha", "Alpha", "Alpha"],
+            "chapter": ["Alpha", "Alpha", "Alpha"],
+            "raw_status": ["Active", "Active", "Active"],
+            "normalized_status": ["Active", "Active", "Active"],
+            "name_raw": ["Jane Doe", "Bad Netid", "Bad Banner"],
+            "email_raw": ["", "", ""],
+            "banner_id_raw": ["A00000002", "jdoe123", "A12345678"],
+            "input_group_id": ["1", "2", "3"],
+        }
+    )
+
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000002"), pd.DataFrame())
+
+    assert tracking["normalized_student_id"].tolist() == ["A00000002"]
 
 
 def test_latest_active_summary_signal_creates_still_active_bucket() -> None:

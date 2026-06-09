@@ -1066,31 +1066,17 @@ def canonical_snapshot_header(value: object) -> str:
 
 
 def build_person_identity_key(frame: pd.DataFrame) -> pd.Series:
-    student_id = frame.get("student_id", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip()
-    email = frame.get("email", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    first_name = frame.get("first_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    last_name = frame.get("last_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    name_key = (last_name + "|" + first_name).where(last_name.ne("") | first_name.ne(""), "")
-    return student_id.where(student_id.ne(""), email.where(email.ne(""), name_key))
+    return frame.get("student_id", pd.Series("", index=frame.index)).map(normalize_banner_id)
 
 
 def build_resolution_identity_key(frame: pd.DataFrame) -> pd.Series:
-    student_id = frame.get("student_id", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    email = frame.get("email", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    first_name = frame.get("first_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    last_name = frame.get("last_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
+    student_id = frame.get("student_id", pd.Series("", index=frame.index)).map(normalize_banner_id)
     id_key = ("id:" + student_id).where(student_id.ne(""), "")
-    email_key = ("email:" + email).where(email.ne(""), "")
-    name_key = ("name:" + last_name + "|" + first_name).where(last_name.ne("") | first_name.ne(""), "")
-    return id_key.where(id_key.ne(""), email_key.where(email_key.ne(""), name_key))
+    return id_key
 
 
 def build_review_key(frame: pd.DataFrame, first_name_column: str = "first_name", last_name_column: str = "last_name") -> pd.Series:
-    student_id = frame.get("student_id", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip()
-    first_name = frame.get(first_name_column, pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    last_name = frame.get(last_name_column, pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
-    name_key = ("name::" + last_name + "|" + first_name).where(last_name.ne("") | first_name.ne(""), "")
-    return student_id.where(student_id.ne(""), name_key)
+    return frame.get("student_id", pd.Series("", index=frame.index)).map(normalize_banner_id)
 
 
 def detect_membership_reference_header_row(frame: pd.DataFrame) -> Tuple[Optional[int], Dict[int, Tuple[str, str]], int]:
@@ -2093,6 +2079,33 @@ def load_transcript_text_tables(root: Path, manifest: pd.DataFrame) -> Tuple[pd.
         unmatched_lines: List[str] = []
         file_term_rows = 0
         file_course_rows = 0
+        if not normalize_banner_id(identity.get("student_id", "")):
+            issue_rows.append(
+                {
+                    "exception_type": "transcript_text_missing_or_invalid_student_id",
+                    "source_file": path.name,
+                    "student_id": "",
+                    "term_code": "",
+                    "details": "Excluded from transcript parsing because no valid Banner ID was present.",
+                }
+            )
+            audit_rows.append(
+                {
+                    "source_file": path.name,
+                    "student_id": "",
+                    "student_id_raw": identity.get("student_id_raw", ""),
+                    "first_name": identity.get("first_name", ""),
+                    "last_name": identity.get("last_name", ""),
+                    "identity_resolution_basis": identity.get("identity_resolution_basis", ""),
+                    "parse_status": "skipped",
+                    "term_count": 0,
+                    "course_count": 0,
+                    "warning_count": 1,
+                    "warnings": "No valid Banner ID was present.",
+                    "unmatched_lines": "",
+                }
+            )
+            continue
 
         try:
             raw_text = path.read_text(encoding="utf-8")
@@ -2806,6 +2819,10 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
     roster = pd.DataFrame(rows)
     if roster.empty:
         roster = pd.DataFrame(columns=schema_columns)
+    roster = ensure_columns(roster, schema_columns)
+    roster, id_exceptions = filter_valid_student_ids(roster, "roster")
+    if not id_exceptions.empty:
+        exceptions.extend(id_exceptions.to_dict("records"))
     return ensure_columns(roster, schema_columns), pd.DataFrame(exceptions)
 
 
@@ -2935,6 +2952,10 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
             "total_cumulative_hours",
         ]:
             academic[column] = coerce_numeric(academic[column])
+    academic = ensure_columns(academic, schema_columns)
+    academic, id_exceptions = filter_valid_student_ids(academic, "academic")
+    if not id_exceptions.empty:
+        exceptions.extend(id_exceptions.to_dict("records"))
     return ensure_columns(academic, schema_columns), pd.DataFrame(exceptions)
 
 
@@ -4389,7 +4410,9 @@ def build_student_source_appearances(
     appearances = ensure_columns(pd.DataFrame(rows), STUDENT_SOURCE_APPEARANCE_COLUMNS)
     if appearances.empty:
         return appearances
-    appearances = appearances.loc[appearances["normalized_student_id"].fillna("").astype(str).str.strip().ne("")].copy()
+    appearances["normalized_student_id"] = appearances["normalized_student_id"].map(normalize_banner_id)
+    appearances["student_id"] = appearances["normalized_student_id"]
+    appearances = appearances.loc[appearances["normalized_student_id"].ne("")].copy()
     return appearances.reset_index(drop=True)
 
 
@@ -4537,7 +4560,10 @@ def build_student_longitudinal_tracking(
     app = appearances.copy()
     app["_term_sort"] = app["term_code"].map(sort_term_code)
     app["_has_term"] = app["_term_sort"].lt(999999)
-    app["_normalized_student_id"] = app["normalized_student_id"].fillna("").astype(str).str.strip()
+    app["_normalized_student_id"] = app["normalized_student_id"].map(normalize_banner_id)
+    app = app.loc[app["_normalized_student_id"].ne("")].copy()
+    if app.empty:
+        return pd.DataFrame(columns=STUDENT_LONGITUDINAL_TRACKING_COLUMNS)
 
     summary_lookup = pd.DataFrame()
     if summary is not None and not summary.empty:

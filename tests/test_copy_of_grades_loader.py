@@ -41,35 +41,33 @@ def test_load_academic_term_table_parses_copy_of_grades_logi_and_skips_raw_data(
     _write_workbook(
         logi_path,
         [
-            ["Last Name", "First Name", "Student Status", "Major", "Semester Hours", "Semester GPA", "TXST GPA"],
-            ["Smith", "Alex", "Active", "Biology", 15, 3.1, 3.2],
-            ["Jones", "Jamie", "New Member", "Chemistry", 12, 3.5, 3.4],
-            ["Taylor", "Riley", "", "History", "", 2.8, 3.0],
+            ["Last Name", "First Name", "Student Status", "Major", "Semester Hours", "Semester GPA", "TXST GPA", "Banner ID"],
+            ["Smith", "Alex", "Active", "Biology", 15, 3.1, 3.2, "A05233818"],
+            ["Jones", "Jamie", "New Member", "Chemistry", 12, 3.5, 3.4, "A05233819"],
+            ["Taylor", "Riley", "", "History", "", 2.8, 3.0, "A05233820"],
         ],
     )
 
     academic, exceptions = load_academic_term_table(root)
 
-    assert exceptions.empty
-    assert len(academic.index) == 4
-    assert set(academic["term_code"]) == {"2024FA", "2025FA"}
-    assert set(academic["term_source_basis"]) == {"copy_of_grades_logi", "copy_of_grades_section"}
+    assert exceptions["exception_type"].tolist() == ["academic_missing_or_invalid_student_id"]
+    assert len(academic.index) == 3
+    assert set(academic["term_code"]) == {"2025FA"}
+    assert set(academic["term_source_basis"]) == {"copy_of_grades_logi"}
     assert academic["source_file"].astype(str).str.contains("Copy of Grades").all()
     assert not academic["source_file"].astype(str).str.contains("FSL Raw Data").any()
-    assert academic["source_file"].astype(str).str.contains("2024").any()
+    assert not academic["source_file"].astype(str).str.contains("2024").any()
 
     supplement = build_roster_supplement_from_academic(academic)
     alex = supplement.loc[supplement["last_name"].eq("Smith")].iloc[0]
     jamie = supplement.loc[supplement["last_name"].eq("Jones")].iloc[0]
     riley = supplement.loc[supplement["last_name"].eq("Taylor")].iloc[0]
-    casey = supplement.loc[supplement["last_name"].eq("Brown")].iloc[0]
 
     assert alex["chapter"] == "Alpha Sigma Phi"
     assert alex["org_status_bucket"] == "Active"
     assert jamie["org_status_bucket"] == "New Member"
     assert jamie["new_member_flag"] == "Yes"
     assert riley["org_status_bucket"] != "Graduated"
-    assert casey["org_status_bucket"] == "Active"
 
 
 def test_load_academic_term_table_parses_multi_section_copy_of_grades_report(tmp_path: Path) -> None:
