@@ -495,7 +495,6 @@ Persistent manual roster corrections:
   - `student_id`
   - `last_name`
   - `first_name`
-  - `student_join_term`
   - `organization_join_term`
   - `organization_name`
   - `leaving_organization_term`
@@ -510,12 +509,11 @@ Manual roster correction behavior:
 3. `organization_join_term` anchors the corrected organization-entry term and can create a manual New Member row
 4. `organization_name` changes the chapter assignment for matched roster rows
 5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
-6. `student_join_term` and `organization_join_term` mark existing roster rows between those terms as `Unknown`; if `student_join_term` is blank, it defaults to `organization_join_term`
-7. `final_status_term` and `final_status` can create or update the final manual status row
-8. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
-9. saving or committing correction rows in the app creates missing transcript paste-in templates under the configured `transcript_text_root/Transcripts/`
-10. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
-11. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
+6. `final_status_term` and `final_status` can create or update the final manual status row
+7. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
+8. saving or committing correction rows in the app creates missing transcript paste-in templates under the configured `transcript_text_root/Transcripts/`
+9. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
+10. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
 
 Roster exclusion behavior:
 

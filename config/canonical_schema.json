@@ -216,6 +216,8 @@
       "graduated_eventual_measurable",
       "graduated_4yr",
       "graduated_4yr_measurable",
+      "graduated_5yr",
+      "graduated_5yr_measurable",
       "graduated_6yr",
       "graduated_6yr_measurable",
       "retained_next_term",

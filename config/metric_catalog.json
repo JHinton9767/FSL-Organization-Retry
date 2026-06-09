@@ -70,6 +70,24 @@
     "limitations": "Requires enough follow-up time and explicit graduation evidence with a graduation term."
   },
   {
+    "key": "graduation_rate_5yr",
+    "display_name": "Observed 5-Year Graduation Rate",
+    "category": "Graduation",
+    "kind": "rate_bool",
+    "source_table": "summary",
+    "numerator_field": "graduated_5yr",
+    "denominator_field": "graduated_5yr_measurable",
+    "format": "percent",
+    "higher_is_better": true,
+    "min_sample_size": 5,
+    "description": "Observed share with confirmed graduation evidence within five years of organization entry.",
+    "logic_source": "Canonical evidence-gated graduation outcome fields",
+    "numerator_label": "Unique students with confirmed graduation evidence within 5 years",
+    "denominator_label": "Students with enough observation window",
+    "notes": "Recent cohorts may be excluded from the denominator.",
+    "limitations": "Requires enough follow-up time and explicit graduation evidence with a graduation term."
+  },
+  {
     "key": "graduation_rate_6yr",
     "display_name": "Observed 6-Year Graduation Rate",
     "category": "Graduation",
@@ -87,7 +105,6 @@
     "notes": "This is one of the best ranking metrics for long-run outcomes.",
     "limitations": "Disappearance and transcript completion history do not count as graduation without explicit evidence."
   },
-  {
     "key": "retention_rate_next_term",
     "display_name": "Organization Retention To Next Observed Term",
     "category": "Retention",

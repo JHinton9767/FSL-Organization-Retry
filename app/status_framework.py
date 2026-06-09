@@ -212,7 +212,7 @@ def graduation_claim_mask(frame: pd.DataFrame, config: Dict[str, Any] | None = N
             claim = claim | text.str.strip().str.lower().eq("graduated")
             for pattern in patterns:
                 claim = claim | text.str.contains(pattern, case=False, regex=True, na=False)
-    for column in ["graduated_eventual", "graduated_4yr", "graduated_6yr"]:
+    for column in ["graduated_eventual", "graduated_4yr", "graduated_5yr", "graduated_6yr"]:
         if column in frame.columns:
             claim = claim | _bool_like_series(frame[column]).fillna(False).astype(bool)
     return claim.fillna(False).astype(bool)
@@ -281,7 +281,7 @@ def build_outcome_resolution_fields(frame: pd.DataFrame, config: Dict[str, Any] 
     )
     graduation_columns = [
         column
-        for column in ["graduated_eventual", "graduated_4yr", "graduated_6yr"]
+        for column in ["graduated_eventual", "graduated_4yr", "graduated_5yr", "graduated_6yr"]
         if column in frame.columns
     ]
     if graduation_columns:

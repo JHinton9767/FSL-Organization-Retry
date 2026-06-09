@@ -37,7 +37,7 @@ def test_persistence_cohort_options_include_academic_year_totals_after_matching_
     assert options == ["Fall 2015", "Spring 2016", "Fall 2015 Total", "Fall 2016", "Spring 2017", "Fall 2016 Total"]
 
 
-def test_persistence_cohort_options_use_first_known_semester_before_join_term() -> None:
+def test_persistence_cohort_options_use_organization_join_term_only() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["1", "2", "3"],
@@ -48,7 +48,7 @@ def test_persistence_cohort_options_use_first_known_semester_before_join_term() 
 
     options = persistence_cohort_options(summary)
 
-    assert options == ["Fall 2019", "Spring 2020", "Fall 2019 Total", "Fall 2021"]
+    assert options == ["Fall 2020", "Fall 2021"]
 
 
 def test_filter_persistence_population_supports_academic_year_total_cohorts() -> None:
@@ -112,21 +112,21 @@ def test_build_persistence_dashboard_counts_roster_presence_as_retained() -> Non
             "council": ["IFC", "IFC", "IFC"],
             "org_type": ["Fraternity", "Fraternity", "Fraternity"],
             "is_graduated": [True, False, False],
-            "graduation_term": ["Fall 2023", "", ""],
-            "graduation_term_code": ["2023FA", "", ""],
+            "graduation_term": ["Fall 2024", "", ""],
+            "graduation_term_code": ["2024FA", "", ""],
         }
     )
     longitudinal = pd.DataFrame(
         {
             "student_id": ["1", "2", "1", "2"],
-            "observed_term": ["Fall 2020", "Fall 2020", "Fall 2023", "Fall 2023"],
-            "observed_term_sort": [20203, 20203, 20233, 20233],
+            "observed_term": ["Fall 2020", "Fall 2020", "Fall 2024", "Fall 2024"],
+            "observed_term_sort": [20203, 20203, 20243, 20243],
             "academic_present": ["Yes", "No", "Yes", "No"],
             "roster_present": ["No", "Yes", "No", "Yes"],
         }
     )
 
-    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2019", "ALL")
+    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2020", "ALL")
     table = dashboard["table_frame"]
     four_year = table.loc[table["Milestone"].eq("4 Year")].iloc[0]
 

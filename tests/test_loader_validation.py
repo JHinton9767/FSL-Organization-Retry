@@ -47,14 +47,13 @@ def test_canonical_loader_rejects_noncanonical_dataset_types() -> None:
         _validate_loaded_tables("processed", {})
 
 
-def test_manual_roster_corrections_default_student_join_term(tmp_path) -> None:
+def test_manual_roster_corrections_use_organization_join_term_only(tmp_path) -> None:
     path = tmp_path / "manual_roster_corrections.csv"
     corrections = pd.DataFrame(
         {
             "student_id": ["A00000001"],
             "last_name": ["Doe"],
             "first_name": ["Jane"],
-            "student_join_term": [""],
             "organization_join_term": ["Spring 2026"],
             "organization_name": ["Alpha Sigma Phi"],
             "leaving_organization_term": [""],
@@ -66,12 +65,11 @@ def test_manual_roster_corrections_default_student_join_term(tmp_path) -> None:
     save_manual_roster_corrections(corrections, path)
     loaded = load_manual_roster_corrections(path)
 
-    assert loaded.loc[0, "student_join_term"] == "Spring 2026"
+    assert "student_join_term" not in loaded.columns
     assert list(loaded.columns) == [
         "student_id",
         "last_name",
         "first_name",
-        "student_join_term",
         "organization_join_term",
         "organization_name",
         "leaving_organization_term",
@@ -88,7 +86,6 @@ def test_manual_roster_corrections_accept_exclusion_action(tmp_path) -> None:
             "student_id": ["A00000001"],
             "last_name": ["Doe"],
             "first_name": ["Jane"],
-            "student_join_term": [""],
             "organization_join_term": ["Spring 2026"],
             "organization_name": ["Alpha Sigma Phi"],
             "leaving_organization_term": [""],
@@ -188,7 +185,7 @@ def test_manual_roster_correction_normalizer_removes_deleted_rows() -> None:
 
     assert len(normalized) == 1
     assert normalized.loc[0, "student_id"] == "A00000002"
-    assert normalized.loc[0, "student_join_term"] == "Spring 2026"
+    assert "student_join_term" not in normalized.columns
 
 
 def test_manual_roster_correction_normalizer_requires_valid_student_id() -> None:
@@ -230,7 +227,6 @@ def test_manual_roster_corrections_create_transcript_template(tmp_path) -> None:
             "student_id": ["A00000001"],
             "last_name": ["Doe"],
             "first_name": ["Jane"],
-            "student_join_term": [""],
             "organization_join_term": ["Spring 2026"],
             "organization_name": ["Alpha Sigma Phi"],
             "leaving_organization_term": ["Spring 2026"],
@@ -275,7 +271,6 @@ def test_manual_correction_conflict_detection() -> None:
             "student_id": ["A00000001", "A00000001"],
             "last_name": ["Doe", "Doe"],
             "first_name": ["Jane", "Jane"],
-            "student_join_term": ["Spring 2026", "Spring 2026"],
             "organization_join_term": ["Spring 2026", "Spring 2026"],
             "organization_name": ["Alpha Sigma Phi", "Alpha Sigma Phi"],
             "leaving_organization_term": ["Spring 2026", "Spring 2026"],
@@ -306,7 +301,6 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
                 "student_id": ["A00000001"],
                 "last_name": ["Doe"],
                 "first_name": ["Jane"],
-                "student_join_term": ["Spring 2026"],
                 "organization_join_term": ["Spring 2026"],
                 "organization_name": ["Alpha Sigma Phi"],
                 "leaving_organization_term": ["Spring 2026"],

@@ -252,7 +252,6 @@ MANUAL_ROSTER_CORRECTION_COLUMNS = [
     "student_id",
     "last_name",
     "first_name",
-    "student_join_term",
     "organization_join_term",
     "organization_name",
     "leaving_organization_term",
@@ -438,13 +437,6 @@ def append_manual_adjustments(frame: pd.DataFrame, path: Optional[Path] = None) 
     return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": len(to_append), "skipped_rows": skipped}
 
 
-def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
-    if {"student_join_term", "organization_join_term"}.issubset(frame.columns):
-        missing_student_join = frame["student_join_term"].fillna("").astype(str).str.strip().eq("")
-        frame.loc[missing_student_join, "student_join_term"] = frame.loc[missing_student_join, "organization_join_term"]
-    return frame
-
-
 def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
     if frame is None or frame.empty:
         return empty_manual_roster_corrections()
@@ -465,7 +457,6 @@ def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.Dat
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         cleaned[column] = cleaned[column].str.strip()
     cleaned["student_id"] = cleaned["student_id"].map(normalize_banner_id)
-    cleaned = _default_student_join_term(cleaned)
 
     has_identity = cleaned["student_id"].ne("")
     has_action = (
@@ -494,7 +485,6 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         "student_id": ["student_id", "student id", "banner id", "banner"],
         "last_name": ["last_name", "last name"],
         "first_name": ["first_name", "first name"],
-        "student_join_term": ["student_join_term", "student join term", "school_entry_term", "school entry term"],
         "organization_join_term": ["organization_join_term", "organization join term", "org join term", "join_term", "term_code", "term code", "term_label", "term label", "term"],
         "organization_name": ["organization_name", "organization name", "chapter_override", "chapter override", "chapter", "new chapter", "organization"],
         "leaving_organization_term": ["leaving_organization_term", "leaving organization term", "last_org_term", "last observed org term"],
@@ -646,7 +636,6 @@ def manual_transcript_template(row: pd.Series) -> str:
         [
             f"Student ID: {normalize_text(row.get('student_id', ''))}",
             f"Name: {normalize_text(row.get('first_name', ''))} {normalize_text(row.get('last_name', ''))}".strip(),
-            f"Student Join Term: {normalize_text(row.get('student_join_term', ''))}",
             f"Organization Join Term: {normalize_text(row.get('organization_join_term', ''))}",
             f"Organization Name: {normalize_text(row.get('organization_name', ''))}",
             f"Leaving Organization Term: {normalize_text(row.get('leaving_organization_term', ''))}",
@@ -677,7 +666,6 @@ def ensure_manual_transcript_files(corrections: pd.DataFrame, folder: Optional[P
     frame = frame[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         frame[column] = frame[column].str.strip()
-    frame = _default_student_join_term(frame)
 
     created: List[Path] = []
     seen: set[Path] = set()

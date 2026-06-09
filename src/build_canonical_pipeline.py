@@ -292,11 +292,7 @@ COHORT_STATUS_OVER_TIME_COLUMNS = [
 
 COHORT_STATUS_ORDER = ["Retained", "Graduated", "Not Retained"]
 COHORT_TERM_CANDIDATES = [
-    ("school_entry_term_code", "school_entry_term", "school_entry_term"),
     ("join_term_code", "join_term", "organization_join_term"),
-    ("first_observed_org_term_code", "first_observed_org_term", "first_observed_org_term"),
-    ("first_observed_academic_term_code", "first_observed_academic_term", "first_observed_academic_term"),
-    ("", "org_entry_cohort", "org_entry_cohort"),
 ]
 
 GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS = [
@@ -3241,7 +3237,6 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
             "student_id",
             "last_name",
             "first_name",
-            "student_join_term",
             "organization_join_term",
             "organization_name",
             "leaving_organization_term",
@@ -3395,7 +3390,6 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
         note_text = "Applied from config/manual_roster_corrections.csv."
 
         organization_join_term = _manual_term_code(getattr(correction, "organization_join_term", ""))
-        student_join_term = _manual_term_code(getattr(correction, "student_join_term", "")) or organization_join_term
         leaving_organization_term = _manual_term_code(getattr(correction, "leaving_organization_term", ""))
         final_status_term = _manual_term_code(getattr(correction, "final_status_term", ""))
         final_status = clean_text(getattr(correction, "final_status", ""))
@@ -3404,7 +3398,7 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
         if exclude_from_roster:
             term_scope_mask = _manual_term_scope_mask(
                 result,
-                organization_join_term or student_join_term,
+                organization_join_term,
                 final_status_term or leaving_organization_term,
             )
             exclusion_mask = student_mask & (organization_mask if organization_name else pd.Series(True, index=result.index, dtype="bool")) & term_scope_mask
@@ -3413,10 +3407,6 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
             continue
 
         result_term_sort = result["term_code"].map(sort_term_code)
-        if student_join_term and organization_join_term and sort_term_code(student_join_term) < sort_term_code(organization_join_term):
-            gap_mask = student_mask & result_term_sort.gt(sort_term_code(student_join_term)) & result_term_sort.lt(sort_term_code(organization_join_term))
-            _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked student/org pre-entry gap as Unknown.", organization_name)
-
         if leaving_organization_term and final_status_term and sort_term_code(leaving_organization_term) < sort_term_code(final_status_term):
             gap_mask = matched_student_org & result_term_sort.gt(sort_term_code(leaving_organization_term)) & result_term_sort.lt(sort_term_code(final_status_term))
             _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked org-exit/final-status gap as Unknown.", organization_name)
@@ -4658,8 +4648,10 @@ def apply_tracking_outcomes_to_summary(summary: pd.DataFrame, tracking: pd.DataF
     result["graduation_evidence_confirmed"] = grad.map(lambda value: "Yes" if value else "No")
     result["graduated_eventual"] = grad.map(lambda value: "Yes" if value else "No")
     measurable_4 = result.get("graduated_4yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
+    measurable_5 = result.get("graduated_5yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
     measurable_6 = result.get("graduated_6yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
     result.loc[~grad & measurable_4, "graduated_4yr"] = "No"
+    result.loc[~grad & measurable_5, "graduated_5yr"] = "No"
     result.loc[~grad & measurable_6, "graduated_6yr"] = "No"
     result = result.drop(columns=["_normalized_student_id"], errors="ignore")
     return result
@@ -5118,10 +5110,13 @@ def build_student_summary(
         graduated_eventual = "Yes" if latest_outcome_bucket == "Graduated" else "No"
         graduated_eventual_measurable = "Yes" if join_term_code else "No"
         graduated_4yr_measurable = measurable_for_years(4)
+        graduated_5yr_measurable = measurable_for_years(5)
         graduated_6yr_measurable = measurable_for_years(6)
         grad_4_target = sort_term_code(f"{int(join_term_code[:4]) + 4}{join_term_code[-2:]}") if join_term_code else 999999
+        grad_5_target = sort_term_code(f"{int(join_term_code[:4]) + 5}{join_term_code[-2:]}") if join_term_code else 999999
         grad_6_target = sort_term_code(f"{int(join_term_code[:4]) + 6}{join_term_code[-2:]}") if join_term_code else 999999
         graduated_4yr = "Yes" if latest_outcome_bucket == "Graduated" and graduated_4yr_measurable == "Yes" and explicit_grad_term and sort_term_code(explicit_grad_term) <= grad_4_target else "No" if graduated_4yr_measurable == "Yes" else ""
+        graduated_5yr = "Yes" if latest_outcome_bucket == "Graduated" and graduated_5yr_measurable == "Yes" and explicit_grad_term and sort_term_code(explicit_grad_term) <= grad_5_target else "No" if graduated_5yr_measurable == "Yes" else ""
         graduated_6yr = "Yes" if latest_outcome_bucket == "Graduated" and graduated_6yr_measurable == "Yes" and explicit_grad_term and sort_term_code(explicit_grad_term) <= grad_6_target else "No" if graduated_6yr_measurable == "Yes" else ""
 
         first_standing = clean_text(academic_rows["academic_standing_bucket"].iloc[0]) if not academic_rows.empty else "Unknown"
@@ -5197,6 +5192,8 @@ def build_student_summary(
                 "graduated_eventual_measurable": graduated_eventual_measurable,
                 "graduated_4yr": graduated_4yr,
                 "graduated_4yr_measurable": graduated_4yr_measurable,
+                "graduated_5yr": graduated_5yr,
+                "graduated_5yr_measurable": graduated_5yr_measurable,
                 "graduated_6yr": graduated_6yr,
                 "graduated_6yr_measurable": graduated_6yr_measurable,
                 "retained_next_term": has_term(roster_term_sorts, next_term_sort),
@@ -5287,6 +5284,7 @@ def build_student_summary(
     confirmed_grad_mask = summary["is_graduated"].fillna(False).astype(bool)
     summary.loc[~confirmed_grad_mask, "graduated_eventual"] = "No"
     summary.loc[~confirmed_grad_mask & summary["graduated_4yr_measurable"].fillna("").astype(str).eq("Yes"), "graduated_4yr"] = "No"
+    summary.loc[~confirmed_grad_mask & summary["graduated_5yr_measurable"].fillna("").astype(str).eq("Yes"), "graduated_5yr"] = "No"
     summary.loc[~confirmed_grad_mask & summary["graduated_6yr_measurable"].fillna("").astype(str).eq("Yes"), "graduated_6yr"] = "No"
     summary["status_group"] = summary["latest_outcome_bucket"].replace("", "Unknown")
     summary["resolved_outcome_flag"] = summary["is_resolved_outcome"].fillna(False).map(lambda value: "Yes" if bool(value) else "No")
@@ -5549,6 +5547,7 @@ def build_cohort_metrics(summary: pd.DataFrame, tracking: Optional[pd.DataFrame]
         rows.append(metric_row("Coverage", "Students", cohort, int(frame["student_id"].nunique()), numerator=int(frame["student_id"].nunique()), rate=1.0))
         rate_row("Observed Eventual Graduation Rate", "graduated_eventual", "graduated_eventual_measurable", "Graduation")
         rate_row("Observed 4-Year Graduation Rate", "graduated_4yr", "graduated_4yr_measurable", "Graduation")
+        rate_row("Observed 5-Year Graduation Rate", "graduated_5yr", "graduated_5yr_measurable", "Graduation")
         rate_row("Observed 6-Year Graduation Rate", "graduated_6yr", "graduated_6yr_measurable", "Graduation")
         rate_row("Organization Retention To Next Term", "retained_next_term", "retained_next_term_measurable", "Retention")
         rate_row("Organization Retention To Next Fall", "retained_next_fall", "retained_next_fall_measurable", "Retention")
@@ -5698,7 +5697,7 @@ def build_cohort_status_over_time(
     longitudinal: pd.DataFrame,
     max_years: int = 6,
 ) -> pd.DataFrame:
-    """Build chart-ready cohort status rows from each student's earliest known semester."""
+    """Build chart-ready cohort status rows from each student's organization join term."""
     schema_columns = load_schema()["tables"].get("cohort_status_over_time", COHORT_STATUS_OVER_TIME_COLUMNS)
     if summary.empty:
         return pd.DataFrame(columns=schema_columns)
@@ -5859,6 +5858,10 @@ def build_measurable_window_checks(summary: pd.DataFrame) -> List[dict]:
         summary["graduated_4yr_measurable"].fillna("").astype(str).ne("Yes")
         & summary["graduated_4yr"].fillna("").astype(str).str.strip().ne("")
     ]
+    invalid_5yr = summary.loc[
+        summary["graduated_5yr_measurable"].fillna("").astype(str).ne("Yes")
+        & summary["graduated_5yr"].fillna("").astype(str).str.strip().ne("")
+    ]
     invalid_6yr = summary.loc[
         summary["graduated_6yr_measurable"].fillna("").astype(str).ne("Yes")
         & summary["graduated_6yr"].fillna("").astype(str).str.strip().ne("")
@@ -5870,6 +5873,15 @@ def build_measurable_window_checks(summary: pd.DataFrame) -> List[dict]:
             "Status": "Pass" if invalid_4yr.empty else "Fail",
             "Value": int(len(invalid_4yr)),
             "Notes": "" if invalid_4yr.empty else "Non-measurable students have populated 4-year graduation values.",
+        }
+    )
+    rows.append(
+        {
+            "Check Group": "Windows",
+            "Check": "5-year graduation window enforcement",
+            "Status": "Pass" if invalid_5yr.empty else "Fail",
+            "Value": int(len(invalid_5yr)),
+            "Notes": "" if invalid_5yr.empty else "Non-measurable students have populated 5-year graduation values.",
         }
     )
     rows.append(

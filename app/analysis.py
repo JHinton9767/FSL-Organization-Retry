@@ -1097,12 +1097,6 @@ def persistence_checkpoint_sort_value(cohort_label: str, offset: int) -> int | N
 def _persistence_cohort_series(summary: pd.DataFrame) -> pd.Series:
     if summary.empty:
         return pd.Series(dtype="object")
-    if "school_entry_term" in summary.columns:
-        school_terms = _frame_text_series(summary, "school_entry_term")
-        if "join_term" in summary.columns:
-            join_terms = _frame_text_series(summary, "join_term")
-            return school_terms.where(school_terms.ne(""), join_terms)
-        return school_terms
     if "join_term" in summary.columns:
         return _frame_text_series(summary, "join_term")
     return pd.Series("", index=summary.index, dtype="object")

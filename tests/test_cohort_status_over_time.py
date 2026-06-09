@@ -13,7 +13,7 @@ def test_cohort_status_over_time_tracks_retained_graduated_and_not_retained() ->
         {
             "student_id": ["A00000001", "A00000002", "A00000003"],
             "school_entry_term": ["Fall 2019", "Fall 2019", "Fall 2019"],
-            "join_term": ["Fall 2020", "Fall 2020", "Fall 2020"],
+            "join_term": ["Fall 2019", "Fall 2019", "Fall 2019"],
             "is_graduated": [True, False, False],
             "graduation_term_code": ["2023FA", "", ""],
             "graduation_term": ["Fall 2023", "", ""],
@@ -42,7 +42,7 @@ def test_cohort_status_over_time_tracks_retained_graduated_and_not_retained() ->
     assert four_year.loc["Graduated", "share"] == 1 / 3
 
 
-def test_cohort_status_over_time_uses_earliest_known_semester() -> None:
+def test_cohort_status_over_time_uses_organization_join_term() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["A00000001"],
@@ -56,15 +56,15 @@ def test_cohort_status_over_time_uses_earliest_known_semester() -> None:
 
     table = build_cohort_status_over_time(summary, pd.DataFrame())
 
-    assert table["cohort_term"].unique().tolist() == ["Fall 2018"]
-    assert table["cohort_basis"].unique().tolist() == ["school_entry_term"]
+    assert table["cohort_term"].unique().tolist() == ["Fall 2020"]
+    assert table["cohort_basis"].unique().tolist() == ["organization_join_term"]
 
 
 def test_cohort_status_over_time_does_not_count_unconfirmed_graduation() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["A00000001"],
-            "school_entry_term": ["Fall 2019"],
+            "join_term": ["Fall 2019"],
             "is_graduated": [False],
             "graduated_eventual": ["Yes"],
             "graduation_term_code": ["2023FA"],

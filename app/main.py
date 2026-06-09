@@ -218,7 +218,7 @@ def _persistence_header() -> None:
         </style>
         <div class="txst-persistence-wrap">
           <div class="txst-persistence-title">Persistence and Graduation</div>
-          <div class="txst-persistence-subtitle">First Known Semester Cohorts</div>
+          <div class="txst-persistence-subtitle">Organization Join Term Cohorts</div>
           <div class="txst-persistence-rule">
             <span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
@@ -260,10 +260,10 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     cohort_options = persistence_cohort_options(summary)
 
     _persistence_header()
-    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using each student's first known semester and confirmed graduation evidence only.")
+    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using organization join term cohorts and confirmed graduation evidence only.")
 
     if not cohort_options:
-        st.warning("No first-known-semester cohorts were available for the persistence and graduation view.")
+        st.warning("No organization join-term cohorts were available for the persistence and graduation view.")
         return
 
     default_cohort = _default_persistence_cohort(cohort_options, longitudinal)
@@ -994,12 +994,10 @@ def _manual_correction_row_from_summary(row: pd.Series) -> dict[str, object]:
     final_status_term = row.get("graduation_term", "") or row.get("last_observed_academic_term", "") or row.get("last_observed_org_term", "")
     final_status = row.get("latest_outcome_bucket", "") or row.get("status_group", "") or row.get("latest_roster_status_bucket", "")
     organization_join_term = row.get("join_term", "") or row.get("join_term_code", "")
-    student_join_term = row.get("school_entry_term", "") or row.get("school_entry_term_code", "") or organization_join_term
     return {
         "student_id": row.get("student_id", ""),
         "last_name": row.get("last_name", ""),
         "first_name": row.get("first_name", ""),
-        "student_join_term": student_join_term,
         "organization_join_term": organization_join_term,
         "organization_name": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
         "leaving_organization_term": row.get("last_observed_org_term", "") or row.get("last_observed_org_term_code", ""),
@@ -1231,7 +1229,6 @@ def _manual_corrections_from_queue_rows(queue_rows: pd.DataFrame, final_status: 
             "student_id": rows["student_id"],
             "last_name": rows["last_name"],
             "first_name": rows["first_name"],
-            "student_join_term": rows["join_term"],
             "organization_join_term": rows["join_term"],
             "organization_name": rows["chapter"],
             "leaving_organization_term": rows["last_observed_org_term"],
@@ -1601,7 +1598,6 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     st.info(
         "Work the Assignment Queue first when possible. Search is still available when you need to jump to a specific student. "
-        "If Student Join Term is blank, it defaults to Organization Join Term when saved. "
         "Stage mode keeps new corrections in a pending list and writes them all to the CSV at once; commit staged changes before rerunning the canonical pipeline or downloading a helper package. "
         "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV. "
         "Use **Exclude From Roster Calculations** when the source roster row itself should be ignored by the canonical pipeline."
@@ -1896,7 +1892,6 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "student_id": st.column_config.TextColumn("Student ID"),
                     "last_name": st.column_config.TextColumn("Last Name"),
                     "first_name": st.column_config.TextColumn("First Name"),
-                    "student_join_term": st.column_config.TextColumn("Student Join Term", help="Optional. If blank, this defaults to Organization Join Term."),
                     "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
                     "organization_name": st.column_config.TextColumn("Organization Name"),
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
@@ -2795,6 +2790,8 @@ def _render_advanced_analytics(
                 "graduated_eventual_measurable",
                 "graduated_4yr",
                 "graduated_4yr_measurable",
+                "graduated_5yr",
+                "graduated_5yr_measurable",
                 "graduated_6yr",
                 "graduated_6yr_measurable",
                 "graduation_term",
