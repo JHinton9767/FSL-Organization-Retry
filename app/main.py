@@ -218,7 +218,7 @@ def _persistence_header() -> None:
         </style>
         <div class="txst-persistence-wrap">
           <div class="txst-persistence-title">Persistence and Graduation</div>
-          <div class="txst-persistence-subtitle">Organization-Entry Cohorts</div>
+          <div class="txst-persistence-subtitle">First Known Semester Cohorts</div>
           <div class="txst-persistence-rule">
             <span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
@@ -260,10 +260,10 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     cohort_options = persistence_cohort_options(summary)
 
     _persistence_header()
-    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using first observed organization-entry cohorts and confirmed graduation evidence only.")
+    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using each student's first known semester and confirmed graduation evidence only.")
 
     if not cohort_options:
-        st.warning("No join-term cohorts were available for the persistence and graduation view.")
+        st.warning("No first-known-semester cohorts were available for the persistence and graduation view.")
         return
 
     default_cohort = _default_persistence_cohort(cohort_options, longitudinal)

@@ -1094,14 +1094,25 @@ def persistence_checkpoint_sort_value(cohort_label: str, offset: int) -> int | N
     return int(parse_term_label(f"{int(year) + int(offset)}{season_code}")["sort_value"])
 
 
+def _persistence_cohort_series(summary: pd.DataFrame) -> pd.Series:
+    if summary.empty:
+        return pd.Series(dtype="object")
+    if "school_entry_term" in summary.columns:
+        school_terms = _frame_text_series(summary, "school_entry_term")
+        if "join_term" in summary.columns:
+            join_terms = _frame_text_series(summary, "join_term")
+            return school_terms.where(school_terms.ne(""), join_terms)
+        return school_terms
+    if "join_term" in summary.columns:
+        return _frame_text_series(summary, "join_term")
+    return pd.Series("", index=summary.index, dtype="object")
+
+
 def persistence_cohort_options(summary: pd.DataFrame) -> list[str]:
-    if summary.empty or "join_term" not in summary.columns:
+    if summary.empty:
         return []
     values = (
-        summary["join_term"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
+        _persistence_cohort_series(summary)
         .replace("", pd.NA)
         .dropna()
         .unique()
@@ -1159,21 +1170,21 @@ def _normalized_org_type_series(frame: pd.DataFrame) -> pd.Series:
 
 
 def filter_persistence_population(summary: pd.DataFrame, cohort_term: str, distinction: str = "ALL") -> pd.DataFrame:
-    if summary.empty or "join_term" not in summary.columns:
+    if summary.empty:
         return pd.DataFrame(columns=summary.columns)
 
-    join_terms = summary["join_term"].fillna("").astype(str).str.strip()
+    cohort_terms = _persistence_cohort_series(summary)
     cohort_label = str(cohort_term).strip()
     total_start_year = _persistence_total_start_year(cohort_label)
     if total_start_year is not None:
-        academic_year_start = join_terms.map(_persistence_academic_year_start)
-        season_series = join_terms.map(lambda value: str(parse_term_label(value)["season"]).lower())
+        academic_year_start = cohort_terms.map(_persistence_academic_year_start)
+        season_series = cohort_terms.map(lambda value: str(parse_term_label(value)["season"]).lower())
         frame = summary.loc[
             academic_year_start.eq(total_start_year)
             & season_series.isin({"fall", "spring"})
         ].copy()
     else:
-        frame = summary.loc[join_terms.eq(cohort_label)].copy()
+        frame = summary.loc[cohort_terms.eq(cohort_label)].copy()
     if frame.empty:
         return frame
 
@@ -1263,36 +1274,32 @@ def build_persistence_dashboard(
         else:
             long_frame["observed_term_sort"] = 999999
 
-    academic_mask = (
-        long_frame.get("academic_present", pd.Series(False, index=long_frame.index))
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .isin({"yes", "true", "1"})
+    presence_mask = _truthy_series(long_frame.get("academic_present"), long_frame.index) | _truthy_series(
+        long_frame.get("roster_present"),
+        long_frame.index,
     )
-    academic_rows = long_frame.loc[academic_mask].copy()
-    if academic_rows.empty:
-        empty["meta"]["note"] = "No academic-present longitudinal rows matched the selected cohort."
+    presence_rows = long_frame.loc[presence_mask].copy()
+    if presence_rows.empty:
+        empty["meta"]["note"] = "No roster-present or academic-present longitudinal rows matched the selected cohort."
         return empty
 
-    academic_presence_by_term = {
+    presence_by_term = {
         int(term_sort): set(group["student_id"].tolist())
-        for term_sort, group in academic_rows.groupby("observed_term_sort", dropna=False)
+        for term_sort, group in presence_rows.groupby("observed_term_sort", dropna=False)
         if pd.notna(term_sort)
     }
-    academic_rows["persistence_academic_year_start"] = academic_rows.get("observed_term", pd.Series("", index=academic_rows.index)).map(
+    presence_rows["persistence_academic_year_start"] = presence_rows.get("observed_term", pd.Series("", index=presence_rows.index)).map(
         _persistence_academic_year_start
     )
-    academic_presence_by_academic_year = {
+    presence_by_academic_year = {
         int(year_value): set(group["student_id"].tolist())
-        for year_value, group in academic_rows.loc[academic_rows["persistence_academic_year_start"].notna()].groupby(
+        for year_value, group in presence_rows.loc[presence_rows["persistence_academic_year_start"].notna()].groupby(
             "persistence_academic_year_start",
             dropna=False,
         )
         if pd.notna(year_value)
     }
-    max_term_sort = int(pd.to_numeric(academic_rows["observed_term_sort"], errors="coerce").dropna().max()) if not academic_rows.empty else 0
+    max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
 
     cohort_work = cohort.copy()
     cohort_work["student_id"] = cohort_work["student_id"].fillna("").astype(str).str.strip()
@@ -1342,9 +1349,9 @@ def build_persistence_dashboard(
                 .tolist()
             )
             if is_total_cohort:
-                retained_students = academic_presence_by_academic_year.get(target_year, set()) - graduated_students
+                retained_students = presence_by_academic_year.get(target_year, set()) - graduated_students
             else:
-                retained_students = academic_presence_by_term.get(target_sort, set()) - graduated_students
+                retained_students = presence_by_term.get(target_sort, set()) - graduated_students
             graduated_count = len(graduated_students)
             retained_count = len(retained_students)
             not_retained_count = max(student_count_total - retained_count - graduated_count, 0)
@@ -1394,9 +1401,9 @@ def build_persistence_dashboard(
             "students": student_count_total,
             "max_milestone": last_milestone_label,
             "note": (
-                "Retained counts show students observed academically in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved."
+                "Retained counts show students observed in roster or academic records in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved."
                 if not is_total_cohort
-                else "Retained counts show students observed academically in either the fall or spring term of that academic year checkpoint. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Students not observed during that academic year remain in Not Retained / Unresolved."
+                else "Retained counts show students observed in roster or academic records in either the fall or spring term of that academic year checkpoint. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Students not observed during that academic year remain in Not Retained / Unresolved."
             ),
         },
     }
