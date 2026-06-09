@@ -105,6 +105,7 @@
     "notes": "This is one of the best ranking metrics for long-run outcomes.",
     "limitations": "Disappearance and transcript completion history do not count as graduation without explicit evidence."
   },
+  {
     "key": "retention_rate_next_term",
     "display_name": "Organization Retention To Next Observed Term",
     "category": "Retention",
