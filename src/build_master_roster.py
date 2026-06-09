@@ -291,25 +291,16 @@ def normalize_status(value: str) -> str:
     return raw
 
 
+VALID_BANNER_ID_RE = re.compile(r"^A0\d{7}$")
+
+
 def normalize_banner_id(value: str) -> str:
     text = clean_text(value)
     if not text:
         return ""
     text = re.sub(r"\.0$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[^A-Za-z0-9]", "", text).upper()
-    if not text:
-        return ""
-    if re.fullmatch(r"A0\d{7}", text):
-        return text
-    if re.fullmatch(r"A\d{8}", text):
-        return text
-    if re.fullmatch(r"A\d{7}", text):
-        return f"A0{text[1:]}"
-    if re.fullmatch(r"\d{8}", text):
-        return f"A{text}"
-    if re.fullmatch(r"\d{7}", text):
-        return f"A0{text}"
-    return text
+    text = text.upper()
+    return text if VALID_BANNER_ID_RE.fullmatch(text) else ""
 
 
 def detect_inline_chapter_label(row: Tuple[object, ...], header_map: Dict[str, int]) -> str:

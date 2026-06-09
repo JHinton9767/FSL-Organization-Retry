@@ -16,6 +16,7 @@ from src.build_master_roster import (
     extract_person_name_from_label,
     infer_chapter,
     is_individual_new_member_form_pdf,
+    normalize_banner_id,
     should_upgrade_to_new_member_status,
     source_context_indicates_new_member,
 )
@@ -107,6 +108,16 @@ def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> N
     assert roster_status_bucket("G", "Member") == "Graduated"
     assert roster_status_bucket("Graduated", "Member") == "Graduated"
     assert roster_status_bucket("Good Standing", "Member") != "Graduated"
+
+
+def test_banner_id_normalization_only_keeps_valid_a0_ids() -> None:
+    assert normalize_banner_id("a01234567") == "A01234567"
+    assert normalize_banner_id("A01234567") == "A01234567"
+    assert normalize_banner_id("A01234567.0") == "A01234567"
+    assert normalize_banner_id("1234567") == ""
+    assert normalize_banner_id("A12345678") == ""
+    assert normalize_banner_id("A0123456") == ""
+    assert normalize_banner_id("") == ""
 
 
 def test_manual_roster_corrections_override_status_and_chapter() -> None:

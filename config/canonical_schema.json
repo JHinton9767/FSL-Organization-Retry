@@ -10,6 +10,7 @@
     "input_group_outcome_buckets",
     "yearly_unique_id_checklist",
     "manual_review_queue",
+    "cohort_status_over_time",
     "cohort_metrics",
     "qa_checks"
   ],
@@ -252,6 +253,23 @@
       "Rate",
       "Average Value",
       "Notes"
+    ],
+    "cohort_status_over_time": [
+      "cohort_term",
+      "cohort_term_code",
+      "cohort_term_sort",
+      "cohort_basis",
+      "checkpoint",
+      "checkpoint_offset_years",
+      "checkpoint_term",
+      "checkpoint_term_code",
+      "checkpoint_term_sort",
+      "status",
+      "student_count",
+      "cohort_student_count",
+      "share",
+      "measurement_basis",
+      "notes"
     ],
     "qa_checks": [
       "Check Group",

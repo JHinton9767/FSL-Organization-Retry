@@ -15,6 +15,7 @@ import pandas as pd
 from app.io_utils import ROOT, canonical_headers, normalize_text, read_tabular_file
 from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
+from src.build_master_roster import normalize_banner_id
 from src.path_config import load_path_config
 
 
@@ -136,6 +137,7 @@ def load_dataset_manifest() -> Dict[str, Any]:
                     "input_group_outcome_buckets.parquet",
                     "yearly_unique_id_checklist.parquet",
                     "manual_review_queue.parquet",
+                    "cohort_status_over_time.parquet",
                     "transcript_term_summary.parquet",
                     "transcript_course_detail.parquet",
                     "transcript_parse_audit.parquet",
@@ -238,13 +240,10 @@ def load_manual_chapter_assignments(path: Optional[Path] = None) -> pd.DataFrame
     standardized = standardized.fillna("").astype(str)
     for column in ["student_id", "first_name", "last_name", "chapter_override", "notes"]:
         standardized[column] = standardized[column].str.strip()
+    standardized["student_id"] = standardized["student_id"].map(normalize_banner_id)
     standardized = standardized.loc[
         standardized["chapter_override"].ne("")
-        & (
-            standardized["student_id"].ne("")
-            | standardized["first_name"].ne("")
-            | standardized["last_name"].ne("")
-        )
+        & standardized["student_id"].ne("")
     ].copy()
     return standardized.reset_index(drop=True)
 
@@ -369,9 +368,15 @@ def normalize_manual_adjustments(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
     standardized = standardized.fillna("").astype(str)
     for column in MANUAL_ADJUSTMENT_COLUMNS:
         standardized[column] = standardized[column].str.strip()
+    standardized["student_id"] = standardized["student_id"].map(normalize_banner_id)
+    standardized["normalized_student_id"] = standardized["normalized_student_id"].map(normalize_banner_id)
     standardized["normalized_student_id"] = standardized["normalized_student_id"].where(
         standardized["normalized_student_id"].ne(""),
         standardized["student_id"],
+    )
+    standardized["student_id"] = standardized["student_id"].where(
+        standardized["student_id"].ne(""),
+        standardized["normalized_student_id"],
     )
     standardized["adjustment_type"] = standardized["adjustment_type"].where(
         standardized["adjustment_type"].ne(""),
@@ -386,7 +391,7 @@ def normalize_manual_adjustments(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
         datetime.now().isoformat(timespec="seconds"),
     )
     standardized["active"] = standardized["active"].where(standardized["active"].ne(""), "Yes")
-    has_identity = standardized["normalized_student_id"].ne("") | standardized["student_id"].ne("")
+    has_identity = standardized["normalized_student_id"].ne("")
     has_action = standardized["field_to_override"].ne("") & standardized["adjusted_value"].ne("")
     standardized = standardized.loc[has_identity & has_action].copy()
     if standardized.empty:
@@ -415,29 +420,22 @@ def append_manual_adjustments(frame: pd.DataFrame, path: Optional[Path] = None) 
     candidate = path or MANUAL_ADJUSTMENTS_PATH
     candidate.parent.mkdir(parents=True, exist_ok=True)
     incoming = normalize_manual_adjustments(frame)
+    incoming_count = len(incoming)
+    existing = load_manual_adjustments(candidate) if candidate.exists() else empty_manual_adjustments()
     if incoming.empty:
-        if not candidate.exists():
-            empty_manual_adjustments().to_csv(candidate, index=False)
+        save_manual_adjustments(existing, candidate)
         return {"path": candidate, "incoming_rows": 0, "appended_rows": 0, "skipped_rows": 0}
 
-    existing_ids: set[str] = set()
-    if candidate.exists() and candidate.stat().st_size:
-        try:
-            existing = pd.read_csv(candidate, usecols=["adjustment_id"], dtype=str)
-            existing_ids = set(existing["adjustment_id"].fillna("").astype(str).str.strip())
-        except (ValueError, pd.errors.EmptyDataError):
-            existing_ids = set()
+    existing_ids = set(existing["adjustment_id"].fillna("").astype(str).str.strip()) if not existing.empty else set()
+    to_append = incoming.loc[~incoming["adjustment_id"].isin(existing_ids)].copy()
+    skipped = int(incoming_count - len(to_append))
+    if to_append.empty:
+        save_manual_adjustments(existing, candidate)
+        return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": 0, "skipped_rows": skipped}
 
-    incoming = incoming.loc[~incoming["adjustment_id"].isin(existing_ids)].copy()
-    skipped = int(len(normalize_manual_adjustments(frame)) - len(incoming))
-    if incoming.empty:
-        if not candidate.exists():
-            empty_manual_adjustments().to_csv(candidate, index=False)
-        return {"path": candidate, "incoming_rows": skipped, "appended_rows": 0, "skipped_rows": skipped}
-
-    write_header = not candidate.exists() or candidate.stat().st_size == 0
-    incoming.to_csv(candidate, mode="a", header=write_header, index=False)
-    return {"path": candidate, "incoming_rows": skipped + len(incoming), "appended_rows": len(incoming), "skipped_rows": skipped}
+    combined = pd.concat([existing, to_append], ignore_index=True) if not existing.empty else to_append
+    save_manual_adjustments(combined, candidate)
+    return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": len(to_append), "skipped_rows": skipped}
 
 
 def _default_student_join_term(frame: pd.DataFrame) -> pd.DataFrame:
@@ -466,9 +464,10 @@ def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.Dat
     cleaned = cleaned[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str)
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         cleaned[column] = cleaned[column].str.strip()
+    cleaned["student_id"] = cleaned["student_id"].map(normalize_banner_id)
     cleaned = _default_student_join_term(cleaned)
 
-    has_identity = cleaned["student_id"].ne("") | cleaned["first_name"].ne("") | cleaned["last_name"].ne("")
+    has_identity = cleaned["student_id"].ne("")
     has_action = (
         cleaned["organization_join_term"].ne("")
         | cleaned["organization_name"].ne("")
@@ -545,34 +544,25 @@ def append_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] =
     candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
     candidate.parent.mkdir(parents=True, exist_ok=True)
     incoming = normalize_manual_roster_corrections(frame)
+    incoming_count = len(incoming)
+    existing = load_manual_roster_corrections(candidate) if candidate.exists() else empty_manual_roster_corrections()
     if incoming.empty:
-        if not candidate.exists():
-            empty_manual_roster_corrections().to_csv(candidate, index=False)
+        save_manual_roster_corrections(existing, candidate)
         return {"path": candidate, "incoming_rows": 0, "appended_rows": 0, "skipped_rows": 0}
 
     incoming_keys = incoming[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str).agg("\u241f".join, axis=1)
-    existing_keys: set[str] = set()
-    if candidate.exists() and candidate.stat().st_size:
-        try:
-            existing = pd.read_csv(candidate, dtype=str)
-            for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
-                if column not in existing.columns:
-                    existing[column] = ""
-            existing_keys = set(existing[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str).agg("\u241f".join, axis=1))
-        except pd.errors.EmptyDataError:
-            existing_keys = set()
+    existing_keys = set(existing[MANUAL_ROSTER_CORRECTION_COLUMNS].fillna("").astype(str).agg("\u241f".join, axis=1)) if not existing.empty else set()
 
     append_mask = ~incoming_keys.isin(existing_keys)
     to_append = incoming.loc[append_mask].copy()
     skipped = int((~append_mask).sum())
     if to_append.empty:
-        if not candidate.exists():
-            empty_manual_roster_corrections().to_csv(candidate, index=False)
-        return {"path": candidate, "incoming_rows": len(incoming), "appended_rows": 0, "skipped_rows": skipped}
+        save_manual_roster_corrections(existing, candidate)
+        return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": 0, "skipped_rows": skipped}
 
-    write_header = not candidate.exists() or candidate.stat().st_size == 0
-    to_append.to_csv(candidate, mode="a", header=write_header, index=False)
-    return {"path": candidate, "incoming_rows": len(incoming), "appended_rows": len(to_append), "skipped_rows": skipped}
+    combined = pd.concat([existing, to_append], ignore_index=True) if not existing.empty else to_append
+    save_manual_roster_corrections(combined, candidate)
+    return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": len(to_append), "skipped_rows": skipped}
 
 
 def load_manual_review_queue(path: Optional[Path] = None) -> pd.DataFrame:
@@ -692,8 +682,7 @@ def ensure_manual_transcript_files(corrections: pd.DataFrame, folder: Optional[P
     created: List[Path] = []
     seen: set[Path] = set()
     for _, row in frame.iterrows():
-        has_identity = bool(normalize_text(row.get("student_id", "")) or normalize_text(row.get("first_name", "")) or normalize_text(row.get("last_name", "")))
-        if not has_identity:
+        if not normalize_banner_id(row.get("student_id", "")):
             continue
         path = manual_transcript_path_for_correction(row, target_folder)
         if path in seen:
@@ -730,7 +719,7 @@ def build_manual_corrections_package(
 
 
 def manual_correction_identity_key(frame: pd.DataFrame) -> pd.Series:
-    student_id = frame.get("student_id", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.upper()
+    student_id = frame.get("student_id", pd.Series("", index=frame.index)).map(normalize_banner_id)
     first_name = frame.get("first_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
     last_name = frame.get("last_name", pd.Series("", index=frame.index)).fillna("").astype(str).str.strip().str.lower()
     return student_id.where(student_id.ne(""), last_name + "|" + first_name)

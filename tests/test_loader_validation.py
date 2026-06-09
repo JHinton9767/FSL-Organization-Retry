@@ -13,6 +13,7 @@ from app.config_loader import (
     load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_queue,
+    normalize_manual_adjustments,
     save_manual_adjustments,
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
@@ -188,6 +189,39 @@ def test_manual_roster_correction_normalizer_removes_deleted_rows() -> None:
     assert len(normalized) == 1
     assert normalized.loc[0, "student_id"] == "A00000002"
     assert normalized.loc[0, "student_join_term"] == "Spring 2026"
+
+
+def test_manual_roster_correction_normalizer_requires_valid_student_id() -> None:
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["", "1234567", "A12345678", "A00000001", "a00000002"],
+            "last_name": ["Blank", "Numeric", "Wrong", "Doe", "Smith"],
+            "first_name": ["No", "Bad", "Bad", "Jane", "Alex"],
+            "organization_join_term": ["Spring 2026"] * 5,
+            "organization_name": ["Alpha Sigma Phi"] * 5,
+            "final_status": ["Inactive"] * 5,
+        }
+    )
+
+    normalized = normalize_manual_roster_corrections(corrections)
+
+    assert normalized["student_id"].tolist() == ["A00000001", "A00000002"]
+
+
+def test_manual_adjustment_normalizer_requires_valid_student_id() -> None:
+    adjustments = pd.DataFrame(
+        {
+            "student_id": ["", "A12345678", "a00000001"],
+            "normalized_student_id": ["", "", ""],
+            "field_to_override": ["final_outcome_bucket"] * 3,
+            "adjusted_value": ["Inactive", "Graduated", "Inactive"],
+        }
+    )
+
+    normalized = normalize_manual_adjustments(adjustments)
+
+    assert normalized["student_id"].tolist() == ["A00000001"]
+    assert normalized["normalized_student_id"].tolist() == ["A00000001"]
 
 
 def test_manual_roster_corrections_create_transcript_template(tmp_path) -> None:

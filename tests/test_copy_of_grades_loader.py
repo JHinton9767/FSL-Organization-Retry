@@ -335,8 +335,6 @@ def test_prepare_canonical_sources_keeps_roster_membership_authoritative() -> No
     prepared_roster, prepared_academic, *_ = prepare_canonical_sources(
         roster_term,
         academic_term,
-        pd.DataFrame(),
-        pd.DataFrame(),
         settings={"secondary_organizations": []},
         manual_chapter_assignments=pd.DataFrame(),
         manual_roster_corrections=pd.DataFrame(),

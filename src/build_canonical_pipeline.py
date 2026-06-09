@@ -272,6 +272,33 @@ INPUT_GROUP_OUTCOME_BUCKET_COLUMNS = [
     "warnings",
 ]
 
+COHORT_STATUS_OVER_TIME_COLUMNS = [
+    "cohort_term",
+    "cohort_term_code",
+    "cohort_term_sort",
+    "cohort_basis",
+    "checkpoint",
+    "checkpoint_offset_years",
+    "checkpoint_term",
+    "checkpoint_term_code",
+    "checkpoint_term_sort",
+    "status",
+    "student_count",
+    "cohort_student_count",
+    "share",
+    "measurement_basis",
+    "notes",
+]
+
+COHORT_STATUS_ORDER = ["Retained", "Graduated", "Not Retained"]
+COHORT_TERM_CANDIDATES = [
+    ("school_entry_term_code", "school_entry_term", "school_entry_term"),
+    ("join_term_code", "join_term", "organization_join_term"),
+    ("first_observed_org_term_code", "first_observed_org_term", "first_observed_org_term"),
+    ("first_observed_academic_term_code", "first_observed_academic_term", "first_observed_academic_term"),
+    ("", "org_entry_cohort", "org_entry_cohort"),
+]
+
 GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS = [
     "review_id",
     "review_type",
@@ -2300,10 +2327,6 @@ def normalize_email(value: object) -> str:
     return clean_text(value).lower()
 
 
-def person_name_key(first_name: object, last_name: object) -> Tuple[str, str]:
-    return clean_text(first_name).lower(), clean_text(last_name).lower()
-
-
 def chapter_is_missing(value: object) -> bool:
     text = clean_text(value)
     if not text:
@@ -2597,13 +2620,19 @@ def load_graduation_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
         return pd.DataFrame(columns=GRADUATION_COLUMNS), pd.DataFrame(exceptions)
 
     graduation = pd.DataFrame(rows)
-    graduation = graduation.loc[
-        graduation["Student ID"].fillna("").astype(str).str.strip().ne("")
-        | (
-            graduation["First Name"].fillna("").astype(str).str.strip().ne("")
-            | graduation["Last Name"].fillna("").astype(str).str.strip().ne("")
+    missing_id = graduation.loc[graduation["Student ID"].fillna("").astype(str).str.strip().eq("")].copy()
+    if not missing_id.empty:
+        exceptions.extend(
+            {
+                "exception_type": "graduation_missing_or_invalid_student_id",
+                "source_file": row.get("Graduation Source File", ""),
+                "student_id": "",
+                "term_code": parse_term_code(row.get("Graduation Term", ""))[0],
+                "details": "Excluded from calculations because no valid Banner ID was present.",
+            }
+            for row in missing_id.to_dict("records")
         )
-    ].copy()
+    graduation = graduation.loc[graduation["Student ID"].fillna("").astype(str).str.strip().ne("")].copy()
     return graduation.reset_index(drop=True), pd.DataFrame(exceptions)
 
 
@@ -2913,65 +2942,6 @@ def load_academic_term_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return ensure_columns(academic, schema_columns), pd.DataFrame(exceptions)
 
 
-def build_identity_maps(
-    roster: pd.DataFrame,
-    academic: pd.DataFrame,
-    snapshot: pd.DataFrame,
-    graduation: pd.DataFrame,
-) -> Tuple[Dict[str, str], Dict[Tuple[str, str], str], pd.DataFrame]:
-    email_candidates: Dict[str, set[str]] = defaultdict(set)
-    name_candidates: Dict[Tuple[str, str], set[str]] = defaultdict(set)
-    exceptions: List[dict] = []
-
-    source_frames = [
-        roster[["student_id", "email", "first_name", "last_name"]].copy(),
-        academic[["student_id", "email", "first_name", "last_name"]].copy(),
-    ]
-    if not snapshot.empty:
-        snap = pd.DataFrame(
-            {
-                "student_id": snapshot["Student ID"].map(normalize_banner_id),
-                "email": pd.Series("", index=snapshot.index, dtype="object"),
-                "first_name": snapshot["First Name"].map(clean_text),
-                "last_name": snapshot["Last Name"].map(clean_text),
-            }
-        )
-        source_frames.append(snap)
-    if not graduation.empty:
-        grad = pd.DataFrame(
-            {
-                "student_id": graduation["Student ID"].map(normalize_banner_id),
-                "email": pd.Series("", index=graduation.index, dtype="object"),
-                "first_name": graduation["First Name"].map(clean_text),
-                "last_name": graduation["Last Name"].map(clean_text),
-            }
-        )
-        source_frames.append(grad)
-
-    combined = pd.concat(source_frames, ignore_index=True)
-    combined = combined.loc[combined["student_id"].fillna("").astype(str).str.strip().ne("")]
-    for row in combined.itertuples(index=False):
-        if clean_text(row.email):
-            email_candidates[clean_text(row.email).lower()].add(clean_text(row.student_id))
-        if clean_text(row.first_name) or clean_text(row.last_name):
-            name_candidates[person_name_key(row.first_name, row.last_name)].add(clean_text(row.student_id))
-
-    email_map: Dict[str, str] = {}
-    name_map: Dict[Tuple[str, str], str] = {}
-    for email, ids in email_candidates.items():
-        if len(ids) == 1:
-            email_map[email] = next(iter(ids))
-        else:
-            exceptions.append({"exception_type": "ambiguous_email_match", "source_file": "", "student_id": "", "term_code": "", "details": f"Email {email} matched multiple student IDs: {', '.join(sorted(ids))}"})
-    for key, ids in name_candidates.items():
-        if len(ids) == 1:
-            name_map[key] = next(iter(ids))
-        else:
-            exceptions.append({"exception_type": "ambiguous_name_match", "source_file": "", "student_id": "", "term_code": "", "details": f"Name {key[0]} {key[1]} matched multiple student IDs: {', '.join(sorted(ids))}"})
-
-    return email_map, name_map, pd.DataFrame(exceptions)
-
-
 def build_roster_supplement_from_academic(academic: pd.DataFrame) -> pd.DataFrame:
     schema_columns = load_schema()["tables"]["roster_term"]
     if academic.empty:
@@ -3053,7 +3023,7 @@ def build_roster_supplement_from_academic(academic: pd.DataFrame) -> pd.DataFram
     return ensure_columns(supplement, schema_columns)
 
 
-def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map: Dict[Tuple[str, str], str], source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def filter_valid_student_ids(frame: pd.DataFrame, source_label: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
     result = ensure_text_columns(
         frame,
         [
@@ -3065,42 +3035,15 @@ def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map
     if result.empty:
         return result, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
 
-    missing_mask = result["student_id"].fillna("").astype(str).str.strip().eq("")
-    if not missing_mask.any():
-        return result, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
+    result["student_id"] = result["student_id"].map(normalize_banner_id)
+    invalid_mask = result["student_id"].fillna("").astype(str).str.strip().eq("")
+    if not invalid_mask.any():
+        return result.reset_index(drop=True), pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
 
-    missing = result.loc[missing_mask].copy()
-    missing["_email_key"] = missing["email"].fillna("").astype(str).str.strip().str.lower()
-    missing["_name_first"] = missing["first_name"].fillna("").astype(str).str.strip().str.lower()
-    missing["_name_last"] = missing["last_name"].fillna("").astype(str).str.strip().str.lower()
-    missing["_name_key"] = list(zip(missing["_name_first"], missing["_name_last"]))
-    missing["_matched_id"] = missing["_email_key"].map(email_map)
-    name_match_mask = missing["_matched_id"].isna() & (missing["_name_first"].ne("") | missing["_name_last"].ne(""))
-    if name_match_mask.any():
-        missing.loc[name_match_mask, "_matched_id"] = missing.loc[name_match_mask, "_name_key"].map(name_map)
-
-    matched_mask = missing["_matched_id"].fillna("").astype(str).str.strip().ne("")
-    if matched_mask.any():
-        matched = missing.loc[matched_mask].copy()
-        email_match_mask = matched["_email_key"].map(email_map).fillna("").astype(str).str.strip().ne("")
-        matched["identity_resolution_basis"] = email_match_mask.map(lambda flag: "unique_email_match" if flag else "unique_name_match")
-        matched["identity_resolution_notes"] = matched["identity_resolution_basis"].map(
-            {
-                "unique_email_match": "Resolved from unique email match.",
-                "unique_name_match": "Resolved from unique exact name match.",
-            }
-        )
-        result.loc[matched.index, "student_id"] = matched["_matched_id"].astype(str)
-        result.loc[matched.index, "identity_resolution_basis"] = matched["identity_resolution_basis"]
-        result.loc[matched.index, "identity_resolution_notes"] = matched["identity_resolution_notes"]
-
-    unresolved = missing.loc[~matched_mask].copy()
-    if unresolved.empty:
-        return result, pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-
+    unresolved = result.loc[invalid_mask].copy()
     exceptions = pd.DataFrame(
         {
-            "exception_type": f"{source_label}_missing_student_id",
+            "exception_type": f"{source_label}_missing_or_invalid_student_id",
             "source_file": unresolved["source_file"].fillna("").astype(str).str.strip(),
             "student_id": "",
             "term_code": unresolved["term_code"].fillna("").astype(str).str.strip(),
@@ -3113,9 +3056,13 @@ def resolve_missing_ids(frame: pd.DataFrame, email_map: Dict[str, str], name_map
     )
     exceptions["details"] = exceptions["details"].where(
         exceptions["details"].str.strip().ne(""),
-        unresolved["_email_key"].where(unresolved["_email_key"].ne(""), "Unidentified row"),
+        unresolved.get("email", pd.Series("", index=unresolved.index)).fillna("").astype(str).str.strip().where(
+            unresolved.get("email", pd.Series("", index=unresolved.index)).fillna("").astype(str).str.strip().ne(""),
+            "Unidentified row",
+        ),
     )
-    return result, exceptions.reset_index(drop=True)
+    exceptions["details"] = "Excluded from calculations because no valid Banner ID was present: " + exceptions["details"]
+    return result.loc[~invalid_mask].reset_index(drop=True), exceptions.reset_index(drop=True)
 
 
 def resolve_missing_roster_chapters(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
@@ -3259,7 +3206,6 @@ def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFra
         ],
     )
     override_by_id: Dict[str, dict] = {}
-    override_by_name: Dict[Tuple[str, str], dict] = {}
 
     for row in overrides.itertuples(index=False):
         override = {
@@ -3267,24 +3213,11 @@ def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFra
             "notes": clean_text(getattr(row, "notes", "")),
         }
         student_id = normalize_banner_id(getattr(row, "student_id", ""))
-        first_name = clean_text(getattr(row, "first_name", ""))
-        last_name = clean_text(getattr(row, "last_name", ""))
         if student_id:
             override_by_id[student_id] = override
-        elif first_name or last_name:
-            override_by_name[person_name_key(first_name, last_name)] = override
 
     result["_manual_id_key"] = result["student_id"].map(normalize_banner_id)
-    result["_manual_name_key"] = list(
-        zip(
-            result["first_name"].fillna("").astype(str).str.strip().str.lower(),
-            result["last_name"].fillna("").astype(str).str.strip().str.lower(),
-        )
-    )
     result["_manual_override"] = result["_manual_id_key"].map(override_by_id)
-    name_override_mask = result["_manual_override"].isna()
-    if name_override_mask.any():
-        result.loc[name_override_mask, "_manual_override"] = result.loc[name_override_mask, "_manual_name_key"].map(override_by_name)
 
     override_mask = result["_manual_override"].notna()
     if override_mask.any():
@@ -3296,7 +3229,7 @@ def apply_manual_chapter_assignments(roster: pd.DataFrame, overrides: pd.DataFra
             lambda value: value.get("notes", "") or "Applied from config/manual_chapter_assignments.csv."
         )
 
-    return result.drop(columns=["_manual_id_key", "_manual_name_key", "_manual_override"], errors="ignore")
+    return result.drop(columns=["_manual_id_key", "_manual_override"], errors="ignore")
 
 
 def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECTIONS_PATH) -> None:
@@ -3334,17 +3267,9 @@ def _manual_term_code(value: object) -> str:
 def _manual_student_mask(roster: pd.DataFrame, correction: object) -> pd.Series:
     mask = pd.Series(False, index=roster.index, dtype="bool")
     student_id = normalize_banner_id(getattr(correction, "student_id", ""))
-    first_name = clean_text(getattr(correction, "first_name", "")).lower()
-    last_name = clean_text(getattr(correction, "last_name", "")).lower()
 
     if student_id:
         mask = roster["student_id"].map(normalize_banner_id).eq(student_id)
-    elif first_name or last_name:
-        mask = pd.Series(True, index=roster.index, dtype="bool")
-        if first_name:
-            mask = mask & roster["first_name"].fillna("").astype(str).str.strip().str.lower().eq(first_name)
-        if last_name:
-            mask = mask & roster["last_name"].fillna("").astype(str).str.strip().str.lower().eq(last_name)
 
     return mask.fillna(False)
 
@@ -3768,17 +3693,14 @@ def build_reference_derivatives(reference_inventory: pd.DataFrame) -> Tuple[pd.D
 def prepare_canonical_sources(
     roster_term: pd.DataFrame,
     academic_term: pd.DataFrame,
-    snapshot: pd.DataFrame,
-    graduation: pd.DataFrame,
     settings: Dict[str, object],
     manual_chapter_assignments: pd.DataFrame,
     manual_roster_corrections: pd.DataFrame,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     empty_exception_frame = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
 
-    email_map, name_map, identity_map_issues = build_identity_maps(roster_term, academic_term, snapshot, graduation)
-    roster_term, roster_id_issues = resolve_missing_ids(roster_term, email_map, name_map, "roster")
-    academic_term, academic_id_issues = resolve_missing_ids(academic_term, email_map, name_map, "academic")
+    roster_term, roster_id_issues = filter_valid_student_ids(roster_term, "roster")
+    academic_term, academic_id_issues = filter_valid_student_ids(academic_term, "academic")
     roster_term = resolve_missing_roster_chapters(roster_term, settings)
     roster_term = apply_manual_chapter_assignments(roster_term, manual_chapter_assignments)
     roster_term = apply_manual_roster_corrections(roster_term, manual_roster_corrections)
@@ -3789,9 +3711,9 @@ def prepare_canonical_sources(
     roster_term = attach_org_entry_terms(roster_term, settings)
 
     identity_exceptions = pd.concat(
-        [frame for frame in [identity_map_issues, roster_id_issues, academic_id_issues] if not frame.empty],
+        [frame for frame in [roster_id_issues, academic_id_issues] if not frame.empty],
         ignore_index=True,
-    ) if any(not frame.empty for frame in [identity_map_issues, roster_id_issues, academic_id_issues]) else empty_exception_frame
+    ) if any(not frame.empty for frame in [roster_id_issues, academic_id_issues]) else empty_exception_frame
     term_exceptions = pd.concat(
         [frame for frame in [roster_dup_issues, academic_dup_issues] if not frame.empty],
         ignore_index=True,
@@ -4230,11 +4152,10 @@ def attach_snapshot_fields(summary: pd.DataFrame, snapshot: pd.DataFrame, longit
     return result
 
 
-def build_graduation_maps(graduation: pd.DataFrame) -> Tuple[Dict[str, Tuple[str, str]], Dict[Tuple[str, str], Tuple[str, str]]]:
+def build_graduation_maps(graduation: pd.DataFrame) -> Dict[str, Tuple[str, str]]:
     id_map: Dict[str, Tuple[str, str]] = {}
-    name_map: Dict[Tuple[str, str], Tuple[str, str]] = {}
     if graduation.empty:
-        return id_map, name_map
+        return id_map
 
     ranked = graduation.copy()
     ranked["_term_sort"] = ranked["Graduation Term"].map(lambda value: sort_term_code(parse_term_code(value)[0]))
@@ -4242,17 +4163,12 @@ def build_graduation_maps(graduation: pd.DataFrame) -> Tuple[Dict[str, Tuple[str
 
     for row in ranked.itertuples(index=False):
         student_id = normalize_banner_id(getattr(row, "Student ID", ""))
-        first_name = clean_text(getattr(row, "First Name", ""))
-        last_name = clean_text(getattr(row, "Last Name", ""))
         grad_term_code = parse_term_code(getattr(row, "Graduation Term", ""))[0]
         source = clean_text(getattr(row, "Graduation Source File", "")) or "Graduation List"
         if student_id and student_id not in id_map:
             id_map[student_id] = (grad_term_code, f"Graduation List ID match: {source}")
-        name_key = person_name_key(first_name, last_name)
-        if (first_name or last_name) and name_key not in name_map:
-            name_map[name_key] = (grad_term_code, f"Graduation List name match: {source}")
 
-    return id_map, name_map
+    return id_map
 
 
 def _clean_display(value: object) -> str:
@@ -4449,10 +4365,7 @@ def build_student_source_appearances(
     appearances = ensure_columns(pd.DataFrame(rows), STUDENT_SOURCE_APPEARANCE_COLUMNS)
     if appearances.empty:
         return appearances
-    appearances["normalized_student_id"] = appearances["normalized_student_id"].where(
-        appearances["normalized_student_id"].fillna("").astype(str).str.strip().ne(""),
-        "missing_id::" + appearances.index.astype(str),
-    )
+    appearances = appearances.loc[appearances["normalized_student_id"].fillna("").astype(str).str.strip().ne("")].copy()
     return appearances.reset_index(drop=True)
 
 
@@ -4558,11 +4471,6 @@ def classify_student_outcome(row: pd.Series) -> Tuple[str, str, str, str]:
     first_roster_sort = sort_term_code(row.get("first_roster_term_code", ""))
     last_grade_sort = sort_term_code(row.get("last_grade_report_term_code", ""))
     latest_status_text = " ".join([statuses, latest_status])
-
-    if _clean_display(row.get("missing_id_flag", "")).lower() == "yes":
-        flags.append("missing_or_malformed_student_id")
-        manual_review_reasons.append("Student/source row has missing or malformed student ID.")
-        return OUTCOME_SOURCE_PROBLEM, "low", "; ".join(flags), "; ".join(manual_review_reasons)
 
     if _clean_display(row.get("manual_outcome_bucket", "")):
         bucket = _clean_display(row.get("manual_outcome_bucket", ""))
@@ -4698,7 +4606,6 @@ def build_student_longitudinal_tracking(
             "graduation_term": graduation_term,
             "current_active_flag": _clean_display(summary_row.get("current_active_flag", "")),
             "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
-            "missing_id_flag": "Yes" if normalized_id.startswith("missing_id::") else "No",
             "manual_outcome_bucket": manual_outcome_bucket,
             "manual_adjustments_applied": _unique_join(manual_applied),
         }
@@ -5039,7 +4946,7 @@ def build_student_summary(
     qa_rows: List[dict] = []
     outcome_exceptions: List[dict] = []
     max_term_sort = int(master["observed_term_sort"].dropna().max()) if master["observed_term_sort"].dropna().shape[0] else 0
-    graduation_by_id, graduation_by_name = build_graduation_maps(graduation)
+    graduation_by_id = build_graduation_maps(graduation)
     sorted_master = master.sort_values(["student_id", "observed_term_sort", "term_code"], na_position="last")
     snapshot_status_by_id: Dict[str, str] = {}
     if not snapshot.empty:
@@ -5105,10 +5012,6 @@ def build_student_summary(
         graduation_list_source = ""
         if student_id in graduation_by_id:
             graduation_list_term, graduation_list_source = graduation_by_id[student_id]
-        else:
-            name_key = person_name_key(first_row["first_name"], first_row["last_name"])
-            if name_key in graduation_by_name:
-                graduation_list_term, graduation_list_source = graduation_by_name[name_key]
         if (roster_rows["org_status_bucket"].fillna("").eq("Graduated")).any():
             explicit_grad_term = clean_text(roster_rows.loc[roster_rows["org_status_bucket"].fillna("").eq("Graduated"), "term_code"].iloc[-1])
             evidence_source = "Roster status"
@@ -5659,6 +5562,226 @@ def build_cohort_metrics(summary: pd.DataFrame, tracking: Optional[pd.DataFrame]
         rows.append(metric_row("Credit Momentum", "First-Year 30+ Passed Hours Rate", cohort, int(first_year_hours.shape[0]), numerator=int((first_year_hours >= 30).sum()), rate=((first_year_hours >= 30).sum() / first_year_hours.shape[0]) if first_year_hours.shape[0] else None))
 
     return ensure_columns(pd.DataFrame(rows), load_schema()["tables"]["cohort_metrics"])
+
+
+def _candidate_term(value: object) -> Tuple[str, str, int] | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    code, label, _, season = parse_term_code(text)
+    if not code or clean_text(season) == "Unknown":
+        return None
+    term_sort = sort_term_code(code)
+    if term_sort >= 999999:
+        return None
+    return code, label, term_sort
+
+
+def _first_known_cohort_term(row: pd.Series) -> Tuple[str, str, int, str]:
+    candidates: List[Tuple[int, str, str, str]] = []
+    for code_column, label_column, basis in COHORT_TERM_CANDIDATES:
+        for column in [code_column, label_column]:
+            if not column:
+                continue
+            candidate = _candidate_term(row.get(column, ""))
+            if candidate is None:
+                continue
+            code, label, term_sort = candidate
+            candidates.append((term_sort, code, label, basis))
+            break
+    if not candidates:
+        return "", "", 999999, ""
+    term_sort, code, label, basis = sorted(candidates, key=lambda item: (item[0], item[3]))[0]
+    return code, label, term_sort, basis
+
+
+def _cohort_checkpoint_term_code(cohort_term_code: str, offset_years: int) -> str:
+    match = TERM_CODE_RE.fullmatch(clean_text(cohort_term_code).upper())
+    if not match:
+        return ""
+    year = int(match.group(1)) + int(offset_years)
+    season = match.group(2).upper()
+    return f"{year}{season}"
+
+
+def _cohort_checkpoint_label(offset_years: int) -> str:
+    if offset_years == 0:
+        return "Cohort Year"
+    if offset_years == 1:
+        return "1 Year"
+    return f"{offset_years} Year"
+
+
+def _summary_with_known_cohorts(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty or "student_id" not in summary.columns:
+        return pd.DataFrame(columns=list(summary.columns) + ["_cohort_term_code", "_cohort_term", "_cohort_term_sort", "_cohort_basis"])
+
+    work = summary.copy()
+    work["student_id"] = work["student_id"].fillna("").astype(str).str.strip()
+    work = work.loc[work["student_id"].ne("")].copy()
+    if work.empty:
+        return pd.DataFrame(columns=list(summary.columns) + ["_cohort_term_code", "_cohort_term", "_cohort_term_sort", "_cohort_basis"])
+
+    cohort_values = work.apply(_first_known_cohort_term, axis=1)
+    work["_cohort_term_code"] = cohort_values.map(lambda item: item[0])
+    work["_cohort_term"] = cohort_values.map(lambda item: item[1])
+    work["_cohort_term_sort"] = cohort_values.map(lambda item: item[2])
+    work["_cohort_basis"] = cohort_values.map(lambda item: item[3])
+    work = work.loc[work["_cohort_term_code"].astype(str).str.strip().ne("")].copy()
+    if work.empty:
+        return work
+
+    work["_graduated_flag"] = boolish_series(work.get("is_graduated", pd.Series(False, index=work.index)))
+    graduation_code = work.get("graduation_term_code", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
+    graduation_label = work.get("graduation_term", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
+    work["_graduation_sort"] = [
+        min(
+            [
+                term_sort
+                for term_sort in [
+                    sort_term_code(parse_term_code(code_value)[0]) if code_value else 999999,
+                    sort_term_code(parse_term_code(label_value)[0]) if label_value else 999999,
+                ]
+                if term_sort < 999999
+            ],
+            default=999999,
+        )
+        if graduated
+        else 999999
+        for graduated, code_value, label_value in zip(work["_graduated_flag"], graduation_code, graduation_label)
+    ]
+
+    return (
+        work.sort_values(["student_id", "_cohort_term_sort", "_cohort_term_code"], na_position="last")
+        .drop_duplicates(subset=["student_id"], keep="first")
+        .reset_index(drop=True)
+    )
+
+
+def _presence_by_checkpoint(longitudinal: pd.DataFrame) -> Tuple[Dict[int, set[str]], int]:
+    if longitudinal.empty or "student_id" not in longitudinal.columns:
+        return {}, 0
+
+    frame = longitudinal.copy()
+    frame["student_id"] = frame["student_id"].fillna("").astype(str).str.strip()
+    frame = frame.loc[frame["student_id"].ne("")].copy()
+    if frame.empty:
+        return {}, 0
+
+    if "observed_term_sort" in frame.columns:
+        frame["_checkpoint_sort"] = coerce_numeric(frame["observed_term_sort"])
+    elif "term_code" in frame.columns:
+        frame["_checkpoint_sort"] = frame["term_code"].map(sort_term_code)
+    else:
+        return {}, 0
+    frame = frame.loc[frame["_checkpoint_sort"].notna() & frame["_checkpoint_sort"].lt(999999)].copy()
+    if frame.empty:
+        return {}, 0
+
+    roster_present = boolish_series(frame.get("roster_present", pd.Series(False, index=frame.index)))
+    academic_present = boolish_series(frame.get("academic_present", pd.Series(False, index=frame.index)))
+    present = frame.loc[roster_present | academic_present].copy()
+    if present.empty:
+        max_observed = int(frame["_checkpoint_sort"].dropna().max())
+        return {}, max_observed
+
+    presence = {
+        int(term_sort): set(group["student_id"].tolist())
+        for term_sort, group in present.groupby("_checkpoint_sort", dropna=False)
+        if pd.notna(term_sort)
+    }
+    return presence, int(frame["_checkpoint_sort"].dropna().max())
+
+
+def build_cohort_status_over_time(
+    summary: pd.DataFrame,
+    longitudinal: pd.DataFrame,
+    max_years: int = 6,
+) -> pd.DataFrame:
+    """Build chart-ready cohort status rows from each student's earliest known semester."""
+    schema_columns = load_schema()["tables"].get("cohort_status_over_time", COHORT_STATUS_OVER_TIME_COLUMNS)
+    if summary.empty:
+        return pd.DataFrame(columns=schema_columns)
+
+    cohort_summary = _summary_with_known_cohorts(summary)
+    if cohort_summary.empty:
+        return pd.DataFrame(columns=schema_columns)
+
+    presence_by_term, max_measurable_sort = _presence_by_checkpoint(longitudinal)
+    rows: List[dict] = []
+    measurement_basis = "Same-season roster or academic presence; graduation requires confirmed evidence."
+
+    for (cohort_code, cohort_term, cohort_sort), cohort in cohort_summary.groupby(
+        ["_cohort_term_code", "_cohort_term", "_cohort_term_sort"],
+        dropna=False,
+    ):
+        cohort_ids = set(cohort["student_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().tolist())
+        cohort_size = len(cohort_ids)
+        if not cohort_size:
+            continue
+
+        cohort_basis_values = sorted(value for value in cohort["_cohort_basis"].fillna("").astype(str).unique().tolist() if value)
+        cohort_basis = "; ".join(cohort_basis_values)
+        for offset in range(0, int(max_years) + 1):
+            checkpoint_code = _cohort_checkpoint_term_code(str(cohort_code), offset)
+            if not checkpoint_code:
+                continue
+            checkpoint_sort = sort_term_code(checkpoint_code)
+            if offset > 0 and (not max_measurable_sort or checkpoint_sort > max_measurable_sort):
+                continue
+            checkpoint_term = term_label_from_code(checkpoint_code)
+
+            if offset == 0:
+                status_counts = {"Retained": cohort_size, "Graduated": 0, "Not Retained": 0}
+            else:
+                graduated_ids = set(
+                    cohort.loc[coerce_numeric(cohort["_graduation_sort"]).le(checkpoint_sort), "student_id"]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .replace("", pd.NA)
+                    .dropna()
+                    .tolist()
+                )
+                retained_ids = (presence_by_term.get(checkpoint_sort, set()) & cohort_ids) - graduated_ids
+                not_retained_ids = cohort_ids - graduated_ids - retained_ids
+                status_counts = {
+                    "Retained": len(retained_ids),
+                    "Graduated": len(graduated_ids),
+                    "Not Retained": len(not_retained_ids),
+                }
+
+            for status in COHORT_STATUS_ORDER:
+                count = int(status_counts.get(status, 0))
+                rows.append(
+                    {
+                        "cohort_term": cohort_term,
+                        "cohort_term_code": cohort_code,
+                        "cohort_term_sort": int(cohort_sort),
+                        "cohort_basis": cohort_basis,
+                        "checkpoint": _cohort_checkpoint_label(offset),
+                        "checkpoint_offset_years": int(offset),
+                        "checkpoint_term": checkpoint_term,
+                        "checkpoint_term_code": checkpoint_code,
+                        "checkpoint_term_sort": int(checkpoint_sort),
+                        "status": status,
+                        "student_count": count,
+                        "cohort_student_count": int(cohort_size),
+                        "share": (count / cohort_size) if cohort_size else pd.NA,
+                        "measurement_basis": measurement_basis,
+                        "notes": "Baseline cohort count." if offset == 0 else "",
+                    }
+                )
+
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return pd.DataFrame(columns=schema_columns)
+    result["_status_sort"] = result["status"].map({status: index for index, status in enumerate(COHORT_STATUS_ORDER)}).fillna(99)
+    result = result.sort_values(
+        ["cohort_term_sort", "cohort_term", "checkpoint_offset_years", "_status_sort"],
+        na_position="last",
+    ).drop(columns=["_status_sort"])
+    return ensure_columns(result.reset_index(drop=True), schema_columns)
 
 
 def build_status_exceptions(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.DataFrame:
@@ -6490,8 +6613,7 @@ def build_canonical_pipeline(
             "loader_token": source_cache_token(
                 [
                     prepare_canonical_sources,
-                    build_identity_maps,
-                    resolve_missing_ids,
+                    filter_valid_student_ids,
                     resolve_missing_roster_chapters,
                     apply_manual_chapter_assignments,
                     apply_manual_roster_corrections,
@@ -6505,8 +6627,6 @@ def build_canonical_pipeline(
         builder=lambda: prepare_canonical_sources(
             roster_term,
             academic_term,
-            snapshot,
-            graduation,
             settings,
             manual_chapter_assignments,
             manual_roster_corrections,
@@ -6556,8 +6676,7 @@ def build_canonical_pipeline(
             "prepared_loader_token": source_cache_token(
                 [
                     prepare_canonical_sources,
-                    build_identity_maps,
-                    resolve_missing_ids,
+                    filter_valid_student_ids,
                     resolve_missing_roster_chapters,
                     apply_manual_chapter_assignments,
                     dedupe_table,
@@ -6642,6 +6761,7 @@ def build_canonical_pipeline(
     tracking_validation_qa, tracking_validation_failures = validate_outcome_tracking(student_longitudinal_tracking, input_group_outcome_buckets)
     if tracking_validation_failures:
         raise ValueError("Outcome tracking validation failed: " + " | ".join(tracking_validation_failures))
+    cohort_status_over_time = build_cohort_status_over_time(student_summary, master_longitudinal)
     cohort_metrics = build_cohort_metrics(student_summary, student_longitudinal_tracking)
     graduation_status_audit = build_graduation_status_audit(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
@@ -6741,6 +6861,7 @@ def build_canonical_pipeline(
             "input_group_outcome_buckets": input_group_outcome_buckets,
             "yearly_unique_id_checklist": yearly_unique_id_checklist,
             "manual_review_queue": generated_manual_review_queue,
+            "cohort_status_over_time": cohort_status_over_time,
             "cohort_metrics": cohort_metrics,
             "graduation_status_audit": graduation_status_audit,
             "membership_reference_validation": membership_reference_validation,
@@ -6772,6 +6893,7 @@ def build_canonical_pipeline(
         "input_group_outcome_buckets": output_folder / "input_group_outcome_buckets.csv",
         "yearly_unique_id_checklist": output_folder / "yearly_unique_id_checklist.csv",
         "manual_review_queue": output_folder / "manual_review_queue.csv",
+        "cohort_status_over_time": output_folder / "cohort_status_over_time.csv",
         "student_outcome_audit": output_folder / "student_outcome_audit.jsonl",
         "reference_inventory": output_folder / "reference_inventory.csv",
         "reference_unclassified_rows": output_folder / "reference_unclassified_rows.csv",
@@ -6810,6 +6932,7 @@ def build_canonical_pipeline(
     write_frame(files["input_group_outcome_buckets"], input_group_outcome_buckets)
     write_frame(files["yearly_unique_id_checklist"], yearly_unique_id_checklist)
     write_frame(files["manual_review_queue"], generated_manual_review_queue)
+    write_frame(files["cohort_status_over_time"], cohort_status_over_time)
     with files["student_outcome_audit"].open("w", encoding="utf-8") as handle:
         for record in build_student_outcome_audit_records(student_longitudinal_tracking):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

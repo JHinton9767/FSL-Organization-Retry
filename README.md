@@ -4,12 +4,13 @@ This repository now centers on a single canonical analytics architecture for Fra
 
 ## Canonical source of truth
 
-All future analytics are expected to flow from exactly six authoritative tables:
+All future analytics are expected to flow from the canonical authoritative tables:
 
 - `roster_term`
 - `academic_term`
 - `master_longitudinal`
 - `student_summary`
+- `cohort_status_over_time`
 - `cohort_metrics`
 - `qa_checks`
 

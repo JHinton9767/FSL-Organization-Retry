@@ -75,6 +75,14 @@ def test_disappearance_without_graduation_is_not_graduated() -> None:
     assert tracking.loc[0, "final_outcome_bucket"] != OUTCOME_GRADUATED_CONFIRMED
 
 
+def test_source_appearances_exclude_rows_without_valid_student_id() -> None:
+    roster = pd.concat([_roster("A00000002"), _roster("")], ignore_index=True)
+
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    assert appearances["normalized_student_id"].tolist() == ["A00000002"]
+
+
 def test_latest_active_summary_signal_creates_still_active_bucket() -> None:
     appearances = build_student_source_appearances(_roster("A00000003"), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
     tracking = build_student_longitudinal_tracking(appearances, _summary("A00000003", current_active="Yes"), pd.DataFrame())
