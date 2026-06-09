@@ -10,6 +10,7 @@ from app.config_loader import (
     find_manual_correction_conflicts,
     import_manual_corrections_package,
     ensure_manual_transcript_files,
+    dedupe_manual_review_queue_by_cohort,
     load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_queue,
@@ -285,6 +286,32 @@ def test_manual_correction_conflict_detection() -> None:
     assert conflicts.loc[0, "student_id"] == "A00000001"
 
 
+def test_manual_review_queue_keeps_one_row_per_student_cohort() -> None:
+    queue = pd.DataFrame(
+        {
+            "review_key": ["issue-1", "issue-2", "issue-3", "invalid"],
+            "student_id": ["A00000001", "A00000001", "A00000001", "not-an-id"],
+            "student_name": ["Jane Doe", "Jane Doe", "Jane Doe", "Bad Id"],
+            "chapter": ["Alpha Sigma Phi", "Alpha Sigma Phi", "Alpha Sigma Phi", "Alpha Sigma Phi"],
+            "join_term": ["Spring 2026", "Spring 2026", "Fall 2026", "Spring 2026"],
+            "queue_reason": ["No graduation mention", "Conflicting evidence", "No graduation mention", "Bad ID"],
+            "review_notes": ["", "Keep this note", "", ""],
+            "review_status": ["Needs Review", "In Progress", "Needs Review", "Needs Review"],
+        }
+    )
+
+    deduped = dedupe_manual_review_queue_by_cohort(queue)
+
+    assert deduped[["student_id", "join_term"]].values.tolist() == [
+        ["A00000001", "Spring 2026"],
+        ["A00000001", "Fall 2026"],
+    ]
+    spring_row = deduped.loc[deduped["join_term"].eq("Spring 2026")].iloc[0]
+    assert spring_row["review_status"] == "In Progress"
+    assert spring_row["queue_reason"] == "Conflicting evidence; No graduation mention"
+    assert spring_row["review_notes"] == "Keep this note"
+
+
 def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monkeypatch) -> None:
     corrections_path = tmp_path / "config" / "manual_roster_corrections.csv"
     adjustments_path = tmp_path / "config" / "manual_adjustments.csv"
@@ -310,7 +337,17 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
         ),
         corrections_path,
     )
-    save_manual_review_queue(pd.DataFrame({"review_key": ["A00000001"], "review_status": ["Corrected"]}), review_path)
+    save_manual_review_queue(
+        pd.DataFrame(
+            {
+                "review_key": ["A00000001"],
+                "student_id": ["A00000001"],
+                "join_term": ["Spring 2026"],
+                "review_status": ["Corrected"],
+            }
+        ),
+        review_path,
+    )
     save_manual_adjustments(
         pd.DataFrame(
             {

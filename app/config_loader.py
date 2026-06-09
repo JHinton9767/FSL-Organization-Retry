@@ -12,7 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
-from app.io_utils import ROOT, canonical_headers, normalize_text, read_tabular_file
+from app.io_utils import ROOT, canonical_headers, normalize_text, parse_term_label, read_tabular_file
 from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
 from src.build_master_roster import normalize_banner_id
@@ -323,6 +323,101 @@ def empty_manual_adjustments() -> pd.DataFrame:
     return pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
 
 
+def manual_review_queue_cohort_key(row: pd.Series) -> str:
+    student_id = normalize_banner_id(row.get("student_id", ""))
+    if not student_id:
+        return ""
+    join_term = normalize_text(row.get("join_term", ""))
+    term_parts = parse_term_label(join_term)
+    term_key = normalize_text(term_parts.get("code", "")) or join_term.lower()
+    if not term_key:
+        term_key = "unknown"
+    return f"{student_id}|{term_key}"
+
+
+def _manual_queue_status_rank(value: object) -> int:
+    status = normalize_text(value).lower()
+    ranks = {
+        "corrected": 0,
+        "in progress": 1,
+        "waiting on transcript": 2,
+        "needs review": 3,
+        "blocked": 4,
+        "skipped / no change": 5,
+    }
+    return ranks.get(status, 6)
+
+
+def _unique_joined(values: pd.Series) -> str:
+    seen: list[str] = []
+    for value in values:
+        text = normalize_text(value)
+        if text and text not in seen:
+            seen.append(text)
+    return "; ".join(seen)
+
+
+def dedupe_manual_review_queue_by_cohort(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Keep one valid Banner ID row per organization-join cohort."""
+    if frame is None or frame.empty:
+        return empty_manual_review_queue()
+
+    cleaned = frame.copy()
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        if column not in cleaned.columns:
+            cleaned[column] = ""
+    cleaned = cleaned[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
+    cleaned["student_id"] = cleaned["student_id"].map(normalize_banner_id)
+    cleaned = cleaned.loc[cleaned["student_id"].ne("")].copy()
+    if cleaned.empty:
+        return empty_manual_review_queue()
+
+    cleaned["_cohort_key"] = cleaned.apply(manual_review_queue_cohort_key, axis=1)
+    cleaned = cleaned.loc[cleaned["_cohort_key"].ne("")].copy()
+    if cleaned.empty:
+        return empty_manual_review_queue()
+
+    cleaned["_original_order"] = range(len(cleaned))
+    cleaned["_status_rank"] = cleaned["review_status"].map(_manual_queue_status_rank)
+    cleaned["_join_sort"] = cleaned["join_term"].map(lambda value: parse_term_label(value)["sort_value"])
+    cleaned = cleaned.sort_values(["_cohort_key", "_status_rank", "_original_order"])
+
+    merged_rows: list[dict[str, object]] = []
+    combine_columns = {
+        "issue_type",
+        "evidence_summary",
+        "suggested_action",
+        "queue_reason",
+        "review_notes",
+        "source_file",
+        "source_sheet",
+        "input_group_id",
+    }
+    yes_columns = {"needs_transcript", "has_manual_correction", "transcript_file_exists"}
+    for _, group in cleaned.groupby("_cohort_key", sort=False):
+        base = group.iloc[0][MANUAL_REVIEW_QUEUE_COLUMNS].to_dict()
+        for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+            if column in combine_columns:
+                base[column] = _unique_joined(group[column])
+            elif column in yes_columns:
+                lowered = group[column].map(lambda value: normalize_text(value).lower())
+                if lowered.isin({"yes", "staged", "true", "1", "y"}).any():
+                    base[column] = "Staged" if column == "has_manual_correction" and lowered.eq("staged").any() else "Yes"
+                elif not normalize_text(base.get(column, "")):
+                    base[column] = _unique_joined(group[column])
+            elif not normalize_text(base.get(column, "")):
+                base[column] = _unique_joined(group[column])
+        merged_rows.append(base)
+
+    result = pd.DataFrame(merged_rows, columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    result["_join_sort"] = result["join_term"].map(lambda value: parse_term_label(value)["sort_value"])
+    return (
+        result.sort_values(["_join_sort", "student_id", "review_key"])
+        .drop(columns=["_join_sort"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+
 def _manual_adjustment_id(row: pd.Series) -> str:
     if normalize_text(row.get("adjustment_id", "")):
         return normalize_text(row.get("adjustment_id", ""))
@@ -570,7 +665,8 @@ def load_manual_review_queue(path: Optional[Path] = None) -> pd.DataFrame:
     frame = frame[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
     for column in MANUAL_REVIEW_QUEUE_COLUMNS:
         frame[column] = frame[column].str.strip()
-    return frame.loc[frame["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
+    frame = frame.loc[frame["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
+    return dedupe_manual_review_queue_by_cohort(frame)
 
 
 def save_manual_review_queue(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
@@ -587,6 +683,7 @@ def save_manual_review_queue(frame: pd.DataFrame, path: Optional[Path] = None) -
         for column in MANUAL_REVIEW_QUEUE_COLUMNS:
             cleaned[column] = cleaned[column].str.strip()
         cleaned = cleaned.loc[cleaned["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
+        cleaned = dedupe_manual_review_queue_by_cohort(cleaned)
     cleaned.to_csv(candidate, index=False)
     return candidate
 

@@ -25,6 +25,47 @@ The output is written to:
 - `output/canonical/run_*/`
 - `output/canonical/latest/`
 
+## Focused graduation-rate workflow
+
+When the only goal is conservative 4-year, 5-year, and 6-year graduation rates,
+use the focused graduation pipeline instead of the broader analytics app:
+
+```powershell
+uv run --with-requirements requirements.txt python src\graduation_pipeline\run_pipeline.py --config config\local_paths.yaml
+```
+
+This pipeline only tracks valid Banner IDs matching `^A0\d{7}$`. Rows without a
+valid A# are written to `output/graduation/invalid_ids.csv` and excluded from
+graduation-rate calculations.
+
+Graduation is counted only from explicit evidence. Roster graduation status
+(`G`, `Grad`, or `Graduated`) is checked first, then explicit transcript
+graduation evidence, then graduation files, then explicit academic graduation
+fields. Disappearance, inactivity, GPA, hours, senior standing, or lack of
+future records are not used to infer graduation.
+
+Manual corrections live at `data/manual/manual_corrections.csv`. The file is
+created if missing and is never overwritten by a pipeline run. Blank rows and
+invalid IDs in that file are ignored so the correction workflow does not get
+bogged down.
+
+Focused outputs are written to `output/graduation/`:
+
+- `source_manifest.csv`
+- `raw_required_fields.csv` and `.parquet` when supported
+- `normalized_required_fields.csv` and `.parquet` when supported
+- `invalid_ids.csv`
+- `student_membership_summary.csv`
+- `graduation_evidence.csv`
+- `manual_review_queue.csv`
+- `manual_corrections_applied.csv`
+- `correction_audit.csv`
+- `final_student_outcomes.csv`
+- `graduation_rates_by_cohort.csv`
+- `graduation_rates_by_chapter.csv`
+- `graduation_rates_by_council.csv`
+- `graduation_rate_qa_summary.csv`
+
 ## Canonical workflow
 
 Use this order when rebuilding from source files. Raw student files should live

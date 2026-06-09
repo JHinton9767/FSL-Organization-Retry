@@ -45,6 +45,7 @@ from app.config_loader import (
     append_manual_adjustments,
     append_manual_roster_corrections,
     build_manual_corrections_package,
+    dedupe_manual_review_queue_by_cohort,
     empty_manual_roster_corrections,
     ensure_manual_transcript_files,
     find_manual_correction_conflicts,
@@ -1181,7 +1182,7 @@ def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.Dat
 
 def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> pd.DataFrame:
     if generated.empty:
-        return saved if not saved.empty else pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+        return dedupe_manual_review_queue_by_cohort(saved) if not saved.empty else pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
     result = generated.copy()
     if not saved.empty:
         keep_columns = ["review_key", "assigned_to", "review_status", "needs_transcript", "review_notes", "updated_at"]
@@ -1198,7 +1199,7 @@ def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> p
                 if column not in saved_only.columns:
                     saved_only[column] = ""
             result = pd.concat([result, saved_only[MANUAL_REVIEW_QUEUE_COLUMNS]], ignore_index=True)
-    return result[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str).reset_index(drop=True)
+    return dedupe_manual_review_queue_by_cohort(result[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)).reset_index(drop=True)
 
 
 def _manual_review_queue_changed(current: pd.DataFrame, saved: pd.DataFrame) -> bool:
@@ -1559,7 +1560,9 @@ def _render_manual_corrections_editor(bundle) -> None:
         for column in MANUAL_REVIEW_QUEUE_COLUMNS:
             if column not in generated_queue.columns:
                 generated_queue[column] = ""
-        generated_queue = generated_queue[MANUAL_REVIEW_QUEUE_COLUMNS].drop_duplicates(subset=["review_key"], keep="first")
+        generated_queue = dedupe_manual_review_queue_by_cohort(
+            generated_queue[MANUAL_REVIEW_QUEUE_COLUMNS].drop_duplicates(subset=["review_key"], keep="first")
+        )
     review_queue = _merge_saved_review_queue(generated_queue, saved_queue)
     if _manual_review_queue_changed(review_queue, saved_queue):
         save_manual_review_queue(review_queue)
