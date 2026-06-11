@@ -1900,9 +1900,11 @@ def _render_manual_corrections_editor(bundle) -> None:
                 pd.DataFrame(
                     columns=[
                         "student_id",
+                        "student_name",
                         "last_name",
                         "first_name",
                         "organization_name",
+                        "initiation_date",
                         "final_status_term",
                         "organization_join_term",
                     ]
@@ -1913,9 +1915,11 @@ def _render_manual_corrections_editor(bundle) -> None:
                 key="graduated_alumni_batch_editor",
                 column_config={
                     "student_id": st.column_config.TextColumn("Student ID"),
+                    "student_name": st.column_config.TextColumn("Student Name"),
                     "last_name": st.column_config.TextColumn("Last Name"),
                     "first_name": st.column_config.TextColumn("First Name"),
                     "organization_name": st.column_config.TextColumn("Organization"),
+                    "initiation_date": st.column_config.TextColumn("Initiation Date"),
                     "final_status_term": st.column_config.TextColumn("Graduation Term"),
                     "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
                 },
@@ -1928,6 +1932,10 @@ def _render_manual_corrections_editor(bundle) -> None:
             )
             if not alumni_corrections.empty:
                 st.dataframe(alumni_corrections, use_container_width=True, hide_index=True)
+            elif not alumni_input.dropna(how="all").empty:
+                st.warning(
+                    "No rows could be converted. Rows without a valid A# must uniquely match an existing student by exact name and organization."
+                )
             alumni_action_cols = st.columns(2)
             with alumni_action_cols[0]:
                 if st.button("Stage graduated alumni", use_container_width=True, disabled=alumni_corrections.empty):

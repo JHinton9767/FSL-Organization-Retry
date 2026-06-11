@@ -2,6 +2,7 @@ import pandas as pd
 
 from src.build_canonical_pipeline import (
     OUTCOME_GRADUATED_CONFIRMED,
+    OUTCOME_INACTIVE_EXIT,
     OUTCOME_NOT_RETAINED,
     OUTCOME_STILL_ACTIVE,
     build_generated_manual_review_queue,
@@ -12,12 +13,13 @@ from src.build_canonical_pipeline import (
 )
 
 
-def _summary(student_id: str, current_active: str = "No") -> pd.DataFrame:
+def _summary(student_id: str, current_active: str = "No", current_roster_term_code: str = "") -> pd.DataFrame:
     return pd.DataFrame(
         {
             "student_id": [student_id],
             "student_name": ["Jane Doe"],
             "current_active_flag": [current_active],
+            "current_active_roster_term_code": [current_roster_term_code],
             "org_entry_cohort": ["Fall 2020"],
             "join_term": ["Fall 2020"],
             "graduation_evidence_confirmed": ["No"],
@@ -73,6 +75,23 @@ def test_disappearance_without_graduation_is_not_graduated() -> None:
 
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_NOT_RETAINED
     assert tracking.loc[0, "final_outcome_bucket"] != OUTCOME_GRADUATED_CONFIRMED
+
+
+def test_latest_loaded_roster_students_are_not_marked_not_retained() -> None:
+    roster = _roster("A00000009", status="Unknown")
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000009", current_roster_term_code="2020FA"), pd.DataFrame())
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_STILL_ACTIVE
+    assert tracking.loc[0, "final_outcome_bucket"] != OUTCOME_NOT_RETAINED
+
+
+def test_latest_loaded_roster_explicit_exit_still_counts_as_exit() -> None:
+    roster = _roster("A00000010", status="Inactive")
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000010", current_roster_term_code="2020FA"), pd.DataFrame())
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_INACTIVE_EXIT
 
 
 def test_transcript_graduation_counts_when_roster_has_no_graduation() -> None:

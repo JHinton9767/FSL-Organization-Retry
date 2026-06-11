@@ -4516,6 +4516,8 @@ def classify_student_outcome(row: pd.Series) -> Tuple[str, str, str, str]:
     has_current_active = _clean_display(row.get("current_active_flag", "")).lower() == "yes"
     has_roster = bool(_clean_display(row.get("first_roster_term", "")))
     first_roster_sort = sort_term_code(row.get("first_roster_term_code", ""))
+    last_roster_sort = sort_term_code(row.get("last_roster_term_code", ""))
+    latest_loaded_roster_sort = sort_term_code(row.get("current_active_roster_term_code", ""))
     last_grade_sort = sort_term_code(row.get("last_grade_report_term_code", ""))
     latest_status_text = " ".join([statuses, latest_status])
 
@@ -4538,6 +4540,9 @@ def classify_student_outcome(row: pd.Series) -> Tuple[str, str, str, str]:
 
     if any(token in latest_status_text for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL"]):
         return OUTCOME_INACTIVE_EXIT, "high", "; ".join(flags), "; ".join(manual_review_reasons)
+
+    if has_roster and last_roster_sort < 999999 and latest_loaded_roster_sort < 999999 and last_roster_sort >= latest_loaded_roster_sort:
+        return OUTCOME_STILL_ACTIVE, "medium", "; ".join(flags), "; ".join(manual_review_reasons)
 
     if has_roster and last_grade_sort < 999999 and first_roster_sort < 999999 and last_grade_sort > first_roster_sort:
         return OUTCOME_RETAINED_PERSISTED, "medium", "; ".join(flags), "; ".join(manual_review_reasons)
@@ -4676,6 +4681,7 @@ def build_student_longitudinal_tracking(
             "graduation_evidence_source": graduation_source,
             "graduation_term": graduation_term,
             "current_active_flag": _clean_display(summary_row.get("current_active_flag", "")),
+            "current_active_roster_term_code": _clean_display(summary_row.get("current_active_roster_term_code", "")),
             "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
             "manual_outcome_bucket": manual_outcome_bucket,
             "manual_adjustments_applied": _unique_join(manual_applied),

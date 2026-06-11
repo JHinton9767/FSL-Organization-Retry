@@ -15,7 +15,7 @@ import pandas as pd
 from app.io_utils import ROOT, canonical_headers, normalize_text, parse_term_label, read_tabular_file
 from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
-from src.build_master_roster import normalize_banner_id
+from src.build_master_roster import normalize_banner_id, normalize_chapter_name
 from src.path_config import load_path_config
 
 
@@ -565,6 +565,50 @@ def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.Dat
     return cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
 
+def _alumni_name_key(first_name: object = "", last_name: object = "", full_name: object = "") -> str:
+    first = normalize_text(first_name)
+    last = normalize_text(last_name)
+    full = normalize_text(full_name)
+    if not full:
+        full = f"{first} {last}".strip()
+    return re.sub(r"[^a-z0-9]+", " ", full.lower()).strip()
+
+
+def _summary_student_name_key(row: pd.Series) -> str:
+    return _alumni_name_key(
+        row.get("first_name", ""),
+        row.get("last_name", ""),
+        row.get("student_name", ""),
+    )
+
+
+def _summary_chapter_values(row: pd.Series) -> list[str]:
+    chapters: list[str] = []
+    for column in ["current_active_chapter", "latest_chapter", "chapter", "initial_chapter"]:
+        chapter = normalize_chapter_name(normalize_text(row.get(column, "")))
+        if chapter and chapter not in chapters:
+            chapters.append(chapter)
+    return chapters
+
+
+def _graduated_alumni_summary_match_lookup(summary: Optional[pd.DataFrame]) -> dict[tuple[str, str], pd.Series]:
+    if summary is None or summary.empty or "student_id" not in summary.columns:
+        return {}
+
+    candidates: dict[tuple[str, str], list[pd.Series]] = {}
+    working = summary.copy()
+    working["_student_id"] = working["student_id"].map(normalize_banner_id)
+    working = working.loc[working["_student_id"].ne("")].copy()
+    for _, row in working.iterrows():
+        name_key = _summary_student_name_key(row)
+        if not name_key:
+            continue
+        for chapter in _summary_chapter_values(row):
+            candidates.setdefault((name_key, chapter), []).append(row)
+
+    return {key: rows[0] for key, rows in candidates.items() if len({row["_student_id"] for row in rows}) == 1}
+
+
 def graduated_alumni_rows_to_manual_corrections(
     frame: Optional[pd.DataFrame],
     default_organization: str = "",
@@ -581,7 +625,19 @@ def graduated_alumni_rows_to_manual_corrections(
         "student_id": ["student_id", "banner_id", "banner", "plid", "student_number", "a_number", "a"],
         "last_name": ["last_name", "lastname", "last"],
         "first_name": ["first_name", "firstname", "first"],
-        "organization_join_term": ["organization_join_term", "org_join_term", "join_term", "joined", "pledge_term"],
+        "student_name": ["student_name", "name", "full_name", "member_name", "alumni_name"],
+        "organization_join_term": [
+            "organization_join_term",
+            "org_join_term",
+            "join_term",
+            "joined",
+            "pledge_term",
+            "initiation_date",
+            "initiation",
+            "initiated",
+            "initiation_term",
+            "initiation_semester",
+        ],
         "organization_name": ["organization_name", "organization", "chapter", "org", "chapter_name"],
         "final_status_term": ["final_status_term", "graduation_term", "grad_term", "graduated_term", "graduation_semester"],
     }
@@ -591,34 +647,41 @@ def graduated_alumni_rows_to_manual_corrections(
         source_column = next((column for column in renamed.columns if column in aliases), None)
         standardized[target] = renamed[source_column] if source_column else ""
 
-    standardized["student_id"] = standardized["student_id"].map(normalize_banner_id)
-    standardized = standardized.loc[standardized["student_id"].ne("")].copy()
-    if standardized.empty:
-        return empty_manual_roster_corrections()
-
     summary_lookup = pd.DataFrame()
     if summary is not None and not summary.empty and "student_id" in summary.columns:
         summary_lookup = summary.copy()
         summary_lookup["_student_id"] = summary_lookup["student_id"].map(normalize_banner_id)
         summary_lookup = summary_lookup.loc[summary_lookup["_student_id"].ne("")].drop_duplicates("_student_id", keep="first")
         summary_lookup = summary_lookup.set_index("_student_id")
+    name_chapter_lookup = _graduated_alumni_summary_match_lookup(summary)
 
     default_organization = normalize_text(default_organization)
+    default_organization_normalized = normalize_chapter_name(default_organization)
     default_graduation_term = normalize_text(default_graduation_term)
     rows: list[dict[str, object]] = []
     for _, row in standardized.iterrows():
-        student_id = row["student_id"]
+        student_id = normalize_banner_id(row.get("student_id", ""))
+        row_organization = normalize_text(row.get("organization_name")) or default_organization
+        row_chapter_key = normalize_chapter_name(row_organization) or default_organization_normalized
+        row_name_key = _alumni_name_key(row.get("first_name"), row.get("last_name"), row.get("student_name"))
+        if not student_id and row_name_key and row_chapter_key:
+            matched = name_chapter_lookup.get((row_name_key, row_chapter_key))
+            if matched is not None:
+                student_id = normalize_banner_id(matched.get("_student_id", matched.get("student_id", "")))
+        if not student_id:
+            continue
         summary_row = summary_lookup.loc[student_id] if not summary_lookup.empty and student_id in summary_lookup.index else pd.Series(dtype="object")
         first_name = normalize_text(row.get("first_name")) or normalize_text(summary_row.get("first_name", ""))
         last_name = normalize_text(row.get("last_name")) or normalize_text(summary_row.get("last_name", ""))
-        if (not first_name or not last_name) and normalize_text(summary_row.get("student_name", "")):
-            parts = normalize_text(summary_row.get("student_name", "")).split()
+        full_name = normalize_text(row.get("student_name")) or normalize_text(summary_row.get("student_name", ""))
+        if (not first_name or not last_name) and full_name:
+            parts = full_name.split()
             if not first_name and parts:
                 first_name = parts[0]
             if not last_name and len(parts) > 1:
                 last_name = parts[-1]
         organization = (
-            normalize_text(row.get("organization_name"))
+            row_organization
             or default_organization
             or normalize_text(summary_row.get("current_active_chapter", ""))
             or normalize_text(summary_row.get("latest_chapter", ""))

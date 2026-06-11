@@ -354,6 +354,47 @@ def test_graduated_alumni_batch_can_fill_from_summary() -> None:
     assert corrections.loc[0, "final_status_term"] == "Fall 2025"
 
 
+def test_graduated_alumni_batch_matches_missing_id_by_exact_name_and_chapter() -> None:
+    alumni = pd.DataFrame(
+        {
+            "student_name": ["Jane Doe"],
+            "chapter": ["Alpha Sigma Phi"],
+            "initiation_date": ["Fall 1999"],
+            "graduation_term": ["Spring 2003"],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "student_name": ["Jane Doe"],
+            "join_term": ["Fall 2021"],
+            "chapter": ["Alpha Sigma Phi"],
+        }
+    )
+
+    corrections = graduated_alumni_rows_to_manual_corrections(alumni, summary=summary)
+
+    assert corrections.loc[0, "student_id"] == "A00000001"
+    assert corrections.loc[0, "organization_join_term"] == "Fall 1999"
+    assert corrections.loc[0, "final_status_term"] == "Spring 2003"
+    assert corrections.loc[0, "final_status"] == "Graduated"
+
+
+def test_graduated_alumni_batch_skips_ambiguous_name_chapter_matches() -> None:
+    alumni = pd.DataFrame({"student_name": ["Jane Doe"], "chapter": ["Alpha Sigma Phi"], "graduation_term": ["Spring 2003"]})
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "student_name": ["Jane Doe", "Jane Doe"],
+            "chapter": ["Alpha Sigma Phi", "Alpha Sigma Phi"],
+        }
+    )
+
+    corrections = graduated_alumni_rows_to_manual_corrections(alumni, summary=summary)
+
+    assert corrections.empty
+
+
 def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monkeypatch) -> None:
     corrections_path = tmp_path / "config" / "manual_roster_corrections.csv"
     adjustments_path = tmp_path / "config" / "manual_adjustments.csv"
