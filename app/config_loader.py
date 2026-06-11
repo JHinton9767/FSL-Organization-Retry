@@ -565,6 +565,84 @@ def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.Dat
     return cleaned.loc[has_identity & has_action & ~delete_mask].reset_index(drop=True)
 
 
+def graduated_alumni_rows_to_manual_corrections(
+    frame: Optional[pd.DataFrame],
+    default_organization: str = "",
+    default_graduation_term: str = "",
+    summary: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return empty_manual_roster_corrections()
+
+    source = frame.copy()
+    header_map = dict(zip(source.columns, canonical_headers(source.columns)))
+    renamed = source.rename(columns=header_map).fillna("").astype(str)
+    alias_map = {
+        "student_id": ["student_id", "banner_id", "banner", "plid", "student_number", "a_number", "a"],
+        "last_name": ["last_name", "lastname", "last"],
+        "first_name": ["first_name", "firstname", "first"],
+        "organization_join_term": ["organization_join_term", "org_join_term", "join_term", "joined", "pledge_term"],
+        "organization_name": ["organization_name", "organization", "chapter", "org", "chapter_name"],
+        "final_status_term": ["final_status_term", "graduation_term", "grad_term", "graduated_term", "graduation_semester"],
+    }
+
+    standardized = pd.DataFrame(index=renamed.index)
+    for target, aliases in alias_map.items():
+        source_column = next((column for column in renamed.columns if column in aliases), None)
+        standardized[target] = renamed[source_column] if source_column else ""
+
+    standardized["student_id"] = standardized["student_id"].map(normalize_banner_id)
+    standardized = standardized.loc[standardized["student_id"].ne("")].copy()
+    if standardized.empty:
+        return empty_manual_roster_corrections()
+
+    summary_lookup = pd.DataFrame()
+    if summary is not None and not summary.empty and "student_id" in summary.columns:
+        summary_lookup = summary.copy()
+        summary_lookup["_student_id"] = summary_lookup["student_id"].map(normalize_banner_id)
+        summary_lookup = summary_lookup.loc[summary_lookup["_student_id"].ne("")].drop_duplicates("_student_id", keep="first")
+        summary_lookup = summary_lookup.set_index("_student_id")
+
+    default_organization = normalize_text(default_organization)
+    default_graduation_term = normalize_text(default_graduation_term)
+    rows: list[dict[str, object]] = []
+    for _, row in standardized.iterrows():
+        student_id = row["student_id"]
+        summary_row = summary_lookup.loc[student_id] if not summary_lookup.empty and student_id in summary_lookup.index else pd.Series(dtype="object")
+        first_name = normalize_text(row.get("first_name")) or normalize_text(summary_row.get("first_name", ""))
+        last_name = normalize_text(row.get("last_name")) or normalize_text(summary_row.get("last_name", ""))
+        if (not first_name or not last_name) and normalize_text(summary_row.get("student_name", "")):
+            parts = normalize_text(summary_row.get("student_name", "")).split()
+            if not first_name and parts:
+                first_name = parts[0]
+            if not last_name and len(parts) > 1:
+                last_name = parts[-1]
+        organization = (
+            normalize_text(row.get("organization_name"))
+            or default_organization
+            or normalize_text(summary_row.get("current_active_chapter", ""))
+            or normalize_text(summary_row.get("latest_chapter", ""))
+            or normalize_text(summary_row.get("chapter", ""))
+        )
+        join_term = normalize_text(row.get("organization_join_term")) or normalize_text(summary_row.get("join_term", ""))
+        grad_term = normalize_text(row.get("final_status_term")) or default_graduation_term
+        rows.append(
+            {
+                "student_id": student_id,
+                "last_name": last_name,
+                "first_name": first_name,
+                "organization_join_term": join_term,
+                "organization_name": organization,
+                "leaving_organization_term": grad_term,
+                "final_status_term": grad_term,
+                "final_status": "Graduated",
+                "exclude_from_roster_calculations": "",
+            }
+        )
+
+    return normalize_manual_roster_corrections(pd.DataFrame(rows))
+
+
 def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
     candidate = path or MANUAL_ROSTER_CORRECTIONS_PATH
     if not candidate.exists():

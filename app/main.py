@@ -49,6 +49,7 @@ from app.config_loader import (
     empty_manual_roster_corrections,
     ensure_manual_transcript_files,
     find_manual_correction_conflicts,
+    graduated_alumni_rows_to_manual_corrections,
     import_manual_corrections_package,
     load_manual_roster_corrections,
     load_manual_review_queue,
@@ -1889,6 +1890,59 @@ def _render_manual_corrections_editor(bundle) -> None:
             if column not in editor_frame.columns:
                 editor_frame[column] = ""
         editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
+        with st.expander("Graduated alumni batch", expanded=False):
+            batch_defaults = st.columns(2)
+            with batch_defaults[0]:
+                alumni_default_org = st.text_input("Default organization", key="manual_alumni_default_org")
+            with batch_defaults[1]:
+                alumni_default_grad_term = st.text_input("Default graduation term", key="manual_alumni_default_grad_term")
+            alumni_input = st.data_editor(
+                pd.DataFrame(
+                    columns=[
+                        "student_id",
+                        "last_name",
+                        "first_name",
+                        "organization_name",
+                        "final_status_term",
+                        "organization_join_term",
+                    ]
+                ),
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,
+                key="graduated_alumni_batch_editor",
+                column_config={
+                    "student_id": st.column_config.TextColumn("Student ID"),
+                    "last_name": st.column_config.TextColumn("Last Name"),
+                    "first_name": st.column_config.TextColumn("First Name"),
+                    "organization_name": st.column_config.TextColumn("Organization"),
+                    "final_status_term": st.column_config.TextColumn("Graduation Term"),
+                    "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
+                },
+            )
+            alumni_corrections = graduated_alumni_rows_to_manual_corrections(
+                alumni_input,
+                default_organization=alumni_default_org,
+                default_graduation_term=alumni_default_grad_term,
+                summary=summary,
+            )
+            if not alumni_corrections.empty:
+                st.dataframe(alumni_corrections, use_container_width=True, hide_index=True)
+            alumni_action_cols = st.columns(2)
+            with alumni_action_cols[0]:
+                if st.button("Stage graduated alumni", use_container_width=True, disabled=alumni_corrections.empty):
+                    staged_rows = _stage_manual_corrections(alumni_corrections)
+                    st.success(f"Staged {len(staged_rows):,} graduated alumni correction row(s).")
+                    st.rerun()
+            with alumni_action_cols[1]:
+                if st.button("Save graduated alumni", use_container_width=True, disabled=alumni_corrections.empty):
+                    result = _save_manual_correction_batch(
+                        alumni_corrections,
+                        assigned_to=st.session_state.get("manual_helper_initials", ""),
+                        note="Graduated alumni batch saved.",
+                    )
+                    st.success(f"Saved {result['saved_rows']:,} graduated alumni correction row(s) to {result['saved_path']}.")
+                    st.rerun()
         search = st.text_input("Find a student to edit", placeholder="Type Banner ID, first name, last name, or chapter")
         if search and not summary.empty:
             haystack_columns = [

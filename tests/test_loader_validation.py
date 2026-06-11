@@ -11,6 +11,7 @@ from app.config_loader import (
     import_manual_corrections_package,
     ensure_manual_transcript_files,
     dedupe_manual_review_queue_by_cohort,
+    graduated_alumni_rows_to_manual_corrections,
     load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_queue,
@@ -310,6 +311,47 @@ def test_manual_review_queue_keeps_one_row_per_student_cohort() -> None:
     assert spring_row["review_status"] == "In Progress"
     assert spring_row["queue_reason"] == "Conflicting evidence; No graduation mention"
     assert spring_row["review_notes"] == "Keep this note"
+
+
+def test_graduated_alumni_batch_builds_manual_corrections_with_defaults() -> None:
+    alumni = pd.DataFrame(
+        {
+            "banner_id": ["a00000001", "not-an-id"],
+            "last_name": ["Doe", "Bad"],
+            "first_name": ["Jane", "Id"],
+        }
+    )
+
+    corrections = graduated_alumni_rows_to_manual_corrections(
+        alumni,
+        default_organization="Alpha Sigma Phi",
+        default_graduation_term="Spring 2026",
+    )
+
+    assert corrections[["student_id", "organization_name", "final_status_term", "final_status"]].values.tolist() == [
+        ["A00000001", "Alpha Sigma Phi", "Spring 2026", "Graduated"]
+    ]
+    assert corrections.loc[0, "leaving_organization_term"] == "Spring 2026"
+
+
+def test_graduated_alumni_batch_can_fill_from_summary() -> None:
+    alumni = pd.DataFrame({"student_id": ["A00000001"], "graduation_term": ["Fall 2025"]})
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "student_name": ["Jane Doe"],
+            "join_term": ["Fall 2021"],
+            "chapter": ["Alpha Sigma Phi"],
+        }
+    )
+
+    corrections = graduated_alumni_rows_to_manual_corrections(alumni, summary=summary)
+
+    assert corrections.loc[0, "first_name"] == "Jane"
+    assert corrections.loc[0, "last_name"] == "Doe"
+    assert corrections.loc[0, "organization_join_term"] == "Fall 2021"
+    assert corrections.loc[0, "organization_name"] == "Alpha Sigma Phi"
+    assert corrections.loc[0, "final_status_term"] == "Fall 2025"
 
 
 def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monkeypatch) -> None:
