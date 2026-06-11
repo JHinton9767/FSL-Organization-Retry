@@ -1822,8 +1822,9 @@ def _render_manual_corrections_editor(bundle) -> None:
 
         button_disabled = len(selected_review_keys) == 0
         st.caption("Batch outcome buttons")
-        quick_status_cols = st.columns(6)
-        for index, status in enumerate(["Inactive", "Resigned", "Revoked", "Suspended", "Unknown", "Graduated"]):
+        quick_statuses = ["Inactive", "Dropped", "Resigned", "Revoked", "Suspended", "Unknown", "Graduated"]
+        quick_status_cols = st.columns(len(quick_statuses))
+        for index, status in enumerate(quick_statuses):
             with quick_status_cols[index]:
                 if st.button(status, use_container_width=True, key=f"batch_status_{status.lower()}", disabled=button_disabled):
                     _apply_batch_status(status)

@@ -68,7 +68,7 @@ def test_filter_persistence_population_supports_academic_year_total_cohorts() ->
     assert fraternity_total["student_id"].tolist() == ["1"]
 
 
-def test_build_persistence_dashboard_uses_explicit_graduation_and_exact_checkpoint_retention() -> None:
+def test_build_persistence_dashboard_uses_explicit_graduation_and_roster_checkpoint_retention() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["1", "2", "3"],
@@ -86,6 +86,7 @@ def test_build_persistence_dashboard_uses_explicit_graduation_and_exact_checkpoi
             "observed_term": ["Fall 2020", "Fall 2020", "Fall 2023", "Fall 2023"],
             "observed_term_sort": [20203, 20203, 20233, 20233],
             "academic_present": ["Yes", "Yes", "Yes", "Yes"],
+            "roster_present": ["No", "No", "No", "Yes"],
         }
     )
 
@@ -154,6 +155,7 @@ def test_build_persistence_dashboard_supports_academic_year_total_checkpoints() 
             "observed_term": ["Fall 2016", "Spring 2017", "Fall 2019", "Spring 2020"],
             "observed_term_sort": [20163, 20171, 20193, 20201],
             "academic_present": ["Yes", "Yes", "Yes", "Yes"],
+            "roster_present": ["No", "Yes", "No", "Yes"],
         }
     )
 
@@ -166,3 +168,34 @@ def test_build_persistence_dashboard_supports_academic_year_total_checkpoints() 
     assert four_year["Graduated Count"] == 1
     assert four_year["Retained Count"] == 1
     assert four_year["Not Retained / Unresolved Count"] == 1
+
+
+def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_latest_roster() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "join_term": ["Fall 2019", "Fall 2019"],
+            "council": ["IFC", "IFC"],
+            "org_type": ["Fraternity", "Fraternity"],
+            "is_graduated": [False, False],
+            "graduation_term": ["", ""],
+            "graduation_term_code": ["", ""],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["1", "999"],
+            "observed_term": ["Spring 2024", "Spring 2024"],
+            "observed_term_sort": [20241, 20241],
+            "academic_present": ["No", "No"],
+            "roster_present": ["Yes", "Yes"],
+        }
+    )
+
+    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2019", "ALL")
+    table = dashboard["table_frame"]
+    four_year = table.loc[table["Milestone"].eq("4 Year")].iloc[0]
+
+    assert four_year["Retained Count"] == 1
+    assert four_year["Not Retained / Unresolved Count"] == 1
+    assert not table["Milestone"].eq("5 Year").any()

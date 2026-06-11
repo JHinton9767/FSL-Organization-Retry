@@ -25,7 +25,7 @@ def test_cohort_status_over_time_tracks_retained_graduated_and_not_retained() ->
             "term_code": ["2023FA", "2023FA"],
             "observed_term_sort": [20233, 20233],
             "academic_present": ["Yes", "Yes"],
-            "roster_present": ["No", "No"],
+            "roster_present": ["No", "Yes"],
         }
     )
 
@@ -73,11 +73,11 @@ def test_cohort_status_over_time_does_not_count_unconfirmed_graduation() -> None
     )
     longitudinal = pd.DataFrame(
         {
-            "student_id": ["A00000001"],
-            "term_code": ["2023FA"],
-            "observed_term_sort": [20233],
-            "academic_present": ["No"],
-            "roster_present": ["No"],
+            "student_id": ["A00000001", "A99999999"],
+            "term_code": ["2023FA", "2023FA"],
+            "observed_term_sort": [20233, 20233],
+            "academic_present": ["No", "No"],
+            "roster_present": ["No", "Yes"],
         }
     )
 
@@ -86,3 +86,31 @@ def test_cohort_status_over_time_does_not_count_unconfirmed_graduation() -> None
 
     assert int(four_year.loc["Graduated", "student_count"]) == 0
     assert int(four_year.loc["Not Retained", "student_count"]) == 1
+
+
+def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_checkpoints() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "join_term": ["Fall 2019", "Fall 2019"],
+            "is_graduated": [False, False],
+            "graduation_term_code": ["", ""],
+            "graduation_term": ["", ""],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A99999999"],
+            "term_code": ["2024SP", "2024SP"],
+            "observed_term_sort": [20241, 20241],
+            "academic_present": ["No", "No"],
+            "roster_present": ["Yes", "Yes"],
+        }
+    )
+
+    table = build_cohort_status_over_time(summary, longitudinal, max_years=6)
+    four_year = _status_rows(table, "Fall 2019", "4 Year")
+
+    assert int(four_year.loc["Retained", "student_count"]) == 1
+    assert int(four_year.loc["Not Retained", "student_count"]) == 1
+    assert not table["checkpoint"].eq("5 Year").any()

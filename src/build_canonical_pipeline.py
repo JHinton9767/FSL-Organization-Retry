@@ -5187,6 +5187,11 @@ def build_student_summary(
                 return ""
             return "Yes" if target_sort in term_sorts else "No"
 
+        def has_roster_at_or_after(target_sort: Optional[int]) -> str:
+            if target_sort is None or target_sort > latest_roster_term_sort:
+                return ""
+            return "Yes" if any(term_sort >= target_sort for term_sort in roster_term_sorts) else "No"
+
         def measurable_for_years(years: int) -> str:
             if not join_term_code:
                 return ""
@@ -5282,12 +5287,12 @@ def build_student_summary(
                 "graduated_5yr_measurable": graduated_5yr_measurable,
                 "graduated_6yr": graduated_6yr,
                 "graduated_6yr_measurable": graduated_6yr_measurable,
-                "retained_next_term": has_term(roster_term_sorts, next_term_sort),
-                "retained_next_term_measurable": "Yes" if next_term_sort and next_term_sort <= max_term_sort else "",
-                "retained_next_fall": has_term(roster_term_sorts, next_fall_sort),
-                "retained_next_fall_measurable": "Yes" if next_fall_sort and next_fall_sort <= max_term_sort else "",
-                "retained_one_year": has_term(roster_term_sorts, one_year_sort),
-                "retained_one_year_measurable": "Yes" if one_year_sort and one_year_sort <= max_term_sort else "",
+                "retained_next_term": has_roster_at_or_after(next_term_sort),
+                "retained_next_term_measurable": "Yes" if next_term_sort and next_term_sort <= latest_roster_term_sort else "",
+                "retained_next_fall": has_roster_at_or_after(next_fall_sort),
+                "retained_next_fall_measurable": "Yes" if next_fall_sort and next_fall_sort <= latest_roster_term_sort else "",
+                "retained_one_year": has_roster_at_or_after(one_year_sort),
+                "retained_one_year_measurable": "Yes" if one_year_sort and one_year_sort <= latest_roster_term_sort else "",
                 "continued_next_term": has_term(academic_term_sorts, next_term_sort),
                 "continued_next_term_measurable": "Yes" if next_term_sort and next_term_sort <= max_term_sort else "",
                 "continued_next_fall": has_term(academic_term_sorts, next_fall_sort),
@@ -5743,7 +5748,7 @@ def _summary_with_known_cohorts(summary: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _presence_by_checkpoint(longitudinal: pd.DataFrame) -> Tuple[Dict[int, set[str]], int]:
+def _roster_presence_by_checkpoint(longitudinal: pd.DataFrame) -> Tuple[Dict[int, set[str]], int]:
     if longitudinal.empty or "student_id" not in longitudinal.columns:
         return {}, 0
 
@@ -5764,18 +5769,24 @@ def _presence_by_checkpoint(longitudinal: pd.DataFrame) -> Tuple[Dict[int, set[s
         return {}, 0
 
     roster_present = boolish_series(frame.get("roster_present", pd.Series(False, index=frame.index)))
-    academic_present = boolish_series(frame.get("academic_present", pd.Series(False, index=frame.index)))
-    present = frame.loc[roster_present | academic_present].copy()
+    present = frame.loc[roster_present].copy()
     if present.empty:
-        max_observed = int(frame["_checkpoint_sort"].dropna().max())
-        return {}, max_observed
+        return {}, 0
 
     presence = {
         int(term_sort): set(group["student_id"].tolist())
         for term_sort, group in present.groupby("_checkpoint_sort", dropna=False)
         if pd.notna(term_sort)
     }
-    return presence, int(frame["_checkpoint_sort"].dropna().max())
+    return presence, int(present["_checkpoint_sort"].dropna().max())
+
+
+def _students_observed_at_or_after(presence_by_term: Dict[int, set[str]], checkpoint_sort: int, latest_roster_sort: int) -> set[str]:
+    retained: set[str] = set()
+    for term_sort, student_ids in presence_by_term.items():
+        if checkpoint_sort <= int(term_sort) <= latest_roster_sort:
+            retained.update(student_ids)
+    return retained
 
 
 def build_cohort_status_over_time(
@@ -5792,9 +5803,9 @@ def build_cohort_status_over_time(
     if cohort_summary.empty:
         return pd.DataFrame(columns=schema_columns)
 
-    presence_by_term, max_measurable_sort = _presence_by_checkpoint(longitudinal)
+    presence_by_term, max_measurable_sort = _roster_presence_by_checkpoint(longitudinal)
     rows: List[dict] = []
-    measurement_basis = "Same-season roster or academic presence; graduation requires confirmed evidence."
+    measurement_basis = "Roster presence at or after the checkpoint through the latest input roster; graduation requires confirmed evidence."
 
     for (cohort_code, cohort_term, cohort_sort), cohort in cohort_summary.groupby(
         ["_cohort_term_code", "_cohort_term", "_cohort_term_sort"],
@@ -5828,7 +5839,7 @@ def build_cohort_status_over_time(
                     .dropna()
                     .tolist()
                 )
-                retained_ids = (presence_by_term.get(checkpoint_sort, set()) & cohort_ids) - graduated_ids
+                retained_ids = (_students_observed_at_or_after(presence_by_term, checkpoint_sort, max_measurable_sort) & cohort_ids) - graduated_ids
                 not_retained_ids = cohort_ids - graduated_ids - retained_ids
                 status_counts = {
                     "Retained": len(retained_ids),

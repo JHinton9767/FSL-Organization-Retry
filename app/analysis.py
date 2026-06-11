@@ -1268,13 +1268,10 @@ def build_persistence_dashboard(
         else:
             long_frame["observed_term_sort"] = 999999
 
-    presence_mask = _truthy_series(long_frame.get("academic_present"), long_frame.index) | _truthy_series(
-        long_frame.get("roster_present"),
-        long_frame.index,
-    )
+    presence_mask = _truthy_series(long_frame.get("roster_present"), long_frame.index)
     presence_rows = long_frame.loc[presence_mask].copy()
     if presence_rows.empty:
-        empty["meta"]["note"] = "No roster-present or academic-present longitudinal rows matched the selected cohort."
+        empty["meta"]["note"] = "No roster-present longitudinal rows matched the selected cohort."
         return empty
 
     presence_by_term = {
@@ -1294,6 +1291,13 @@ def build_persistence_dashboard(
         if pd.notna(year_value)
     }
     max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
+
+    def students_rostered_at_or_after(target_sort: int) -> set[str]:
+        retained: set[str] = set()
+        for term_sort, student_set in presence_by_term.items():
+            if target_sort <= int(term_sort) <= max_term_sort:
+                retained.update(student_set)
+        return retained
 
     cohort_work = cohort.copy()
     cohort_work["student_id"] = cohort_work["student_id"].fillna("").astype(str).str.strip()
@@ -1316,6 +1320,7 @@ def build_persistence_dashboard(
             target_year = int(total_start_year) + offset
             target_label = _persistence_academic_year_label(target_year)
             target_sort = int(parse_term_label(f"Spring {target_year + 1}")["sort_value"])
+            target_retention_sort = int(parse_term_label(f"Fall {target_year}")["sort_value"])
             measurable = offset == 0 or (target_sort <= max_term_sort)
             display_label = target_label
         else:
@@ -1323,6 +1328,7 @@ def build_persistence_dashboard(
             target_code = f"{target_year}{season_code}"
             target_term = parse_term_label(target_code)
             target_sort = int(target_term["sort_value"])
+            target_retention_sort = target_sort
             measurable = offset == 0 or (target_sort <= max_term_sort)
             display_label = str(target_term["label"])
         if not measurable:
@@ -1342,10 +1348,7 @@ def build_persistence_dashboard(
                 .str.strip()
                 .tolist()
             )
-            if is_total_cohort:
-                retained_students = presence_by_academic_year.get(target_year, set()) - graduated_students
-            else:
-                retained_students = presence_by_term.get(target_sort, set()) - graduated_students
+            retained_students = students_rostered_at_or_after(target_retention_sort) - graduated_students
             graduated_count = len(graduated_students)
             retained_count = len(retained_students)
             not_retained_count = max(student_count_total - retained_count - graduated_count, 0)
@@ -1395,9 +1398,9 @@ def build_persistence_dashboard(
             "students": student_count_total,
             "max_milestone": last_milestone_label,
             "note": (
-                "Retained counts show students observed in roster or academic records in the checkpoint term. Graduated counts use explicit graduation evidence only. Students not observed in the checkpoint term remain in Not Retained / Unresolved."
+                "Retained counts show students observed on a roster at or after the checkpoint through the latest input roster. Graduated counts use explicit graduation evidence only. Checkpoints after the latest roster are not measured."
                 if not is_total_cohort
-                else "Retained counts show students observed in roster or academic records in either the fall or spring term of that academic year checkpoint. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Students not observed during that academic year remain in Not Retained / Unresolved."
+                else "Retained counts show students observed on a roster during or after the academic-year checkpoint through the latest input roster. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Checkpoints after the latest roster are not measured."
             ),
         },
     }
