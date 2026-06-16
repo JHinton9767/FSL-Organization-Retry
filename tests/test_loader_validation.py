@@ -1,3 +1,4 @@
+from pathlib import Path
 from zipfile import ZipFile
 
 import pandas as pd
@@ -347,6 +348,38 @@ def test_manual_review_actions_store_only_valid_selected_cohorts(tmp_path) -> No
     assert saved.loc[0, "student_id"] == "A00000001"
     assert saved.loc[0, "review_status"] == "Corrected"
     assert saved.loc[0, "review_notes"] == "selected row was actioned"
+
+
+def test_manual_review_actions_permission_error_writes_pending_fallback(tmp_path, monkeypatch) -> None:
+    actions_path = tmp_path / "config" / "manual_review_actions.csv"
+    original_to_csv = pd.DataFrame.to_csv
+
+    def locked_action_file(self, path_or_buf=None, *args, **kwargs):
+        if path_or_buf is not None and Path(path_or_buf) == actions_path:
+            raise PermissionError("locked")
+        return original_to_csv(self, path_or_buf, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", locked_action_file)
+
+    result = append_manual_review_actions(
+        pd.DataFrame(
+            {
+                "review_key": ["selected-locked"],
+                "student_id": ["A00000001"],
+                "join_term": ["Spring 2026"],
+                "review_status": ["Corrected"],
+                "review_notes": ["saved while primary file was locked"],
+            }
+        ),
+        actions_path,
+    )
+    saved = load_manual_review_actions(actions_path)
+
+    assert result["used_fallback"] is True
+    assert Path(result["path"]).name.startswith("manual_review_actions.pending_")
+    assert len(saved) == 1
+    assert saved.loc[0, "review_key"] == "selected-locked"
+    assert saved.loc[0, "review_notes"] == "saved while primary file was locked"
 
 
 def test_manual_review_actions_empty_file_loads_as_empty_queue(tmp_path) -> None:

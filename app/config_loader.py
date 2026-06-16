@@ -1088,16 +1088,41 @@ def save_manual_review_queue(frame: pd.DataFrame, path: Optional[Path] = None) -
 
 def load_manual_review_actions(path: Optional[Path] = None) -> pd.DataFrame:
     candidate = path or MANUAL_REVIEW_ACTIONS_PATH
+    frames: List[pd.DataFrame] = []
     frame = _read_manual_review_file(candidate)
-    return _normalize_manual_review_frame(frame)
+    if not frame.empty:
+        frames.append(frame)
+    for fallback_path in _manual_review_action_fallback_paths(candidate):
+        fallback = _read_manual_review_file(fallback_path)
+        if not fallback.empty:
+            frames.append(fallback)
+    if not frames:
+        return empty_manual_review_queue()
+    return _normalize_manual_review_frame(pd.concat(frames, ignore_index=True))
+
+
+def _manual_review_action_fallback_paths(path: Path) -> List[Path]:
+    if path.name != MANUAL_REVIEW_ACTIONS_PATH.name and path.name.startswith(f"{MANUAL_REVIEW_ACTIONS_PATH.stem}.pending_"):
+        return []
+    return sorted(path.parent.glob(f"{path.stem}.pending_*.csv"))
+
+
+def _manual_review_action_fallback_path(path: Path) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return path.with_name(f"{path.stem}.pending_{timestamp}{path.suffix}")
 
 
 def save_manual_review_actions(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
     candidate = path or MANUAL_REVIEW_ACTIONS_PATH
     candidate.parent.mkdir(parents=True, exist_ok=True)
     cleaned = _normalize_manual_review_frame(frame)
-    cleaned.to_csv(candidate, index=False)
-    return candidate
+    try:
+        cleaned.to_csv(candidate, index=False)
+        return candidate
+    except PermissionError:
+        fallback = _manual_review_action_fallback_path(candidate)
+        cleaned.to_csv(fallback, index=False)
+        return fallback
 
 
 def append_manual_review_actions(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
@@ -1105,14 +1130,20 @@ def append_manual_review_actions(frame: pd.DataFrame, path: Optional[Path] = Non
     candidate.parent.mkdir(parents=True, exist_ok=True)
     incoming = _normalize_manual_review_frame(frame)
     incoming_count = len(incoming)
-    existing = load_manual_review_actions(candidate) if candidate.exists() else empty_manual_review_queue()
+    existing = load_manual_review_actions(candidate)
     if incoming.empty:
-        save_manual_review_actions(existing, candidate)
-        return {"path": candidate, "incoming_rows": 0, "saved_rows": len(existing)}
+        saved_path = save_manual_review_actions(existing, candidate)
+        return {"path": saved_path, "attempted_path": candidate, "incoming_rows": 0, "saved_rows": len(existing), "used_fallback": saved_path != candidate}
     combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
-    save_manual_review_actions(combined, candidate)
+    saved_path = save_manual_review_actions(combined, candidate)
     saved = load_manual_review_actions(candidate)
-    return {"path": candidate, "incoming_rows": incoming_count, "saved_rows": len(saved)}
+    return {
+        "path": saved_path,
+        "attempted_path": candidate,
+        "incoming_rows": incoming_count,
+        "saved_rows": len(saved),
+        "used_fallback": saved_path != candidate,
+    }
 
 
 def prepare_manual_corrections_workspace(

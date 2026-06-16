@@ -1270,6 +1270,16 @@ def _append_manual_review_actions(
     return append_manual_review_actions(actions)
 
 
+def _warn_if_manual_action_fallback(result: dict[str, object]) -> None:
+    if result.get("used_fallback"):
+        attempted = result.get("attempted_path", MANUAL_REVIEW_ACTIONS_PATH)
+        fallback = result.get("path", "")
+        st.warning(
+            f"{attempted} is locked or not writable, so the action log was saved to {fallback}. "
+            "Close the locked CSV when you can; the app and pipeline will still read the pending action file."
+        )
+
+
 def _manual_queue_metrics(queue: pd.DataFrame, corrections: pd.DataFrame) -> dict[str, int]:
     if queue.empty:
         return {
@@ -1968,13 +1978,14 @@ def _render_manual_corrections_editor(bundle) -> None:
             if registry_rows.empty:
                 st.warning("No selected queue rows had a valid A# and enough information to save.")
                 return
-            _append_manual_review_actions(
+            action_result = _append_manual_review_actions(
                 selected_queue_rows,
                 assigned_to=helper_initials,
                 review_status="Corrected",
                 note=f"Saved as {final_status}.",
                 has_manual_correction="Yes",
             )
+            _warn_if_manual_action_fallback(action_result)
             st.success(f"Saved {result['appended_rows']:,} {saved_label} row(s) to {result['path']}. Rerun the canonical pipeline to apply them.")
             st.rerun()
 
@@ -1995,26 +2006,28 @@ def _render_manual_corrections_editor(bundle) -> None:
                     st.warning("No selected queue rows had a valid A# and enough scope to save as roster exclusions.")
                 else:
                     result = append_roster_exclusions(exclusions)
-                    _append_manual_review_actions(
+                    action_result = _append_manual_review_actions(
                         selected_queue_rows,
                         assigned_to=helper_initials,
                         review_status="Corrected",
                         note="Saved as roster exclusion.",
                         has_manual_correction="Yes",
                     )
+                    _warn_if_manual_action_fallback(action_result)
                     st.success(f"Saved {result['appended_rows']:,} roster exclusion row(s) to {result['path']}. Rerun the canonical pipeline to apply them.")
                 st.rerun()
         with batch_action_cols[1]:
             if st.button("Create transcript files for selected", use_container_width=True, disabled=button_disabled):
                 correction_rows = _manual_corrections_from_queue_rows(selected_queue_rows)
                 created = ensure_manual_transcript_files(correction_rows)
-                _append_manual_review_actions(
+                action_result = _append_manual_review_actions(
                     selected_queue_rows,
                     assigned_to=helper_initials,
                     review_status="Waiting on Transcript",
                     needs_transcript="Yes",
                     note="Transcript template requested from assignment queue.",
                 )
+                _warn_if_manual_action_fallback(action_result)
                 st.success(f"Created {len(created):,} missing transcript template(s) for selected row(s). Existing files were not overwritten.")
                 st.rerun()
         with batch_action_cols[2]:
@@ -2025,6 +2038,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                     review_status="Skipped / No Change",
                     note="Marked skipped / no change from assignment queue.",
                 )
+                _warn_if_manual_action_fallback(result)
                 st.success(f"Saved {len(selected_queue_rows):,} skipped / no-change action row(s) to {result['path']}.")
                 st.rerun()
 
@@ -2033,6 +2047,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                 st.warning("Check the row(s) you want to save first. Unchecked queue edits stay temporary.")
             else:
                 result = _append_manual_review_actions(selected_queue_rows, assigned_to=helper_initials)
+                _warn_if_manual_action_fallback(result)
                 st.success(f"Saved {len(selected_queue_rows):,} checked queue action row(s) to {result['path']}.")
                 st.rerun()
 
