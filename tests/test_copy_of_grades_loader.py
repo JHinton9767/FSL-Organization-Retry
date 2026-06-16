@@ -108,6 +108,96 @@ def test_load_academic_term_table_parses_multi_section_copy_of_grades_report(tmp
     assert status_by_last_name["Doe"] == "Inactive"
 
 
+def test_load_academic_term_table_parses_section_reports_with_id_and_name_columns(tmp_path: Path) -> None:
+    root = tmp_path
+    report_path = root / "Copy of Grades" / "2025" / "Fall 2025" / "PHC" / "Delta Example Grade Report.xlsx"
+
+    _write_workbook(
+        report_path,
+        [
+            ["Delta Example - Active Members"],
+            ["ID", "Name", "Semester GPA", "Semester Hours"],
+            ["A01234567", "Smith, Alex", 3.25, 15],
+            ["A01234568", "Jamie Jones", 3.75, 12],
+            [],
+            ["Delta Example - New Members"],
+            ["ID", "Name", "Semester GPA", "Semester Hours"],
+            ["A01234569", "Taylor Morgan", 3.5, 14],
+        ],
+    )
+
+    academic, exceptions = load_academic_term_table(root)
+
+    assert exceptions.empty
+    assert len(academic) == 3
+    assert set(academic["term_code"]) == {"2025FA"}
+    by_id = academic.set_index("student_id")
+    assert by_id.loc["A01234567", "first_name"] == "Alex"
+    assert by_id.loc["A01234567", "last_name"] == "Smith"
+    assert by_id.loc["A01234568", "academic_status_raw"] == "Active"
+    assert by_id.loc["A01234569", "academic_status_raw"] == "New Member"
+    assert by_id.loc["A01234569", "term_gpa"] == 3.5
+    assert by_id.loc["A01234569", "attempted_hours_term"] == 14
+
+
+def test_load_academic_term_table_parses_bulk_semester_excel_layout(tmp_path: Path) -> None:
+    root = tmp_path
+    report_path = root / "Academic Inputs" / "Fall 2025 Academic Export.xlsx"
+
+    _write_workbook(
+        report_path,
+        [
+            [
+                "Last Name",
+                "First Name",
+                "Banner ID",
+                "Email",
+                "Student Status",
+                "Major",
+                "Semester Hours",
+                "Current Academic Standing",
+                "Texas State GPA",
+                "Overall GPA",
+                "Transfer GPA",
+                "Term GPA",
+                "Term Passed Hours",
+                "TxState Cumulative GPA",
+                "Overall Cumulative GPA",
+            ],
+            [
+                "Doe",
+                "Jane",
+                "A01234570",
+                "jane@example.com",
+                "AS - Active",
+                "Biology",
+                16,
+                "GS - Good Standing",
+                3.2,
+                3.4,
+                "",
+                3.6,
+                15,
+                3.2,
+                3.4,
+            ],
+        ],
+    )
+
+    academic, exceptions = load_academic_term_table(root)
+
+    assert exceptions.empty
+    assert len(academic) == 1
+    row = academic.iloc[0]
+    assert row["student_id"] == "A01234570"
+    assert row["term_code"] == "2025FA"
+    assert row["academic_status_raw"] == "AS - Active"
+    assert row["term_gpa"] == 3.6
+    assert row["attempted_hours_term"] == 16
+    assert row["earned_hours_term"] == 15
+    assert row["academic_standing_bucket"] == "Good Standing"
+
+
 def test_load_academic_term_table_uses_column_k_count_notes(tmp_path: Path) -> None:
     root = tmp_path
     report_path = root / "Copy of Grades" / "2026" / "Spring 2026" / "IFC" / "Alpha Sigma Phi LOGI.xlsx"

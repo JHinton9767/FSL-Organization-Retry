@@ -46,6 +46,7 @@ from src.build_master_roster import (
     canonical_header,
     chapter_from_filename,
     detect_inline_chapter_label,
+    extract_person_name_from_label,
     find_header_row_in_rows,
     find_header_row,
     find_status_column_in_rows,
@@ -345,9 +346,10 @@ YEARLY_UNIQUE_ID_CHECKLIST_COLUMNS = [
 ]
 
 GRADE_COLUMN_ALIASES = {
-    "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid", "netid", "net id"},
+    "Banner ID": {"banner id", "student id", "banner", "student number", "PLID", "plid", "netid", "net id", "id", "a number", "a#", "a number id"},
     "Last Name": {"last name", "lastname"},
     "First Name": {"first name", "firstname"},
+    "Student Name": {"student name", "name", "member name", "full name"},
     "Email": {"email", "email address"},
     "Student Status": {"student status", "status"},
     "Major": {"major", "primary major"},
@@ -932,6 +934,27 @@ def academic_count_decision(row: Tuple[object, ...], note_text: object = "") -> 
     return "counted", ""
 
 
+def _grade_header_has_student_identity(header_map: Dict[str, int]) -> bool:
+    has_split_name = {"Last Name", "First Name"}.issubset(set(header_map))
+    has_full_name = "Student Name" in header_map
+    has_student_id = "Banner ID" in header_map
+    has_academic_value = bool({"Term GPA", "Semester Hours", "Term Passed Hours", "Overall GPA", "TxState Cumulative GPA"} & set(header_map))
+    return (has_split_name or has_full_name) and (has_student_id or has_academic_value)
+
+
+def _grade_row_first_last_names(row: Tuple[object, ...], header_map: Dict[str, int]) -> Tuple[str, str]:
+    first_name = clean_text(get_cell(row, header_map.get("First Name")))
+    last_name = clean_text(get_cell(row, header_map.get("Last Name")))
+    if first_name or last_name:
+        return first_name, last_name
+
+    full_name = clean_text(get_cell(row, header_map.get("Student Name")))
+    parsed = extract_person_name_from_label(full_name) if full_name else None
+    if parsed:
+        return parsed
+    return "", ""
+
+
 def extract_academic_rows_from_table_rows(
     path: Path,
     source_label: str,
@@ -951,7 +974,7 @@ def extract_academic_rows_from_table_rows(
     header_sections: List[Tuple[int, Dict[str, int]]] = []
     for row_idx, candidate_row in enumerate(table_rows):
         header_map = map_grade_headers(candidate_row)
-        if {"Last Name", "First Name"}.issubset(set(header_map)):
+        if _grade_header_has_student_identity(header_map):
             header_sections.append((row_idx, header_map))
 
     if not header_sections:
@@ -982,8 +1005,7 @@ def extract_academic_rows_from_table_rows(
             row = table_rows[absolute_row_idx]
             if all(not clean_text(cell) for cell in row):
                 break
-            first_name = clean_text(get_cell(row, header_map.get("First Name")))
-            last_name = clean_text(get_cell(row, header_map.get("Last Name")))
+            first_name, last_name = _grade_row_first_last_names(row, header_map)
             if not first_name and not last_name:
                 continue
             if first_name.lower() == "first name" and last_name.lower() == "last name":
