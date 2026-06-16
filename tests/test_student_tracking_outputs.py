@@ -94,6 +94,15 @@ def test_latest_loaded_roster_explicit_exit_still_counts_as_exit() -> None:
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_INACTIVE_EXIT
 
 
+def test_early_alumni_roster_status_counts_as_non_graduate_exit() -> None:
+    roster = _roster("A00000011", status="Early Alumni")
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000011", current_roster_term_code="2020FA"), pd.DataFrame())
+
+    assert tracking.loc[0, "explicit_graduation_evidence"] == "No"
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_INACTIVE_EXIT
+
+
 def test_transcript_graduation_counts_when_roster_has_no_graduation() -> None:
     roster = _roster("A00000007", status="Active")
     transcript_terms = pd.DataFrame(

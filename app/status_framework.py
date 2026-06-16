@@ -60,6 +60,8 @@ DEFAULT_OUTCOME_RESOLUTION_CONFIG: Dict[str, Any] = {
             r"\bTERMINAT",
             r"\bDISMISS",
             r"\bEXPEL",
+            r"\bALUMNI\b",
+            r"\bEARLY ALUM",
         ],
         STILL_ACTIVE_GROUP: [
             r"\bSTILL ACTIVE\b",

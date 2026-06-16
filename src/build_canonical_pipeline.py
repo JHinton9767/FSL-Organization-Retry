@@ -184,6 +184,7 @@ OUTCOME_TRANSFERRED_LEFT = "Transferred / Left Institution"
 OUTCOME_INACTIVE_EXIT = "Inactive / Resigned / Suspended / Revoked"
 OUTCOME_UNKNOWN_REVIEW = "Unknown / Manual Review Required"
 OUTCOME_SOURCE_PROBLEM = "Roster Problem / Source Problem"
+ROSTER_STATUS_EARLY_ALUMNI = "Early Alumni"
 
 FINAL_OUTCOME_BUCKETS = [
     OUTCOME_GRADUATED_CONFIRMED,
@@ -850,7 +851,7 @@ def academic_source_priority(source_file: object, term_source_basis: object = ""
 def grade_section_default_status(path: Path, sheet_name: str, section_context: str) -> str:
     combined_context = " ".join([clean_text(section_context), clean_text(sheet_name), clean_text(path.stem)])
     bucket = roster_status_bucket(combined_context, "")
-    if bucket in {"Active", "Inactive", "New Member", "Graduated", "Transfer", "Suspended", "Resigned", "Revoked"}:
+    if bucket in {"Active", "Inactive", "New Member", "Graduated", "Transfer", "Suspended", "Resigned", "Revoked", ROSTER_STATUS_EARLY_ALUMNI}:
         return bucket
     return ""
 
@@ -2472,6 +2473,8 @@ def roster_status_bucket(raw_status: object, raw_position: object) -> str:
     combined = f"{status} {clean_text(raw_position)}".upper()
     if has_explicit_roster_graduation_status(raw_status, status):
         return "Graduated"
+    if "ALUMNI" in status_text or "EARLY ALUM" in status_text:
+        return ROSTER_STATUS_EARLY_ALUMNI
     if "SUSPEND" in status_text:
         return "Suspended"
     if "TRANSFER" in status_text:
@@ -2503,7 +2506,7 @@ def outcome_bucket_from_signals(status_bucket: str, academic_status_raw: str, sn
         return "Suspended", "Explicit suspension signal"
     if "TRANSFER" in signals:
         return "Transfer", "Explicit transfer signal"
-    if any(token in signals for token in ["INACTIVE", "DROP", "RESIGN", "REVOK", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL"]):
+    if any(token in signals for token in ["INACTIVE", "DROP", "RESIGN", "REVOK", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL", "ALUMNI", "EARLY ALUM"]):
         return "Dropped/Resigned/Revoked/Inactive", "Explicit non-graduate exit signal"
     if any(token in signals for token in ["ACTIVE", "CURRENT", "MEMBER", "NEW MEMBER", "COUNCIL", "ENROLLED"]):
         return "Active/Unknown", "Current or active signal only"
@@ -3930,6 +3933,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
                 "Transfer": 70,
                 "Revoked": 65,
                 "Resigned": 60,
+                ROSTER_STATUS_EARLY_ALUMNI: 58,
                 "Inactive": 55,
                 "New Member": 54,
                 "Active": 50,
@@ -4651,7 +4655,7 @@ def _outcome_bucket_from_manual_value(value: object) -> str:
         return OUTCOME_GRADUATED_CONFIRMED
     if "TRANSFER" in upper or "LEFT INSTITUTION" in upper:
         return OUTCOME_TRANSFERRED_LEFT
-    if any(token in upper for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW"]):
+    if any(token in upper for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "ALUMNI", "EARLY ALUM"]):
         return OUTCOME_INACTIVE_EXIT
     if "ACTIVE" in upper or "CURRENT" in upper or "NEW MEMBER" in upper:
         return OUTCOME_STILL_ACTIVE
@@ -4697,7 +4701,7 @@ def classify_student_outcome(row: pd.Series) -> Tuple[str, str, str, str]:
     if "TRANSFER" in latest_status_text:
         return OUTCOME_TRANSFERRED_LEFT, "high", "; ".join(flags), "; ".join(manual_review_reasons)
 
-    if any(token in latest_status_text for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL"]):
+    if any(token in latest_status_text for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "TERMINAT", "DISMISS", "EXPEL", "ALUMNI", "EARLY ALUM"]):
         return OUTCOME_INACTIVE_EXIT, "high", "; ".join(flags), "; ".join(manual_review_reasons)
 
     if has_roster and last_roster_sort < 999999 and latest_loaded_roster_sort < 999999 and last_roster_sort >= latest_loaded_roster_sort:
@@ -6055,9 +6059,9 @@ def build_status_exceptions(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.
         "Revoked",
         "Resigned",
         "Inactive",
+        ROSTER_STATUS_EARLY_ALUMNI,
         "New Member",
         "Active",
-        "Alumni",
         "Unknown",
     }
     if not roster.empty:

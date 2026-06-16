@@ -111,6 +111,9 @@ def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> N
     assert roster_status_bucket("G", "Member") == "Graduated"
     assert roster_status_bucket("Graduated", "Member") == "Graduated"
     assert roster_status_bucket("Good Standing", "Member") != "Graduated"
+    assert roster_status_bucket("AL", "Member") == "Early Alumni"
+    assert roster_status_bucket("Alumni", "Member") == "Early Alumni"
+    assert roster_status_bucket("Early Alumni", "Member") == "Early Alumni"
 
 
 def test_banner_id_normalization_only_keeps_valid_a0_ids() -> None:
@@ -249,11 +252,11 @@ def test_decision_registries_convert_to_canonical_adjustments() -> None:
     )
     outcomes = pd.DataFrame(
         {
-            "student_id": ["A00000002"],
-            "organization_name": ["Beta"],
-            "final_status": ["Dropped"],
-            "final_status_term": ["Fall 2025"],
-            "reason": ["Verified by advisor"],
+            "student_id": ["A00000002", "A00000003"],
+            "organization_name": ["Beta", "Gamma"],
+            "final_status": ["Dropped", "Early Alumni"],
+            "final_status_term": ["Fall 2025", "Spring 2026"],
+            "reason": ["Verified by advisor", "AL roster status"],
         }
     )
 
@@ -267,7 +270,8 @@ def test_decision_registries_convert_to_canonical_adjustments() -> None:
         "Spring 2026"
     ]
     assert outcome_adjustments.loc[outcome_adjustments["field_to_override"].eq("final_outcome_bucket"), "adjusted_value"].tolist() == [
-        "Dropped"
+        "Dropped",
+        "Early Alumni",
     ]
 
 
