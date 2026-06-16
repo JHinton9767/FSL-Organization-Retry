@@ -1980,7 +1980,7 @@ def _render_manual_corrections_editor(bundle) -> None:
 
         button_disabled = len(selected_review_keys) == 0
         st.caption("Batch outcome buttons")
-        quick_statuses = ["Early Alumni", "Inactive", "Dropped", "Resigned", "Revoked", "Suspended", "Unknown", "Graduated"]
+        quick_statuses = ["Early Alumni", "Inactive", "Dropped", "Resigned", "Revoked", "Suspended", "Transfer", "Unknown", "Graduated"]
         quick_status_cols = st.columns(len(quick_statuses))
         for index, status in enumerate(quick_statuses):
             with quick_status_cols[index]:

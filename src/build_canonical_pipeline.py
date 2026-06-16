@@ -4653,7 +4653,7 @@ def _outcome_bucket_from_manual_value(value: object) -> str:
         return ""
     if has_confirmed_graduation_text(text) or upper in {"G", "GRAD", "GRADUATED", OUTCOME_GRADUATED_CONFIRMED.upper()}:
         return OUTCOME_GRADUATED_CONFIRMED
-    if "TRANSFER" in upper or "LEFT INSTITUTION" in upper:
+    if upper in {"T", "TRANSFER", "TRANSFERRED"} or "TRANSFER" in upper or "LEFT INSTITUTION" in upper:
         return OUTCOME_TRANSFERRED_LEFT
     if any(token in upper for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "ALUMNI", "EARLY ALUM"]):
         return OUTCOME_INACTIVE_EXIT

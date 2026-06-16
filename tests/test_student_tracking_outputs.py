@@ -5,6 +5,7 @@ from src.build_canonical_pipeline import (
     OUTCOME_INACTIVE_EXIT,
     OUTCOME_NOT_RETAINED,
     OUTCOME_STILL_ACTIVE,
+    OUTCOME_TRANSFERRED_LEFT,
     build_generated_manual_review_queue,
     build_input_group_outcome_buckets,
     build_student_longitudinal_tracking,
@@ -224,6 +225,24 @@ def test_manual_adjustment_overrides_automated_outcome_and_validates() -> None:
 
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_GRADUATED_CONFIRMED
     assert failures == []
+
+
+def test_manual_transfer_code_creates_transfer_outcome() -> None:
+    appearances = build_student_source_appearances(_roster("A00000012"), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    manual = pd.DataFrame(
+        {
+            "adjustment_id": ["manual-transfer"],
+            "student_id": ["A00000012"],
+            "normalized_student_id": ["A00000012"],
+            "field_to_override": ["final_outcome_bucket"],
+            "adjusted_value": ["T"],
+            "active": ["Yes"],
+        }
+    )
+
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000012"), manual)
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_TRANSFERRED_LEFT
 
 
 def test_input_group_buckets_count_unique_students_once() -> None:

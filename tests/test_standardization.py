@@ -114,6 +114,8 @@ def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> N
     assert roster_status_bucket("AL", "Member") == "Early Alumni"
     assert roster_status_bucket("Alumni", "Member") == "Early Alumni"
     assert roster_status_bucket("Early Alumni", "Member") == "Early Alumni"
+    assert roster_status_bucket("T", "Member") == "Transfer"
+    assert roster_status_bucket("Transfer", "Member") == "Transfer"
 
 
 def test_banner_id_normalization_only_keeps_valid_a0_ids() -> None:
