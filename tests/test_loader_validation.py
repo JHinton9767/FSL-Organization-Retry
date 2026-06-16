@@ -5,6 +5,7 @@ import pytest
 
 from app.config_loader import (
     append_manual_adjustments,
+    append_manual_review_actions,
     append_manual_roster_corrections,
     build_manual_corrections_package,
     find_manual_correction_conflicts,
@@ -14,12 +15,12 @@ from app.config_loader import (
     graduated_alumni_rows_to_manual_corrections,
     load_manual_adjustments,
     load_manual_roster_corrections,
-    load_manual_review_queue,
+    load_manual_review_actions,
     normalize_manual_adjustments,
     save_manual_adjustments,
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
-    save_manual_review_queue,
+    save_manual_review_actions,
     save_manual_roster_corrections,
 )
 from app.data_loader import _validate_loaded_tables
@@ -262,6 +263,7 @@ def test_manual_workspace_and_package_are_helper_ready(tmp_path) -> None:
         assert sorted(archive.namelist()) == [
             "Transcripts/A00000001_Doe_Jane.txt",
             "manual_adjustments.csv",
+            "manual_review_actions.csv",
             "manual_review_queue.csv",
             "manual_roster_corrections.csv",
         ]
@@ -311,6 +313,31 @@ def test_manual_review_queue_keeps_one_row_per_student_cohort() -> None:
     assert spring_row["review_status"] == "In Progress"
     assert spring_row["queue_reason"] == "Conflicting evidence; No graduation mention"
     assert spring_row["review_notes"] == "Keep this note"
+
+
+def test_manual_review_actions_store_only_valid_selected_cohorts(tmp_path) -> None:
+    actions_path = tmp_path / "config" / "manual_review_actions.csv"
+
+    result = append_manual_review_actions(
+        pd.DataFrame(
+            {
+                "review_key": ["selected-1", "selected-2", "bad"],
+                "student_id": ["A00000001", "A00000001", "not-an-id"],
+                "join_term": ["Spring 2026", "Spring 2026", "Spring 2026"],
+                "review_status": ["Needs Review", "Corrected", "Needs Review"],
+                "review_notes": ["", "selected row was actioned", "bad id"],
+            }
+        ),
+        actions_path,
+    )
+
+    saved = load_manual_review_actions(actions_path)
+
+    assert result["incoming_rows"] == 1
+    assert len(saved) == 1
+    assert saved.loc[0, "student_id"] == "A00000001"
+    assert saved.loc[0, "review_status"] == "Corrected"
+    assert saved.loc[0, "review_notes"] == "selected row was actioned"
 
 
 def test_graduated_alumni_batch_builds_manual_corrections_with_defaults() -> None:
@@ -399,10 +426,12 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     corrections_path = tmp_path / "config" / "manual_roster_corrections.csv"
     adjustments_path = tmp_path / "config" / "manual_adjustments.csv"
     review_path = tmp_path / "config" / "manual_review_queue.csv"
+    actions_path = tmp_path / "config" / "manual_review_actions.csv"
     transcript_folder = tmp_path / "transcript_text" / "Transcripts"
     monkeypatch.setattr("app.config_loader.MANUAL_ROSTER_CORRECTIONS_PATH", corrections_path)
     monkeypatch.setattr("app.config_loader.MANUAL_ADJUSTMENTS_PATH", adjustments_path)
     monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_QUEUE_PATH", review_path)
+    monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_ACTIONS_PATH", actions_path)
     monkeypatch.setattr("app.config_loader.MANUAL_TRANSCRIPTS_PATH", transcript_folder)
 
     save_manual_roster_corrections(
@@ -420,7 +449,7 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
         ),
         corrections_path,
     )
-    save_manual_review_queue(
+    save_manual_review_actions(
         pd.DataFrame(
             {
                 "review_key": ["A00000001"],
@@ -429,7 +458,7 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
                 "review_status": ["Corrected"],
             }
         ),
-        review_path,
+        actions_path,
     )
     save_manual_adjustments(
         pd.DataFrame(
@@ -444,7 +473,7 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     )
     transcript_folder.mkdir(parents=True, exist_ok=True)
     (transcript_folder / "A00000001_Doe_Jane.txt").write_text("Spring 2026\nCredits: 3\n", encoding="utf-8")
-    package_bytes = build_manual_corrections_package(corrections_path, transcript_folder, review_path)
+    package_bytes = build_manual_corrections_package(corrections_path, transcript_folder, review_path, actions_path)
 
     result = import_manual_corrections_package(package_bytes)
 
@@ -453,4 +482,4 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     assert result["transcript_skipped"] == 1
     assert len(load_manual_roster_corrections(corrections_path)) == 1
     assert len(load_manual_adjustments(adjustments_path)) == 1
-    assert len(load_manual_review_queue(review_path)) == 1
+    assert len(load_manual_review_actions(actions_path)) == 1

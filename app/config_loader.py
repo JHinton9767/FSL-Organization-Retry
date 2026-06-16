@@ -30,6 +30,7 @@ MANUAL_CHAPTER_ASSIGNMENTS_PATH = CONFIG_DIR / "manual_chapter_assignments.csv"
 MANUAL_ROSTER_CORRECTIONS_PATH = CONFIG_DIR / "manual_roster_corrections.csv"
 MANUAL_ADJUSTMENTS_PATH = CONFIG_DIR / "manual_adjustments.csv"
 MANUAL_REVIEW_QUEUE_PATH = CONFIG_DIR / "manual_review_queue.csv"
+MANUAL_REVIEW_ACTIONS_PATH = CONFIG_DIR / "manual_review_actions.csv"
 
 
 def _configured_transcript_text_root() -> Path:
@@ -810,48 +811,90 @@ def load_manual_review_queue(path: Optional[Path] = None) -> pd.DataFrame:
     return dedupe_manual_review_queue_by_cohort(frame)
 
 
+def _normalize_manual_review_frame(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return empty_manual_review_queue()
+    cleaned = frame.copy()
+    header_map = dict(zip(cleaned.columns, canonical_headers(cleaned.columns)))
+    cleaned = cleaned.rename(columns=header_map)
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        if column not in cleaned.columns:
+            cleaned[column] = ""
+    cleaned = cleaned[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        cleaned[column] = cleaned[column].str.strip()
+    cleaned = cleaned.loc[cleaned["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
+    return dedupe_manual_review_queue_by_cohort(cleaned)
+
+
 def save_manual_review_queue(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
     candidate = path or MANUAL_REVIEW_QUEUE_PATH
     candidate.parent.mkdir(parents=True, exist_ok=True)
-    if frame is None or frame.empty:
-        cleaned = empty_manual_review_queue()
-    else:
-        cleaned = frame.copy()
-        for column in MANUAL_REVIEW_QUEUE_COLUMNS:
-            if column not in cleaned.columns:
-                cleaned[column] = ""
-        cleaned = cleaned[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
-        for column in MANUAL_REVIEW_QUEUE_COLUMNS:
-            cleaned[column] = cleaned[column].str.strip()
-        cleaned = cleaned.loc[cleaned["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
-        cleaned = dedupe_manual_review_queue_by_cohort(cleaned)
+    cleaned = _normalize_manual_review_frame(frame)
     cleaned.to_csv(candidate, index=False)
     return candidate
+
+
+def load_manual_review_actions(path: Optional[Path] = None) -> pd.DataFrame:
+    candidate = path or MANUAL_REVIEW_ACTIONS_PATH
+    if not candidate.exists():
+        return empty_manual_review_queue()
+    frame = read_tabular_file(candidate)
+    return _normalize_manual_review_frame(frame)
+
+
+def save_manual_review_actions(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
+    candidate = path or MANUAL_REVIEW_ACTIONS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    cleaned = _normalize_manual_review_frame(frame)
+    cleaned.to_csv(candidate, index=False)
+    return candidate
+
+
+def append_manual_review_actions(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
+    candidate = path or MANUAL_REVIEW_ACTIONS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    incoming = _normalize_manual_review_frame(frame)
+    incoming_count = len(incoming)
+    existing = load_manual_review_actions(candidate) if candidate.exists() else empty_manual_review_queue()
+    if incoming.empty:
+        save_manual_review_actions(existing, candidate)
+        return {"path": candidate, "incoming_rows": 0, "saved_rows": len(existing)}
+    combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
+    save_manual_review_actions(combined, candidate)
+    saved = load_manual_review_actions(candidate)
+    return {"path": candidate, "incoming_rows": incoming_count, "saved_rows": len(saved)}
 
 
 def prepare_manual_corrections_workspace(
     corrections_path: Optional[Path] = None,
     transcript_folder: Optional[Path] = None,
     review_queue_path: Optional[Path] = None,
+    review_actions_path: Optional[Path] = None,
 ) -> Dict[str, Path]:
     correction_file = corrections_path or MANUAL_ROSTER_CORRECTIONS_PATH
     adjustments_file = correction_file.parent / MANUAL_ADJUSTMENTS_PATH.name
     transcripts = transcript_folder or MANUAL_TRANSCRIPTS_PATH
     review_queue = review_queue_path or (correction_file.parent / MANUAL_REVIEW_QUEUE_PATH.name)
+    review_actions = review_actions_path or (correction_file.parent / MANUAL_REVIEW_ACTIONS_PATH.name)
     correction_file.parent.mkdir(parents=True, exist_ok=True)
     transcripts.mkdir(parents=True, exist_ok=True)
     review_queue.parent.mkdir(parents=True, exist_ok=True)
+    review_actions.parent.mkdir(parents=True, exist_ok=True)
     if not correction_file.exists():
         empty_manual_roster_corrections().to_csv(correction_file, index=False)
     if not adjustments_file.exists():
         empty_manual_adjustments().to_csv(adjustments_file, index=False)
     if not review_queue.exists():
         empty_manual_review_queue().to_csv(review_queue, index=False)
+    if not review_actions.exists():
+        empty_manual_review_queue().to_csv(review_actions, index=False)
     return {
         "corrections_path": correction_file,
         "adjustments_path": adjustments_file,
         "transcript_folder": transcripts,
         "review_queue_path": review_queue,
+        "review_actions_path": review_actions,
     }
 
 
@@ -925,17 +968,21 @@ def build_manual_corrections_package(
     corrections_path: Optional[Path] = None,
     transcript_folder: Optional[Path] = None,
     review_queue_path: Optional[Path] = None,
+    review_actions_path: Optional[Path] = None,
 ) -> bytes:
-    workspace = prepare_manual_corrections_workspace(corrections_path, transcript_folder, review_queue_path)
+    workspace = prepare_manual_corrections_workspace(corrections_path, transcript_folder, review_queue_path, review_actions_path)
     correction_file = workspace["corrections_path"]
     adjustments_file = workspace["adjustments_path"]
     transcripts = workspace["transcript_folder"]
     review_queue = workspace["review_queue_path"]
+    review_actions = workspace["review_actions_path"]
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.write(correction_file, arcname="manual_roster_corrections.csv")
         if adjustments_file.exists():
             archive.write(adjustments_file, arcname="manual_adjustments.csv")
+        if review_actions.exists():
+            archive.write(review_actions, arcname="manual_review_actions.csv")
         if review_queue.exists():
             archive.write(review_queue, arcname="manual_review_queue.csv")
         for path in sorted(transcripts.glob("*.txt")):
@@ -1017,11 +1064,14 @@ def import_manual_corrections_package(package_bytes: bytes) -> Dict[str, object]
         if "manual_roster_corrections.csv" in names:
             incoming = pd.read_csv(archive.open("manual_roster_corrections.csv"))
             correction_result = merge_manual_corrections(incoming)
+        if "manual_review_actions.csv" in names:
+            incoming_actions = pd.read_csv(archive.open("manual_review_actions.csv"))
+            append_manual_review_actions(incoming_actions)
+            review_rows = len(load_manual_review_actions())
         if "manual_review_queue.csv" in names:
             incoming_queue = pd.read_csv(archive.open("manual_review_queue.csv"))
-            combined_queue = pd.concat([load_manual_review_queue(), incoming_queue], ignore_index=True)
-            save_manual_review_queue(combined_queue)
-            review_rows = len(load_manual_review_queue())
+            append_manual_review_actions(incoming_queue)
+            review_rows = len(load_manual_review_actions())
         if "manual_adjustments.csv" in names:
             incoming_adjustments = pd.read_csv(archive.open("manual_adjustments.csv"))
             combined_adjustments = pd.concat([load_manual_adjustments(), incoming_adjustments], ignore_index=True)

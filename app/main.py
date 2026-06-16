@@ -37,10 +37,11 @@ from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_m
 from app.config_loader import (
     MANUAL_ROSTER_CORRECTION_COLUMNS,
     MANUAL_ADJUSTMENTS_PATH,
+    MANUAL_REVIEW_ACTIONS_PATH,
     MANUAL_REVIEW_QUEUE_COLUMNS,
-    MANUAL_REVIEW_QUEUE_PATH,
     MANUAL_ROSTER_CORRECTIONS_PATH,
     MANUAL_TRANSCRIPTS_PATH,
+    append_manual_review_actions,
     REVIEW_STATUS_OPTIONS,
     append_manual_adjustments,
     append_manual_roster_corrections,
@@ -52,14 +53,13 @@ from app.config_loader import (
     graduated_alumni_rows_to_manual_corrections,
     import_manual_corrections_package,
     load_manual_roster_corrections,
-    load_manual_review_queue,
+    load_manual_review_actions,
     load_metric_catalog,
     load_settings,
     load_status_code_map,
     manual_transcript_path_for_correction,
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
-    save_manual_review_queue,
     save_manual_roster_corrections,
 )
 from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
@@ -1183,7 +1183,7 @@ def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.Dat
 
 def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> pd.DataFrame:
     if generated.empty:
-        return dedupe_manual_review_queue_by_cohort(saved) if not saved.empty else pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
     result = generated.copy()
     if not saved.empty:
         keep_columns = ["review_key", "assigned_to", "review_status", "needs_transcript", "review_notes", "updated_at"]
@@ -1194,25 +1194,59 @@ def _merge_saved_review_queue(generated: pd.DataFrame, saved: pd.DataFrame) -> p
             if saved_column in result.columns:
                 result[column] = result[saved_column].where(result[saved_column].fillna("").astype(str).str.strip().ne(""), result[column])
                 result = result.drop(columns=[saved_column])
-        saved_only = saved.loc[~saved["review_key"].isin(result["review_key"])].copy()
-        if not saved_only.empty:
-            for column in MANUAL_REVIEW_QUEUE_COLUMNS:
-                if column not in saved_only.columns:
-                    saved_only[column] = ""
-            result = pd.concat([result, saved_only[MANUAL_REVIEW_QUEUE_COLUMNS]], ignore_index=True)
     return dedupe_manual_review_queue_by_cohort(result[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)).reset_index(drop=True)
 
 
-def _manual_review_queue_changed(current: pd.DataFrame, saved: pd.DataFrame) -> bool:
-    current_clean = current.copy()
-    saved_clean = saved.copy()
-    for frame in [current_clean, saved_clean]:
-        for column in MANUAL_REVIEW_QUEUE_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = ""
-    current_clean = current_clean[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str).reset_index(drop=True)
-    saved_clean = saved_clean[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str).reset_index(drop=True)
-    return not current_clean.equals(saved_clean)
+def _manual_review_action_rows(
+    queue_rows: pd.DataFrame,
+    assigned_to: str = "",
+    review_status: str = "",
+    needs_transcript: str = "",
+    note: str = "",
+    has_manual_correction: str = "",
+) -> pd.DataFrame:
+    if queue_rows is None or queue_rows.empty:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    rows = queue_rows.copy()
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        if column not in rows.columns:
+            rows[column] = ""
+    rows = rows[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        rows[column] = rows[column].str.strip()
+    if assigned_to:
+        rows["assigned_to"] = assigned_to
+    if review_status:
+        rows["review_status"] = review_status
+    if needs_transcript:
+        rows["needs_transcript"] = needs_transcript
+    if note:
+        rows["review_notes"] = rows["review_notes"].where(rows["review_notes"].str.strip().ne(""), note)
+    if has_manual_correction:
+        rows["has_manual_correction"] = has_manual_correction
+    rows["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    return dedupe_manual_review_queue_by_cohort(rows)
+
+
+def _append_manual_review_actions(
+    queue_rows: pd.DataFrame,
+    assigned_to: str = "",
+    review_status: str = "",
+    needs_transcript: str = "",
+    note: str = "",
+    has_manual_correction: str = "",
+) -> dict[str, object]:
+    actions = _manual_review_action_rows(
+        queue_rows,
+        assigned_to=assigned_to,
+        review_status=review_status,
+        needs_transcript=needs_transcript,
+        note=note,
+        has_manual_correction=has_manual_correction,
+    )
+    if actions.empty:
+        return {"path": MANUAL_REVIEW_ACTIONS_PATH, "incoming_rows": 0, "saved_rows": len(load_manual_review_actions())}
+    return append_manual_review_actions(actions)
 
 
 def _manual_queue_metrics(queue: pd.DataFrame, corrections: pd.DataFrame) -> dict[str, int]:
@@ -1361,30 +1395,38 @@ def _clear_staged_manual_corrections() -> None:
 
 
 def _mark_manual_queue_corrected(corrections: pd.DataFrame, assigned_to: str = "", note: str = "") -> None:
-    queue = load_manual_review_queue()
-    if queue.empty or corrections.empty:
+    if corrections.empty:
         return
 
     cleaned = normalize_manual_roster_corrections(corrections)
-    keys = {_manual_review_key(row) for _, row in cleaned.iterrows()}
-    keys.discard("")
-    if not keys:
+    if cleaned.empty:
         return
 
-    mask = queue["review_key"].isin(keys)
-    if not mask.any():
-        return
-    queue.loc[mask, "review_status"] = "Corrected"
-    queue.loc[mask, "has_manual_correction"] = "Yes"
-    if assigned_to:
-        queue.loc[mask, "assigned_to"] = assigned_to
-    if note:
-        queue.loc[mask, "review_notes"] = queue.loc[mask, "review_notes"].where(
-            queue.loc[mask, "review_notes"].fillna("").astype(str).str.strip().ne(""),
-            note,
+    rows: list[dict[str, object]] = []
+    for _, row in cleaned.iterrows():
+        review_key = _manual_review_key(row)
+        if not review_key:
+            continue
+        rows.append(
+            {
+                "review_key": review_key,
+                "student_id": row.get("student_id", ""),
+                "last_name": row.get("last_name", ""),
+                "first_name": row.get("first_name", ""),
+                "chapter": row.get("organization_name", ""),
+                "join_term": row.get("organization_join_term", ""),
+                "last_observed_org_term": row.get("leaving_organization_term", ""),
+                "latest_outcome_bucket": row.get("final_status", ""),
+            }
         )
-    queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
-    save_manual_review_queue(queue)
+    if rows:
+        _append_manual_review_actions(
+            pd.DataFrame(rows),
+            assigned_to=assigned_to,
+            review_status="Corrected",
+            note=note,
+            has_manual_correction="Yes",
+        )
 
 
 def _commit_staged_manual_corrections(assigned_to: str = "") -> dict[str, object]:
@@ -1530,7 +1572,8 @@ def _manual_workspace_summary() -> pd.DataFrame:
         [
             {"Item": "Correction CSV", "Path": str(workspace["corrections_path"])},
             {"Item": "Manual Adjustments CSV", "Path": str(workspace.get("adjustments_path", MANUAL_ADJUSTMENTS_PATH))},
-            {"Item": "Assignment Queue CSV", "Path": str(workspace["review_queue_path"])},
+            {"Item": "Checked Queue Actions CSV", "Path": str(workspace.get("review_actions_path", MANUAL_REVIEW_ACTIONS_PATH))},
+            {"Item": "Legacy Assignment Queue CSV", "Path": str(workspace["review_queue_path"])},
             {"Item": "Transcript Paste-In Folder", "Path": str(workspace["transcript_folder"])},
             {"Item": "Canonical Latest Folder", "Path": str(MANUAL_ROSTER_CORRECTIONS_PATH.parent.parent / "output" / "canonical" / "latest")},
         ]
@@ -1549,7 +1592,7 @@ def _render_manual_corrections_editor(bundle) -> None:
     corrections = load_manual_roster_corrections()
     staged_corrections = _staged_manual_corrections()
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
-    saved_queue = load_manual_review_queue()
+    saved_actions = load_manual_review_actions()
     generated_queue = pd.concat(
         [
             _build_manual_assignment_queue(summary, corrections),
@@ -1564,9 +1607,7 @@ def _render_manual_corrections_editor(bundle) -> None:
         generated_queue = dedupe_manual_review_queue_by_cohort(
             generated_queue[MANUAL_REVIEW_QUEUE_COLUMNS].drop_duplicates(subset=["review_key"], keep="first")
         )
-    review_queue = _merge_saved_review_queue(generated_queue, saved_queue)
-    if _manual_review_queue_changed(review_queue, saved_queue):
-        save_manual_review_queue(review_queue)
+    review_queue = _merge_saved_review_queue(generated_queue, saved_actions)
     staged_keys = _manual_correction_identity_set(staged_corrections)
     if staged_keys and not review_queue.empty:
         review_queue.loc[review_queue["review_key"].isin(staged_keys), "has_manual_correction"] = "Staged"
@@ -1627,6 +1668,7 @@ def _render_manual_corrections_editor(bundle) -> None:
     st.info(
         "Work the Assignment Queue first when possible. Search is still available when you need to jump to a specific student. "
         "Stage mode keeps new corrections in a pending list and writes them all to the CSV at once; commit staged changes before rerunning the canonical pipeline or downloading a helper package. "
+        "The visible assignment queue is regenerated from canonical data; only checked/actioned queue rows are saved to the compact manual review actions file. "
         "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV. "
         "Use **Exclude From Roster Calculations** when the source roster row itself should be ignored by the canonical pipeline."
     )
@@ -1759,7 +1801,7 @@ def _render_manual_corrections_editor(bundle) -> None:
             queue_view = queue_view.drop(columns=["_join_sort", "_priority_sort"], errors="ignore")
 
         st.subheader("Editable assignment queue")
-        st.caption("Check one or more rows, then click one outcome button once. Stage mode keeps this fast by avoiding a CSV write until you commit staged changes.")
+        st.caption("Check one or more rows, then click one action. The full queue is disposable; only checked rows are saved to the small action file.")
         select_all_visible = st.checkbox("Precheck all visible queue rows", value=False, key="manual_queue_precheck_visible")
         queue_editor_frame = queue_view.copy()
         queue_editor_frame.insert(0, "select_row", select_all_visible)
@@ -1813,9 +1855,23 @@ def _render_manual_corrections_editor(bundle) -> None:
                 return
             if _manual_save_mode_is_staged():
                 staged = _stage_manual_corrections(batch)
+                _append_manual_review_actions(
+                    selected_queue_rows,
+                    assigned_to=helper_initials,
+                    review_status="Corrected",
+                    note=f"Staged as {final_status}.",
+                    has_manual_correction="Staged",
+                )
                 st.success(f"Staged {len(staged):,} selected row(s) as {final_status}. Commit staged changes when you are ready.")
             else:
                 result = _save_manual_correction_batch(batch, helper_initials)
+                _append_manual_review_actions(
+                    selected_queue_rows,
+                    assigned_to=helper_initials,
+                    review_status="Corrected",
+                    note=f"Saved as {final_status}.",
+                    has_manual_correction="Yes",
+                )
                 st.success(f"Saved {result['saved_rows']:,} selected row(s) as {final_status} to {result['saved_path']}.")
                 if result["created_transcripts"]:
                     st.info(f"Created {len(result['created_transcripts']):,} transcript template(s).")
@@ -1838,6 +1894,13 @@ def _render_manual_corrections_editor(bundle) -> None:
                     st.warning("No selected queue rows had enough information to create correction rows.")
                 elif _manual_save_mode_is_staged():
                     staged = _stage_manual_corrections(batch)
+                    _append_manual_review_actions(
+                        selected_queue_rows,
+                        assigned_to=helper_initials,
+                        review_status="Corrected",
+                        note="Staged for roster-calculation exclusion.",
+                        has_manual_correction="Staged",
+                    )
                     st.success(f"Staged {len(staged):,} selected roster-calculation exclusion row(s). Commit staged changes when you are ready.")
                 else:
                     result = _save_manual_correction_batch(
@@ -1845,44 +1908,46 @@ def _render_manual_corrections_editor(bundle) -> None:
                         helper_initials,
                         note="Excluded from roster calculations by manual correction.",
                     )
+                    _append_manual_review_actions(
+                        selected_queue_rows,
+                        assigned_to=helper_initials,
+                        review_status="Corrected",
+                        note="Excluded from roster calculations by manual correction.",
+                        has_manual_correction="Yes",
+                    )
                     st.success(f"Saved {result['saved_rows']:,} selected roster-calculation exclusion row(s) to {result['saved_path']}.")
                 st.rerun()
         with batch_action_cols[1]:
             if st.button("Create transcript files for selected", use_container_width=True, disabled=button_disabled):
                 correction_rows = _manual_corrections_from_queue_rows(selected_queue_rows)
                 created = ensure_manual_transcript_files(correction_rows)
-                queue = load_manual_review_queue()
-                mask = queue["review_key"].isin(selected_review_keys)
-                queue.loc[mask, "needs_transcript"] = "Yes"
-                queue.loc[mask, "review_status"] = "Waiting on Transcript"
-                if helper_initials:
-                    queue.loc[mask, "assigned_to"] = helper_initials
-                queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
-                save_manual_review_queue(queue)
+                _append_manual_review_actions(
+                    selected_queue_rows,
+                    assigned_to=helper_initials,
+                    review_status="Waiting on Transcript",
+                    needs_transcript="Yes",
+                    note="Transcript template requested from assignment queue.",
+                )
                 st.success(f"Created {len(created):,} missing transcript template(s) for selected row(s). Existing files were not overwritten.")
                 st.rerun()
         with batch_action_cols[2]:
             if st.button("Mark selected skipped / no change", use_container_width=True, disabled=button_disabled):
-                queue = load_manual_review_queue()
-                mask = queue["review_key"].isin(selected_review_keys)
-                queue.loc[mask, "review_status"] = "Skipped / No Change"
-                if helper_initials:
-                    queue.loc[mask, "assigned_to"] = helper_initials
-                queue.loc[mask, "updated_at"] = datetime.now().isoformat(timespec="seconds")
-                save_manual_review_queue(queue)
-                st.success(f"Marked {int(mask.sum()):,} selected queue row(s) as skipped / no change.")
+                result = _append_manual_review_actions(
+                    selected_queue_rows,
+                    assigned_to=helper_initials,
+                    review_status="Skipped / No Change",
+                    note="Marked skipped / no change from assignment queue.",
+                )
+                st.success(f"Saved {len(selected_queue_rows):,} skipped / no-change action row(s) to {result['path']}.")
                 st.rerun()
 
         if st.button("Save queue updates", use_container_width=True):
-            base = review_queue.set_index("review_key")
-            updates = edited_queue.drop(columns=["select_row"], errors="ignore").set_index("review_key")
-            for column in ["assigned_to", "review_status", "needs_transcript", "review_notes"]:
-                if column in updates.columns:
-                    base.loc[updates.index, column] = updates[column]
-            base.loc[updates.index, "updated_at"] = datetime.now().isoformat(timespec="seconds")
-            save_manual_review_queue(base.reset_index())
-            st.success(f"Saved queue updates to {MANUAL_REVIEW_QUEUE_PATH}.")
-            st.rerun()
+            if selected_queue_rows.empty:
+                st.warning("Check the row(s) you want to save first. Unchecked queue edits stay temporary.")
+            else:
+                result = _append_manual_review_actions(selected_queue_rows, assigned_to=helper_initials)
+                st.success(f"Saved {len(selected_queue_rows):,} checked queue action row(s) to {result['path']}.")
+                st.rerun()
 
     with correction_tab:
         editor_frame = corrections.copy()
