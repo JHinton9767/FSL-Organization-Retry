@@ -5,6 +5,9 @@ import pandas as pd
 from src.build_canonical_pipeline import (
     apply_manual_roster_corrections,
     build_current_active_fields,
+    graduation_evidence_to_manual_adjustments,
+    outcome_overrides_to_manual_adjustments,
+    roster_exclusions_to_manual_roster_corrections,
     roster_file_version_details,
     roster_status_bucket,
     should_mark_roster_disappeared_unknown,
@@ -232,6 +235,58 @@ def test_manual_roster_corrections_exclude_matching_rows_from_roster_calculation
 
     assert result["student_id"].tolist() == ["A00000001", "A00000002"]
     assert result.loc[result["student_id"].eq("A00000001"), "chapter"].iloc[0] == "Beta"
+
+
+def test_decision_registries_convert_to_canonical_adjustments() -> None:
+    graduation = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "graduation_term": ["Spring 2026"],
+            "evidence_source": ["Alumni list"],
+            "entered_by": ["JH"],
+        }
+    )
+    outcomes = pd.DataFrame(
+        {
+            "student_id": ["A00000002"],
+            "organization_name": ["Beta"],
+            "final_status": ["Dropped"],
+            "final_status_term": ["Fall 2025"],
+            "reason": ["Verified by advisor"],
+        }
+    )
+
+    grad_adjustments = graduation_evidence_to_manual_adjustments(graduation)
+    outcome_adjustments = outcome_overrides_to_manual_adjustments(outcomes)
+
+    assert grad_adjustments.loc[grad_adjustments["field_to_override"].eq("final_outcome_bucket"), "adjusted_value"].tolist() == [
+        "Graduated Confirmed"
+    ]
+    assert grad_adjustments.loc[grad_adjustments["field_to_override"].eq("final_outcome_bucket"), "original_value"].tolist() == [
+        "Spring 2026"
+    ]
+    assert outcome_adjustments.loc[outcome_adjustments["field_to_override"].eq("final_outcome_bucket"), "adjusted_value"].tolist() == [
+        "Dropped"
+    ]
+
+
+def test_roster_exclusion_registry_converts_to_roster_corrections() -> None:
+    exclusions = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "term": ["Spring 2026"],
+            "reason": ["Not a student"],
+        }
+    )
+
+    corrections = roster_exclusions_to_manual_roster_corrections(exclusions)
+
+    assert corrections.loc[0, "student_id"] == "A00000001"
+    assert corrections.loc[0, "organization_name"] == "Alpha Sigma Phi"
+    assert corrections.loc[0, "organization_join_term"] == "Spring 2026"
+    assert corrections.loc[0, "exclude_from_roster_calculations"] == "Yes"
 
 
 def test_current_active_fields_prefer_spreadsheet_over_pdf_copy() -> None:

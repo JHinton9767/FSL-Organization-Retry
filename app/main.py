@@ -41,7 +41,13 @@ from app.config_loader import (
     MANUAL_REVIEW_QUEUE_COLUMNS,
     MANUAL_ROSTER_CORRECTIONS_PATH,
     MANUAL_TRANSCRIPTS_PATH,
+    OUTCOME_OVERRIDE_COLUMNS,
+    ROSTER_EXCLUSION_COLUMNS,
+    GRADUATION_EVIDENCE_COLUMNS,
+    append_graduation_evidence,
     append_manual_review_actions,
+    append_outcome_overrides,
+    append_roster_exclusions,
     REVIEW_STATUS_OPTIONS,
     append_manual_adjustments,
     append_manual_roster_corrections,
@@ -52,13 +58,19 @@ from app.config_loader import (
     find_manual_correction_conflicts,
     graduated_alumni_rows_to_manual_corrections,
     import_manual_corrections_package,
+    load_graduation_evidence,
     load_manual_roster_corrections,
     load_manual_review_actions,
+    load_outcome_overrides,
+    load_roster_exclusions,
     load_metric_catalog,
     load_settings,
     load_status_code_map,
     manual_transcript_path_for_correction,
+    normalize_graduation_evidence,
     normalize_manual_roster_corrections,
+    normalize_outcome_overrides,
+    normalize_roster_exclusions,
     prepare_manual_corrections_workspace,
     save_manual_roster_corrections,
 )
@@ -1030,6 +1042,18 @@ def _manual_correction_identity_set(corrections: pd.DataFrame) -> set[str]:
     return {key for key in keys if key}
 
 
+def _registry_identity_set(*frames: pd.DataFrame) -> set[str]:
+    keys: set[str] = set()
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        for _, row in frame.iterrows():
+            key = _manual_review_key(row)
+            if key:
+                keys.add(key)
+    return keys
+
+
 def _queue_reason_for_row(row: pd.Series) -> str:
     reasons: list[str] = []
     if not _graduation_mentioned_for_row(row):
@@ -1076,7 +1100,7 @@ def _graduation_mentioned_for_row(row: pd.Series) -> bool:
     return "graduat" in text or "degree awarded" in text or "degree confer" in text
 
 
-def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFrame) -> pd.DataFrame:
+def _build_manual_assignment_queue(summary: pd.DataFrame, decision_keys: set[str]) -> pd.DataFrame:
     if summary.empty:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
 
@@ -1086,8 +1110,6 @@ def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFr
     has_student_id = summary["student_id"].fillna("").astype(str).str.strip().ne("")
     graduation_mentioned = summary.apply(_graduation_mentioned_for_row, axis=1)
     candidates = summary.loc[has_student_id & ~graduation_mentioned].copy()
-    correction_keys = _manual_correction_identity_set(corrections)
-
     rows: list[dict[str, object]] = []
     for _, row in candidates.iterrows():
         review_key = _manual_review_key(row)
@@ -1111,7 +1133,7 @@ def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFr
                 "review_status": "Needs Review",
                 "needs_transcript": "No",
                 "review_notes": "",
-                "has_manual_correction": "Yes" if review_key in correction_keys else "No",
+                "has_manual_correction": "Yes" if review_key in decision_keys else "No",
                 "transcript_file_exists": "Yes" if manual_transcript_path_for_correction(correction_row).exists() else "No",
                 "updated_at": "",
             }
@@ -1123,12 +1145,11 @@ def _build_manual_assignment_queue(summary: pd.DataFrame, corrections: pd.DataFr
     return queue.drop_duplicates(subset=["review_key"], keep="first").reset_index(drop=True)
 
 
-def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.DataFrame:
+def _canonical_review_queue_for_app(bundle, decision_keys: set[str]) -> pd.DataFrame:
     tables = getattr(bundle, "tables", {})
     canonical = tables.get("manual_review_queue", pd.DataFrame())
     if canonical is None or canonical.empty:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
-    correction_keys = _manual_correction_identity_set(corrections)
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
     summary_lookup = {}
     if not summary.empty and "student_id" in summary.columns:
@@ -1171,7 +1192,7 @@ def _canonical_review_queue_for_app(bundle, corrections: pd.DataFrame) -> pd.Dat
                 "review_status": "Corrected" if str(row.get("manual_adjustment_status", "")).lower() == "applied" else "Needs Review",
                 "needs_transcript": "No",
                 "review_notes": row.get("reviewer_notes", ""),
-                "has_manual_correction": "Yes" if student_id and student_id.upper() in correction_keys else "No",
+                "has_manual_correction": "Yes" if student_id and student_id.upper() in decision_keys else "No",
                 "transcript_file_exists": "No",
                 "updated_at": row.get("reviewed_at", ""),
             }
@@ -1301,6 +1322,96 @@ def _manual_corrections_from_queue_rows(queue_rows: pd.DataFrame, final_status: 
         corrections["final_status_term"] = ""
         corrections["final_status"] = ""
     return normalize_manual_roster_corrections(corrections)
+
+
+def _registry_base_from_queue_rows(queue_rows: pd.DataFrame) -> pd.DataFrame:
+    if queue_rows is None or queue_rows.empty:
+        return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
+    rows = queue_rows.copy()
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        if column not in rows.columns:
+            rows[column] = ""
+    rows = rows[MANUAL_REVIEW_QUEUE_COLUMNS].fillna("").astype(str)
+    for column in MANUAL_REVIEW_QUEUE_COLUMNS:
+        rows[column] = rows[column].str.strip()
+    return rows
+
+
+def _graduation_evidence_from_queue_rows(queue_rows: pd.DataFrame, entered_by: str = "", note: str = "") -> pd.DataFrame:
+    rows = _registry_base_from_queue_rows(queue_rows)
+    if rows.empty:
+        return pd.DataFrame(columns=GRADUATION_EVIDENCE_COLUMNS)
+    result = pd.DataFrame(
+        {
+            "student_id": rows["student_id"],
+            "organization_name": rows["chapter"].where(rows["chapter"].ne(""), rows["organization"]),
+            "organization_join_term": rows["join_term"],
+            "graduation_term": rows["last_observed_org_term"].where(rows["last_observed_org_term"].ne(""), rows["term"]),
+            "evidence_source": "Manual review: explicit graduation evidence confirmed",
+            "notes": note or rows["review_notes"].where(rows["review_notes"].ne(""), rows["queue_reason"]),
+            "entered_by": entered_by,
+            "entered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    return normalize_graduation_evidence(result)
+
+
+def _outcome_overrides_from_queue_rows(queue_rows: pd.DataFrame, final_status: str, entered_by: str = "", note: str = "") -> pd.DataFrame:
+    rows = _registry_base_from_queue_rows(queue_rows)
+    if rows.empty:
+        return pd.DataFrame(columns=OUTCOME_OVERRIDE_COLUMNS)
+    result = pd.DataFrame(
+        {
+            "student_id": rows["student_id"],
+            "organization_name": rows["chapter"].where(rows["chapter"].ne(""), rows["organization"]),
+            "organization_join_term": rows["join_term"],
+            "final_status": final_status,
+            "final_status_term": rows["last_observed_org_term"].where(rows["last_observed_org_term"].ne(""), rows["term"]),
+            "reason": note or f"Manual review set outcome to {final_status}.",
+            "evidence_source": rows["queue_reason"].where(rows["queue_reason"].ne(""), "Manual review"),
+            "entered_by": entered_by,
+            "entered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    return normalize_outcome_overrides(result)
+
+
+def _roster_exclusions_from_queue_rows(queue_rows: pd.DataFrame, entered_by: str = "", note: str = "") -> pd.DataFrame:
+    rows = _registry_base_from_queue_rows(queue_rows)
+    if rows.empty:
+        return pd.DataFrame(columns=ROSTER_EXCLUSION_COLUMNS)
+    result = pd.DataFrame(
+        {
+            "student_id": rows["student_id"],
+            "organization_name": rows["chapter"].where(rows["chapter"].ne(""), rows["organization"]),
+            "term": rows["term"].where(rows["term"].ne(""), rows["last_observed_org_term"].where(rows["last_observed_org_term"].ne(""), rows["join_term"])),
+            "source_file": rows["source_file"],
+            "source_sheet": rows["source_sheet"],
+            "reason": note or rows["queue_reason"].where(rows["queue_reason"].ne(""), "Manual review roster exclusion"),
+            "entered_by": entered_by,
+            "entered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    return normalize_roster_exclusions(result)
+
+
+def _graduation_evidence_from_corrections(corrections: pd.DataFrame, entered_by: str = "", note: str = "") -> pd.DataFrame:
+    cleaned = normalize_manual_roster_corrections(corrections)
+    if cleaned.empty:
+        return pd.DataFrame(columns=GRADUATION_EVIDENCE_COLUMNS)
+    result = pd.DataFrame(
+        {
+            "student_id": cleaned["student_id"],
+            "organization_name": cleaned["organization_name"],
+            "organization_join_term": cleaned["organization_join_term"],
+            "graduation_term": cleaned["final_status_term"],
+            "evidence_source": "Graduated alumni list",
+            "notes": note or "Graduated alumni batch entered in app.",
+            "entered_by": entered_by,
+            "entered_at": datetime.now().isoformat(timespec="seconds"),
+        }
+    )
+    return normalize_graduation_evidence(result)
 
 
 def _manual_adjustments_from_corrections(corrections: pd.DataFrame, reviewer: str = "", reason: str = "") -> pd.DataFrame:
@@ -1570,7 +1681,10 @@ def _manual_workspace_summary() -> pd.DataFrame:
     workspace = prepare_manual_corrections_workspace()
     return pd.DataFrame(
         [
-            {"Item": "Correction CSV", "Path": str(workspace["corrections_path"])},
+            {"Item": "Graduation Evidence CSV", "Path": str(workspace["graduation_evidence_path"])},
+            {"Item": "Outcome Overrides CSV", "Path": str(workspace["outcome_overrides_path"])},
+            {"Item": "Roster Exclusions CSV", "Path": str(workspace["roster_exclusions_path"])},
+            {"Item": "Legacy Correction CSV", "Path": str(workspace["corrections_path"])},
             {"Item": "Manual Adjustments CSV", "Path": str(workspace.get("adjustments_path", MANUAL_ADJUSTMENTS_PATH))},
             {"Item": "Checked Queue Actions CSV", "Path": str(workspace.get("review_actions_path", MANUAL_REVIEW_ACTIONS_PATH))},
             {"Item": "Legacy Assignment Queue CSV", "Path": str(workspace["review_queue_path"])},
@@ -1582,21 +1696,24 @@ def _manual_workspace_summary() -> pd.DataFrame:
 
 def _render_manual_corrections_editor(bundle) -> None:
     workspace = prepare_manual_corrections_workspace()
-    st.title("Manual Roster Corrections")
+    st.title("Odd Record Decisions")
     st.caption(
-        "Store roster fixes without touching raw Excel or PDF files. Corrections are saved to "
-        "`config/manual_roster_corrections.csv` and reapplied whenever the canonical pipeline is rebuilt, "
-        "even after refreshing source caches."
+        "The queue is regenerated from canonical data. Only decisions you explicitly save are persisted in small registry files "
+        "and reapplied whenever the canonical pipeline is rebuilt."
     )
 
     corrections = load_manual_roster_corrections()
+    graduation_evidence = load_graduation_evidence()
+    outcome_overrides = load_outcome_overrides()
+    roster_exclusions = load_roster_exclusions()
+    decision_keys = _registry_identity_set(corrections, graduation_evidence, outcome_overrides, roster_exclusions)
     staged_corrections = _staged_manual_corrections()
     summary = getattr(bundle, "summary", pd.DataFrame()).copy()
     saved_actions = load_manual_review_actions()
     generated_queue = pd.concat(
         [
-            _build_manual_assignment_queue(summary, corrections),
-            _canonical_review_queue_for_app(bundle, corrections),
+            _build_manual_assignment_queue(summary, decision_keys),
+            _canonical_review_queue_for_app(bundle, decision_keys),
         ],
         ignore_index=True,
     )
@@ -1612,12 +1729,13 @@ def _render_manual_corrections_editor(bundle) -> None:
     if staged_keys and not review_queue.empty:
         review_queue.loc[review_queue["review_key"].isin(staged_keys), "has_manual_correction"] = "Staged"
 
-    metrics = _manual_queue_metrics(review_queue, corrections)
+    registry_decision_count = len(graduation_evidence) + len(outcome_overrides) + len(roster_exclusions)
+    metrics = _manual_queue_metrics(review_queue, pd.DataFrame(index=range(registry_decision_count + len(corrections))))
     info_cols = st.columns(7)
     with info_cols[0]:
-        st.metric("Saved corrections", f"{len(corrections):,}")
+        st.metric("Saved decisions", f"{registry_decision_count:,}")
     with info_cols[1]:
-        st.metric("Pending staged", f"{len(staged_corrections):,}")
+        st.metric("Legacy corrections", f"{len(corrections):,}")
     with info_cols[2]:
         st.metric("Queue records", f"{metrics['queue_total']:,}")
     with info_cols[3]:
@@ -1631,19 +1749,11 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     with st.expander("Helper quick start", expanded=True):
         st.write("1. Search for the student by Banner ID, name, or chapter.")
-        st.write("2. Review the auto-filled top row, then fill in the final status fields you know.")
-        st.write("3. Stage corrections for speed, then batch-save them when you are ready. Immediate saving is still available when needed.")
-        st.write("4. A matching transcript `.txt` file is created when corrections are saved or when you explicitly click Create/Open transcript file.")
-        st.write("5. Use **Download helper package** to send back your correction CSV and transcript text files.")
+        st.write("2. Check only rows you reviewed.")
+        st.write("3. Use Graduated for explicit graduation proof, another status for an outcome override, or roster exclusion for bad source rows.")
+        st.write("4. A matching transcript `.txt` file can still be created when you need transcript text.")
+        st.write("5. Use **Download helper package** to send back the registry CSVs and transcript text files.")
         st.dataframe(_manual_workspace_summary(), use_container_width=True, hide_index=True)
-
-        st.radio(
-            "Correction save mode",
-            options=[MANUAL_STAGE_MODE_LABEL, MANUAL_IMMEDIATE_MODE_LABEL],
-            horizontal=True,
-            key=MANUAL_SAVE_MODE_KEY,
-            help="Stage mode is fastest for bulk cleanup because it avoids rewriting the CSV and transcript folder after every row.",
-        )
 
         action_cols = st.columns(3)
         with action_cols[0]:
@@ -1667,10 +1777,8 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     st.info(
         "Work the Assignment Queue first when possible. Search is still available when you need to jump to a specific student. "
-        "Stage mode keeps new corrections in a pending list and writes them all to the CSV at once; commit staged changes before rerunning the canonical pipeline or downloading a helper package. "
-        "The visible assignment queue is regenerated from canonical data; only checked/actioned queue rows are saved to the compact manual review actions file. "
-        "Check the `x` box on a saved correction row before saving if you want to remove that correction. The `x` column is only in the app; it is not written to the CSV. "
-        "Use **Exclude From Roster Calculations** when the source roster row itself should be ignored by the canonical pipeline."
+        "The visible queue is regenerated from canonical data; the saved records are the small decision registries. "
+        "Use Graduated only when you have explicit graduation evidence. Use roster exclusions only when the source roster row itself should be ignored by the canonical pipeline."
     )
 
     with st.expander(f"Pending staged changes ({len(staged_corrections):,})", expanded=not staged_corrections.empty):
@@ -1728,7 +1836,7 @@ def _render_manual_corrections_editor(bundle) -> None:
                     use_container_width=True,
                 )
 
-    queue_tab, correction_tab, package_tab, review_tab = st.tabs(["Assignment Queue", "Correction Sheet", "Import / Export", "Weird Records"])
+    queue_tab, correction_tab, package_tab, review_tab = st.tabs(["Assignment Queue", "Decision Registries", "Import / Export", "Weird Records"])
 
     with queue_tab:
         helper_initials = st.text_input("Helper initials / owner", value=st.session_state.get("manual_helper_initials", ""), key="manual_helper_initials")
@@ -1849,32 +1957,25 @@ def _render_manual_corrections_editor(bundle) -> None:
                         st.dataframe(evidence_view.head(200), use_container_width=True, hide_index=True)
 
         def _apply_batch_status(final_status: str) -> None:
-            batch = _manual_corrections_from_queue_rows(selected_queue_rows, final_status=final_status)
-            if batch.empty:
-                st.warning("No selected queue rows had enough information to create correction rows.")
-                return
-            if _manual_save_mode_is_staged():
-                staged = _stage_manual_corrections(batch)
-                _append_manual_review_actions(
-                    selected_queue_rows,
-                    assigned_to=helper_initials,
-                    review_status="Corrected",
-                    note=f"Staged as {final_status}.",
-                    has_manual_correction="Staged",
-                )
-                st.success(f"Staged {len(staged):,} selected row(s) as {final_status}. Commit staged changes when you are ready.")
+            if final_status == "Graduated":
+                registry_rows = _graduation_evidence_from_queue_rows(selected_queue_rows, entered_by=helper_initials)
+                result = append_graduation_evidence(registry_rows)
+                saved_label = "graduation evidence"
             else:
-                result = _save_manual_correction_batch(batch, helper_initials)
-                _append_manual_review_actions(
-                    selected_queue_rows,
-                    assigned_to=helper_initials,
-                    review_status="Corrected",
-                    note=f"Saved as {final_status}.",
-                    has_manual_correction="Yes",
-                )
-                st.success(f"Saved {result['saved_rows']:,} selected row(s) as {final_status} to {result['saved_path']}.")
-                if result["created_transcripts"]:
-                    st.info(f"Created {len(result['created_transcripts']):,} transcript template(s).")
+                registry_rows = _outcome_overrides_from_queue_rows(selected_queue_rows, final_status=final_status, entered_by=helper_initials)
+                result = append_outcome_overrides(registry_rows)
+                saved_label = "outcome override"
+            if registry_rows.empty:
+                st.warning("No selected queue rows had a valid A# and enough information to save.")
+                return
+            _append_manual_review_actions(
+                selected_queue_rows,
+                assigned_to=helper_initials,
+                review_status="Corrected",
+                note=f"Saved as {final_status}.",
+                has_manual_correction="Yes",
+            )
+            st.success(f"Saved {result['appended_rows']:,} {saved_label} row(s) to {result['path']}. Rerun the canonical pipeline to apply them.")
             st.rerun()
 
         button_disabled = len(selected_review_keys) == 0
@@ -1889,33 +1990,19 @@ def _render_manual_corrections_editor(bundle) -> None:
         batch_action_cols = st.columns(3)
         with batch_action_cols[0]:
             if st.button("Exclude selected from roster calcs", use_container_width=True, disabled=button_disabled):
-                batch = _manual_corrections_from_queue_rows(selected_queue_rows, exclude_from_roster=True)
-                if batch.empty:
-                    st.warning("No selected queue rows had enough information to create correction rows.")
-                elif _manual_save_mode_is_staged():
-                    staged = _stage_manual_corrections(batch)
-                    _append_manual_review_actions(
-                        selected_queue_rows,
-                        assigned_to=helper_initials,
-                        review_status="Corrected",
-                        note="Staged for roster-calculation exclusion.",
-                        has_manual_correction="Staged",
-                    )
-                    st.success(f"Staged {len(staged):,} selected roster-calculation exclusion row(s). Commit staged changes when you are ready.")
+                exclusions = _roster_exclusions_from_queue_rows(selected_queue_rows, entered_by=helper_initials)
+                if exclusions.empty:
+                    st.warning("No selected queue rows had a valid A# and enough scope to save as roster exclusions.")
                 else:
-                    result = _save_manual_correction_batch(
-                        batch,
-                        helper_initials,
-                        note="Excluded from roster calculations by manual correction.",
-                    )
+                    result = append_roster_exclusions(exclusions)
                     _append_manual_review_actions(
                         selected_queue_rows,
                         assigned_to=helper_initials,
                         review_status="Corrected",
-                        note="Excluded from roster calculations by manual correction.",
+                        note="Saved as roster exclusion.",
                         has_manual_correction="Yes",
                     )
-                    st.success(f"Saved {result['saved_rows']:,} selected roster-calculation exclusion row(s) to {result['saved_path']}.")
+                    st.success(f"Saved {result['appended_rows']:,} roster exclusion row(s) to {result['path']}. Rerun the canonical pipeline to apply them.")
                 st.rerun()
         with batch_action_cols[1]:
             if st.button("Create transcript files for selected", use_container_width=True, disabled=button_disabled):
@@ -1950,6 +2037,18 @@ def _render_manual_corrections_editor(bundle) -> None:
                 st.rerun()
 
     with correction_tab:
+        st.subheader("Saved decision registries")
+        registry_cols = st.columns(3)
+        with registry_cols[0]:
+            st.metric("Graduation evidence", f"{len(graduation_evidence):,}")
+            st.dataframe(graduation_evidence, use_container_width=True, hide_index=True, height=220)
+        with registry_cols[1]:
+            st.metric("Outcome overrides", f"{len(outcome_overrides):,}")
+            st.dataframe(outcome_overrides, use_container_width=True, hide_index=True, height=220)
+        with registry_cols[2]:
+            st.metric("Roster exclusions", f"{len(roster_exclusions):,}")
+            st.dataframe(roster_exclusions, use_container_width=True, hide_index=True, height=220)
+
         editor_frame = corrections.copy()
         for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
             if column not in editor_frame.columns:
@@ -2003,19 +2102,30 @@ def _render_manual_corrections_editor(bundle) -> None:
                 )
             alumni_action_cols = st.columns(2)
             with alumni_action_cols[0]:
-                if st.button("Stage graduated alumni", use_container_width=True, disabled=alumni_corrections.empty):
-                    staged_rows = _stage_manual_corrections(alumni_corrections)
-                    st.success(f"Staged {len(staged_rows):,} graduated alumni correction row(s).")
+                if st.button("Save alumni evidence", use_container_width=True, disabled=alumni_corrections.empty):
+                    evidence_rows = _graduation_evidence_from_corrections(
+                        alumni_corrections,
+                        entered_by=st.session_state.get("manual_helper_initials", ""),
+                    )
+                    result = append_graduation_evidence(evidence_rows)
+                    st.success(f"Saved {result['appended_rows']:,} graduated alumni evidence row(s) to {result['path']}.")
                     st.rerun()
             with alumni_action_cols[1]:
-                if st.button("Save graduated alumni", use_container_width=True, disabled=alumni_corrections.empty):
-                    result = _save_manual_correction_batch(
-                        alumni_corrections,
-                        assigned_to=st.session_state.get("manual_helper_initials", ""),
-                        note="Graduated alumni batch saved.",
-                    )
-                    st.success(f"Saved {result['saved_rows']:,} graduated alumni correction row(s) to {result['saved_path']}.")
-                    st.rerun()
+                evidence_preview = _graduation_evidence_from_corrections(
+                    alumni_corrections,
+                    entered_by=st.session_state.get("manual_helper_initials", ""),
+                )
+                st.download_button(
+                    "Download evidence preview",
+                    data=dataframe_to_csv_bytes(evidence_preview),
+                    file_name="graduation_evidence_preview.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    disabled=evidence_preview.empty,
+                )
+        st.divider()
+        st.subheader("Legacy correction sheet")
+        st.caption("This remains for backward compatibility. New queue decisions should use the registry buttons above.")
         search = st.text_input("Find a student to edit", placeholder="Type Banner ID, first name, last name, or chapter")
         if search and not summary.empty:
             haystack_columns = [

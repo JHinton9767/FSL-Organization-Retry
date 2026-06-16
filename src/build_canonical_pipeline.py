@@ -22,14 +22,20 @@ from app.config_loader import (
     APP_SETTINGS_PATH,
     DEFAULT_CHAPTER_GROUPS_PATH,
     EXAMPLE_CHAPTER_GROUPS_PATH,
+    GRADUATION_EVIDENCE_PATH,
     MANUAL_ADJUSTMENT_COLUMNS,
     MANUAL_CHAPTER_ASSIGNMENTS_PATH,
     MANUAL_ADJUSTMENTS_PATH,
     MANUAL_ROSTER_CORRECTIONS_PATH,
+    OUTCOME_OVERRIDES_PATH,
+    ROSTER_EXCLUSIONS_PATH,
     load_chapter_mapping,
+    load_graduation_evidence,
     load_manual_adjustments,
     load_manual_chapter_assignments,
     load_manual_roster_corrections,
+    load_outcome_overrides,
+    load_roster_exclusions,
     load_settings,
 )
 from app.status_framework import build_outcome_resolution_fields
@@ -4477,6 +4483,134 @@ def manual_roster_corrections_to_manual_adjustments(corrections: pd.DataFrame) -
     return ensure_columns(pd.DataFrame(rows), columns)
 
 
+def graduation_evidence_to_manual_adjustments(evidence: pd.DataFrame) -> pd.DataFrame:
+    if evidence is None or evidence.empty:
+        return pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
+    rows: List[dict] = []
+    for idx, item in evidence.reset_index(drop=True).iterrows():
+        student_id = normalize_banner_id(item.get("student_id", ""))
+        if not student_id:
+            continue
+        graduation_term = _clean_display(item.get("graduation_term", ""))
+        evidence_source = _clean_display(item.get("evidence_source", "")) or "Manual graduation evidence registry"
+        notes = _clean_display(item.get("notes", ""))
+        organization = normalize_chapter_name(_clean_display(item.get("organization_name", "")))
+        base = {
+            "student_id": student_id,
+            "normalized_student_id": student_id,
+            "reason": notes or "Explicit graduation evidence entered in config/graduation_evidence.csv.",
+            "evidence": evidence_source,
+            "source_file": str(GRADUATION_EVIDENCE_PATH),
+            "source_sheet": "Graduation Evidence Registry",
+            "reviewer": _clean_display(item.get("entered_by", "")),
+            "created_at": _clean_display(item.get("entered_at", "")),
+            "active": "Yes",
+        }
+        rows.append(
+            {
+                **base,
+                "adjustment_id": f"graduation_evidence_{idx}_{student_id}",
+                "adjustment_type": "outcome_override",
+                "field_to_override": "final_outcome_bucket",
+                "original_value": graduation_term,
+                "adjusted_value": OUTCOME_GRADUATED_CONFIRMED,
+            }
+        )
+        if organization:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_id": f"graduation_evidence_chapter_{idx}_{student_id}",
+                    "adjustment_type": "chapter_override",
+                    "field_to_override": "latest_known_chapter",
+                    "original_value": "",
+                    "adjusted_value": organization,
+                }
+            )
+    return ensure_columns(pd.DataFrame(rows), MANUAL_ADJUSTMENT_COLUMNS)
+
+
+def outcome_overrides_to_manual_adjustments(overrides: pd.DataFrame) -> pd.DataFrame:
+    if overrides is None or overrides.empty:
+        return pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
+    rows: List[dict] = []
+    for idx, item in overrides.reset_index(drop=True).iterrows():
+        student_id = normalize_banner_id(item.get("student_id", ""))
+        final_status = _clean_display(item.get("final_status", ""))
+        if not student_id or not final_status:
+            continue
+        organization = normalize_chapter_name(_clean_display(item.get("organization_name", "")))
+        base = {
+            "student_id": student_id,
+            "normalized_student_id": student_id,
+            "reason": _clean_display(item.get("reason", "")) or "Outcome override entered in config/outcome_overrides.csv.",
+            "evidence": _clean_display(item.get("evidence_source", "")) or _clean_display(item.get("final_status_term", "")),
+            "source_file": str(OUTCOME_OVERRIDES_PATH),
+            "source_sheet": "Outcome Override Registry",
+            "reviewer": _clean_display(item.get("entered_by", "")),
+            "created_at": _clean_display(item.get("entered_at", "")),
+            "active": "Yes",
+        }
+        rows.append(
+            {
+                **base,
+                "adjustment_id": f"outcome_override_{idx}_{student_id}",
+                "adjustment_type": "outcome_override",
+                "field_to_override": "final_outcome_bucket",
+                "original_value": _clean_display(item.get("final_status_term", "")),
+                "adjusted_value": final_status,
+            }
+        )
+        if organization:
+            rows.append(
+                {
+                    **base,
+                    "adjustment_id": f"outcome_override_chapter_{idx}_{student_id}",
+                    "adjustment_type": "chapter_override",
+                    "field_to_override": "latest_known_chapter",
+                    "original_value": "",
+                    "adjusted_value": organization,
+                }
+            )
+    return ensure_columns(pd.DataFrame(rows), MANUAL_ADJUSTMENT_COLUMNS)
+
+
+def roster_exclusions_to_manual_roster_corrections(exclusions: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "student_id",
+        "last_name",
+        "first_name",
+        "organization_join_term",
+        "organization_name",
+        "leaving_organization_term",
+        "final_status_term",
+        "final_status",
+        "exclude_from_roster_calculations",
+    ]
+    if exclusions is None or exclusions.empty:
+        return pd.DataFrame(columns=columns)
+    rows: List[dict] = []
+    for _, item in exclusions.iterrows():
+        student_id = normalize_banner_id(item.get("student_id", ""))
+        if not student_id:
+            continue
+        term = _clean_display(item.get("term", ""))
+        rows.append(
+            {
+                "student_id": student_id,
+                "last_name": "",
+                "first_name": "",
+                "organization_join_term": term,
+                "organization_name": normalize_chapter_name(_clean_display(item.get("organization_name", ""))),
+                "leaving_organization_term": "",
+                "final_status_term": term,
+                "final_status": "",
+                "exclude_from_roster_calculations": "Yes",
+            }
+        )
+    return ensure_columns(pd.DataFrame(rows), columns)
+
+
 def _manual_active_mask(frame: pd.DataFrame) -> pd.Series:
     if frame.empty:
         return pd.Series(False, index=frame.index, dtype="bool")
@@ -4643,8 +4777,9 @@ def build_student_longitudinal_tracking(
                     manual_outcome_bucket = _outcome_bucket_from_manual_value(adjusted)
                     if manual_outcome_bucket == OUTCOME_GRADUATED_CONFIRMED:
                         explicit_grad = True
-                        graduation_source = "Manual adjustment"
-                        graduation_term = graduation_term or _clean_display(getattr(manual, "evidence", ""))
+                        manual_evidence = _clean_display(getattr(manual, "evidence", ""))
+                        graduation_source = f"Manual adjustment: {manual_evidence}" if manual_evidence else "Manual adjustment"
+                        graduation_term = graduation_term or _clean_display(getattr(manual, "original_value", "")) or manual_evidence
                     manual_applied.append(_clean_display(getattr(manual, "adjustment_id", "")))
                 if field in {"chapter", "latest_known_chapter", "organization", "organization_name"}:
                     manual_chapter = normalize_chapter_name(adjusted)
@@ -6469,6 +6604,16 @@ def build_canonical_pipeline(
     manual_chapter_assignments = load_manual_chapter_assignments()
     manual_roster_corrections = load_manual_roster_corrections()
     manual_adjustments = load_manual_adjustments()
+    graduation_evidence = load_graduation_evidence()
+    outcome_overrides = load_outcome_overrides()
+    roster_exclusions = load_roster_exclusions()
+    combined_roster_corrections = pd.concat(
+        [
+            manual_roster_corrections,
+            roster_exclusions_to_manual_roster_corrections(roster_exclusions),
+        ],
+        ignore_index=True,
+    ) if not manual_roster_corrections.empty or not roster_exclusions.empty else manual_roster_corrections
     transcript_text_manifest = load_transcript_text_manifest()
     config_manifest = optional_files_manifest(
         [
@@ -6478,6 +6623,9 @@ def build_canonical_pipeline(
             MANUAL_CHAPTER_ASSIGNMENTS_PATH,
             MANUAL_ROSTER_CORRECTIONS_PATH,
             MANUAL_ADJUSTMENTS_PATH,
+            GRADUATION_EVIDENCE_PATH,
+            OUTCOME_OVERRIDES_PATH,
+            ROSTER_EXCLUSIONS_PATH,
             TRANSCRIPT_TEXT_MANIFEST_PATH,
             SCHEMA_PATH,
         ]
@@ -6744,7 +6892,7 @@ def build_canonical_pipeline(
             academic_term,
             settings,
             manual_chapter_assignments,
-            manual_roster_corrections,
+            combined_roster_corrections,
         ),
         file_names=[
             "roster_term_prepared.csv",
@@ -6849,9 +6997,11 @@ def build_canonical_pipeline(
         [
             manual_adjustments,
             manual_roster_corrections_to_manual_adjustments(manual_roster_corrections),
+            graduation_evidence_to_manual_adjustments(graduation_evidence),
+            outcome_overrides_to_manual_adjustments(outcome_overrides),
         ],
         ignore_index=True,
-    ) if not manual_adjustments.empty or not manual_roster_corrections.empty else pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
+    ) if any(not frame.empty for frame in [manual_adjustments, manual_roster_corrections, graduation_evidence, outcome_overrides]) else pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS)
     student_source_appearances = build_student_source_appearances(
         roster_term,
         academic_term,

@@ -4,18 +4,24 @@ import pandas as pd
 import pytest
 
 from app.config_loader import (
+    append_graduation_evidence,
     append_manual_adjustments,
     append_manual_review_actions,
     append_manual_roster_corrections,
+    append_outcome_overrides,
+    append_roster_exclusions,
     build_manual_corrections_package,
     find_manual_correction_conflicts,
     import_manual_corrections_package,
     ensure_manual_transcript_files,
     dedupe_manual_review_queue_by_cohort,
     graduated_alumni_rows_to_manual_corrections,
+    load_graduation_evidence,
     load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_actions,
+    load_outcome_overrides,
+    load_roster_exclusions,
     normalize_manual_adjustments,
     save_manual_adjustments,
     normalize_manual_roster_corrections,
@@ -262,10 +268,13 @@ def test_manual_workspace_and_package_are_helper_ready(tmp_path) -> None:
     with ZipFile(package_path) as archive:
         assert sorted(archive.namelist()) == [
             "Transcripts/A00000001_Doe_Jane.txt",
+            "graduation_evidence.csv",
             "manual_adjustments.csv",
             "manual_review_actions.csv",
             "manual_review_queue.csv",
             "manual_roster_corrections.csv",
+            "outcome_overrides.csv",
+            "roster_exclusions.csv",
         ]
 
 
@@ -338,6 +347,83 @@ def test_manual_review_actions_store_only_valid_selected_cohorts(tmp_path) -> No
     assert saved.loc[0, "student_id"] == "A00000001"
     assert saved.loc[0, "review_status"] == "Corrected"
     assert saved.loc[0, "review_notes"] == "selected row was actioned"
+
+
+def test_manual_review_actions_empty_file_loads_as_empty_queue(tmp_path) -> None:
+    actions_path = tmp_path / "config" / "manual_review_actions.csv"
+    actions_path.parent.mkdir(parents=True, exist_ok=True)
+    actions_path.write_text("", encoding="utf-8")
+
+    loaded = load_manual_review_actions(actions_path)
+
+    assert loaded.empty
+    assert list(loaded.columns)
+
+
+def test_decision_registries_keep_only_valid_banner_ids(tmp_path) -> None:
+    graduation_path = tmp_path / "config" / "graduation_evidence.csv"
+    outcomes_path = tmp_path / "config" / "outcome_overrides.csv"
+    exclusions_path = tmp_path / "config" / "roster_exclusions.csv"
+
+    append_graduation_evidence(
+        pd.DataFrame(
+            {
+                "student_id": ["a00000001", "bad"],
+                "organization_name": ["Alpha Sigma Phi", "Alpha Sigma Phi"],
+                "graduation_term": ["Spring 2026", "Spring 2026"],
+                "evidence_source": ["Roster alumni list", "Roster alumni list"],
+            }
+        ),
+        graduation_path,
+    )
+    append_outcome_overrides(
+        pd.DataFrame(
+            {
+                "student_id": ["A00000002", "123"],
+                "organization_name": ["Beta", "Beta"],
+                "final_status": ["Dropped", "Dropped"],
+                "final_status_term": ["Fall 2025", "Fall 2025"],
+            }
+        ),
+        outcomes_path,
+    )
+    append_roster_exclusions(
+        pd.DataFrame(
+            {
+                "student_id": ["A00000003", "not-an-id"],
+                "organization_name": ["Gamma", "Gamma"],
+                "term": ["Spring 2024", "Spring 2024"],
+                "reason": ["Not a student", "Not a student"],
+            }
+        ),
+        exclusions_path,
+    )
+
+    assert load_graduation_evidence(graduation_path)["student_id"].tolist() == ["A00000001"]
+    assert load_outcome_overrides(outcomes_path)["student_id"].tolist() == ["A00000002"]
+    assert load_roster_exclusions(exclusions_path)["student_id"].tolist() == ["A00000003"]
+
+
+def test_decision_registry_appends_use_stable_keys(tmp_path) -> None:
+    graduation_path = tmp_path / "config" / "graduation_evidence.csv"
+    row = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "graduation_term": ["Spring 2026"],
+            "evidence_source": ["Alumni list"],
+            "entered_at": ["2026-01-01T00:00:00"],
+        }
+    )
+    changed_timestamp = row.copy()
+    changed_timestamp["entered_at"] = "2026-01-02T00:00:00"
+
+    first = append_graduation_evidence(row, graduation_path)
+    second = append_graduation_evidence(changed_timestamp, graduation_path)
+
+    assert first["appended_rows"] == 1
+    assert second["appended_rows"] == 0
+    assert len(load_graduation_evidence(graduation_path)) == 1
 
 
 def test_graduated_alumni_batch_builds_manual_corrections_with_defaults() -> None:
@@ -427,11 +513,17 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     adjustments_path = tmp_path / "config" / "manual_adjustments.csv"
     review_path = tmp_path / "config" / "manual_review_queue.csv"
     actions_path = tmp_path / "config" / "manual_review_actions.csv"
+    graduation_path = tmp_path / "config" / "graduation_evidence.csv"
+    outcomes_path = tmp_path / "config" / "outcome_overrides.csv"
+    exclusions_path = tmp_path / "config" / "roster_exclusions.csv"
     transcript_folder = tmp_path / "transcript_text" / "Transcripts"
     monkeypatch.setattr("app.config_loader.MANUAL_ROSTER_CORRECTIONS_PATH", corrections_path)
     monkeypatch.setattr("app.config_loader.MANUAL_ADJUSTMENTS_PATH", adjustments_path)
     monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_QUEUE_PATH", review_path)
     monkeypatch.setattr("app.config_loader.MANUAL_REVIEW_ACTIONS_PATH", actions_path)
+    monkeypatch.setattr("app.config_loader.GRADUATION_EVIDENCE_PATH", graduation_path)
+    monkeypatch.setattr("app.config_loader.OUTCOME_OVERRIDES_PATH", outcomes_path)
+    monkeypatch.setattr("app.config_loader.ROSTER_EXCLUSIONS_PATH", exclusions_path)
     monkeypatch.setattr("app.config_loader.MANUAL_TRANSCRIPTS_PATH", transcript_folder)
 
     save_manual_roster_corrections(
@@ -471,6 +563,18 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
         ),
         adjustments_path,
     )
+    append_graduation_evidence(
+        pd.DataFrame({"student_id": ["A00000001"], "graduation_term": ["Fall 2026"], "evidence_source": ["Alumni list"]}),
+        graduation_path,
+    )
+    append_outcome_overrides(
+        pd.DataFrame({"student_id": ["A00000001"], "final_status": ["Inactive"], "final_status_term": ["Fall 2026"]}),
+        outcomes_path,
+    )
+    append_roster_exclusions(
+        pd.DataFrame({"student_id": ["A00000001"], "organization_name": ["Alpha Sigma Phi"], "term": ["Spring 2026"]}),
+        exclusions_path,
+    )
     transcript_folder.mkdir(parents=True, exist_ok=True)
     (transcript_folder / "A00000001_Doe_Jane.txt").write_text("Spring 2026\nCredits: 3\n", encoding="utf-8")
     package_bytes = build_manual_corrections_package(corrections_path, transcript_folder, review_path, actions_path)
@@ -483,3 +587,6 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     assert len(load_manual_roster_corrections(corrections_path)) == 1
     assert len(load_manual_adjustments(adjustments_path)) == 1
     assert len(load_manual_review_actions(actions_path)) == 1
+    assert len(load_graduation_evidence(graduation_path)) == 1
+    assert len(load_outcome_overrides(outcomes_path)) == 1
+    assert len(load_roster_exclusions(exclusions_path)) == 1
