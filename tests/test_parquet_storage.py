@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from app.data_loader import CANONICAL_REQUIRED_FILES, MANUAL_CORRECTION_REQUIRED_FILES, _read_canonical_tables, load_manual_corrections_bundle
+from app.data_loader import CANONICAL_REQUIRED_FILES, MANUAL_CORRECTION_REQUIRED_FILES, _latest_run_folder, _read_canonical_tables, load_manual_corrections_bundle
 from app.models import DatasetVersion
 from src.build_canonical_pipeline import write_frame
 
@@ -37,6 +37,15 @@ def test_canonical_loader_reads_parquet_outputs(tmp_path: Path) -> None:
 
     assert sorted(tables) == sorted(CANONICAL_REQUIRED_FILES.values())
     assert tables["student_summary"].loc[0, "student_id"] == "A00000001"
+
+
+def test_latest_folder_is_preferred_over_archived_runs(tmp_path: Path) -> None:
+    archived = tmp_path / "run_20260101_000000"
+    latest = tmp_path / "latest"
+    archived.mkdir()
+    latest.mkdir()
+
+    assert _latest_run_folder(tmp_path, "run_") == latest
 
 
 def test_canonical_loader_falls_back_to_csv_outputs(tmp_path: Path) -> None:

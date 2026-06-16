@@ -74,7 +74,7 @@ from app.config_loader import (
     prepare_manual_corrections_workspace,
     save_manual_roster_corrections,
 )
-from app.exports import EXCEL_MAX_DATA_ROWS, dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
+from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes
 from app.io_utils import parse_term_label, safe_slug
 from app.data_loader import discover_dataset_versions, load_analysis_bundle, load_manual_corrections_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
@@ -3093,39 +3093,12 @@ def _render_advanced_analytics(
         summary_export = metric_summary[export_columns].copy()
         st.dataframe(summary_export, use_container_width=True, hide_index=True)
 
-        export_frames = {
-            "Filtered Students": summary_export,
-            "Population Summary": population_transparency,
-            "Group Summary": group_summary,
-            "Comparison Table": comparison_table,
-            "Controlled Comparison": controlled_table,
-            "Retention Rates": build_retention_dashboard(filtered_summary, group_field, st.session_state["min_n"]),
-            "GPA Trends With Coverage": build_gpa_trend_with_coverage(filtered_longitudinal, group_field if group_field in filtered_longitudinal.columns else None),
-            "Roster Disappearance Students": build_roster_disappearance_tracker(filtered_summary)["student_table"],
-            "Filtered Longitudinal": filtered_longitudinal,
-            "Audit Tables": pd.concat(audit_tables.values(), ignore_index=True) if audit_tables else pd.DataFrame(),
-        }
-        csv_col, xlsx_col = st.columns(2)
-        with csv_col:
-            st.download_button(
-                "Download filtered students CSV",
-                data=dataframe_to_csv_bytes(summary_export),
-                file_name="filtered_students.csv",
-                mime="text/csv",
-            )
-        with xlsx_col:
-            oversized_frames = {name: len(frame) for name, frame in export_frames.items() if frame is not None and len(frame) > EXCEL_MAX_DATA_ROWS}
-            if oversized_frames:
-                st.caption(
-                    "Large tables will be split across numbered workbook sheets because Excel has a 1,048,576-row limit per sheet. "
-                    "See the `Export Manifest` sheet for the row ranges."
-                )
-            st.download_button(
-                "Download current workbook",
-                data=frames_to_excel_bytes(export_frames),
-                file_name="analytics_export.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        st.download_button(
+            "Download filtered students CSV",
+            data=dataframe_to_csv_bytes(summary_export),
+            file_name="filtered_students.csv",
+            mime="text/csv",
+        )
 
     with definition_tab:
         st.subheader("About this metric")

@@ -75,10 +75,12 @@ def _iso_mtime(path: Path) -> str:
 def _latest_run_folder(root: Path, prefix: str) -> Optional[Path]:
     if not root.exists():
         return None
+    latest = root / "latest"
+    if latest.exists():
+        return latest
     candidates = [path for path in root.iterdir() if path.is_dir() and path.name.startswith(prefix)]
     if not candidates:
-        latest = root / "latest"
-        return latest if latest.exists() else None
+        return None
     return sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True)[0]
 
 

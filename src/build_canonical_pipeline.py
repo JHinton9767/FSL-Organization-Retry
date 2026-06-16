@@ -456,6 +456,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", default=None)
     parser.add_argument("--cache-root", default=None)
     parser.add_argument("--refresh-source-cache", action="store_true", help="Force raw source files to be re-read instead of using cached normalized source tables.")
+    parser.add_argument("--archive-run", action="store_true", help="Also write a timestamped run_* snapshot. By default, only output/canonical/latest is refreshed for the app.")
     return parser.parse_args()
 
 
@@ -693,10 +694,12 @@ def write_performance_report(
     latest_csv = latest_folder / "performance_report.csv"
     latest_json = latest_folder / "performance_report.json"
     latest_parquet = latest_folder / "performance_report.parquet"
-    shutil.copyfile(csv_path, latest_csv)
-    shutil.copyfile(json_path, latest_json)
+    if csv_path.resolve() != latest_csv.resolve():
+        shutil.copyfile(csv_path, latest_csv)
+    if json_path.resolve() != latest_json.resolve():
+        shutil.copyfile(json_path, latest_json)
     parquet_path = csv_path.with_suffix(".parquet")
-    if parquet_path.exists():
+    if parquet_path.exists() and parquet_path.resolve() != latest_parquet.resolve():
         shutil.copyfile(parquet_path, latest_parquet)
     return {"performance_report_csv": csv_path, "performance_report_parquet": parquet_path, "performance_report_json": json_path}
 
@@ -6588,6 +6591,7 @@ def build_canonical_pipeline(
     output_root: Path,
     cache_root: Path,
     refresh_source_cache: bool = False,
+    archive_run: bool = False,
 ) -> CanonicalBuildResult:
     pipeline_started = perf_counter()
     performance: List[PerformanceStage] = []
@@ -7138,11 +7142,11 @@ def build_canonical_pipeline(
     )
 
     export_stage_started = perf_counter()
-    timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-    output_folder = output_root / timestamp
-    output_folder.mkdir(parents=True, exist_ok=True)
     latest_folder = output_root / "latest"
     latest_folder.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    output_folder = output_root / timestamp if archive_run else latest_folder
+    output_folder.mkdir(parents=True, exist_ok=True)
     previous_performance_report = latest_folder / "performance_report.json"
 
     files = {
@@ -7221,12 +7225,13 @@ def build_canonical_pipeline(
     for key in ["identity_exceptions", "term_exceptions", "status_exceptions", "chapter_conflicts", "outcome_exceptions", "missing_evidence_cases"]:
         write_frame(files[key], ensure_columns(issue_frames.get(key, pd.DataFrame()), empty_exception_frame.columns))
 
-    for key, path in files.items():
-        target = latest_folder / path.name
-        shutil.copyfile(path, target)
-        parquet_path = path.with_suffix(".parquet")
-        if parquet_path.exists():
-            shutil.copyfile(parquet_path, latest_folder / parquet_path.name)
+    if archive_run:
+        for key, path in files.items():
+            target = latest_folder / path.name
+            shutil.copyfile(path, target)
+            parquet_path = path.with_suffix(".parquet")
+            if parquet_path.exists():
+                shutil.copyfile(parquet_path, latest_folder / parquet_path.name)
 
     append_stage(
         performance,
@@ -7241,7 +7246,7 @@ def build_canonical_pipeline(
             "cohort_metrics": cohort_metrics,
             "qa_checks": qa_checks,
         },
-        notes=f"output_folder={output_folder.name}",
+        notes=f"output_folder={output_folder.name}; archive_run={'yes' if archive_run else 'no'}",
     )
     performance_paths = write_performance_report(
         performance=performance,
@@ -7310,6 +7315,7 @@ def main() -> None:
         output_root=selected_output_root,
         cache_root=selected_cache_root,
         refresh_source_cache=args.refresh_source_cache,
+        archive_run=args.archive_run,
     )
     print(f"Canonical outputs written to: {result.output_folder}")
     for key, path in result.files.items():

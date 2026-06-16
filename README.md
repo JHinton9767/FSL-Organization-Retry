@@ -22,8 +22,11 @@ py run_canonical_pipeline.py --config config\local_paths.yaml
 
 The output is written to:
 
-- `output/canonical/run_*/`
 - `output/canonical/latest/`
+
+By default, the pipeline refreshes only `output/canonical/latest/` for the app.
+Use `--archive-run` only when you intentionally want an additional timestamped
+`output/canonical/run_*/` snapshot.
 
 ## Focused graduation-rate workflow
 
@@ -313,14 +316,14 @@ If you changed raw parsing logic and want to force the source files to be re-rea
 py run_canonical_pipeline.py --config config\local_paths.yaml --refresh-source-cache
 ```
 
-Each canonical run now also writes a small performance report to:
+Each canonical run writes a small performance report to:
 
-- `output/canonical/run_*/performance_report.csv`
-- `output/canonical/run_*/performance_report.parquet`
-- `output/canonical/run_*/performance_report.json`
 - `output/canonical/latest/performance_report.csv`
 - `output/canonical/latest/performance_report.parquet`
 - `output/canonical/latest/performance_report.json`
+
+If you pass `--archive-run`, the same performance report is also written to the
+timestamped `output/canonical/run_*/` snapshot.
 
 The report records per-stage timing, cache hit/miss status, and key row counts so you can see where the runtime is going and whether cached stages were reused.
 
