@@ -84,6 +84,7 @@ STATUS_MAP = {
     "A": "Active",
     "AL": "Alumni",
     "G": "Graduated",
+    "H": "H",
     "I": "Inactive",
     "S": "Suspended",
     "N": "New Member",
@@ -289,6 +290,13 @@ def normalize_status(value: str) -> str:
     if upper in STATUS_MAP:
         return STATUS_MAP[upper]
     return raw
+
+
+def is_excluded_roster_position(value: object) -> bool:
+    text = clean_text(value).lower()
+    if not text:
+        return False
+    return bool(re.search(r"\b(?:advisor|adviser)\b|\bgreek\s+staff\b", text))
 
 
 VALID_BANNER_ID_RE = re.compile(r"^A0\d{7}$")

@@ -53,6 +53,7 @@ from src.build_master_roster import (
     find_status_column,
     get_cell,
     infer_chapter,
+    is_excluded_roster_position,
     is_individual_new_member_form_pdf,
     is_placeholder_sheet_name,
     normalize_banner_id,
@@ -807,6 +808,42 @@ def path_term_candidates(path: Path) -> List[str]:
     return candidates
 
 
+ROSTER_TITLE_RE = re.compile(r"^(?P<chapter>.+?)\s+(?P<term>(?:Fall|Spring)\s+(?:19|20)\d{2})\s+Roster\b", re.IGNORECASE)
+
+
+def roster_title_details_from_rows(table_rows: Sequence[Tuple[object, ...]], header_row_idx: Optional[int]) -> Tuple[str, str, str]:
+    scan_limit = header_row_idx if header_row_idx is not None else min(len(table_rows), 8)
+    for row in table_rows[:scan_limit]:
+        for cell in row:
+            text = clean_text(cell)
+            if not text:
+                continue
+            match = ROSTER_TITLE_RE.search(text)
+            if not match:
+                continue
+            chapter_raw = clean_text(match.group("chapter"))
+            chapter = normalize_chapter_name(chapter_raw)
+            term_code, term_label, _, _ = parse_term_code(match.group("term"))
+            return chapter_raw, chapter if chapter != "Unknown" else "", term_label if term_code else ""
+    return "", "", ""
+
+
+def roster_term_label_from_context(path: Path, title_term_label: str = "") -> Tuple[str, str]:
+    for part in reversed(path.parts):
+        text = clean_text(part)
+        if re.fullmatch(r"(Fall|Spring)\s+(19|20)\d{2}", text, flags=re.IGNORECASE):
+            code, label, _, _ = parse_term_code(text)
+            if code:
+                return label, "semester_folder"
+    if title_term_label:
+        return title_term_label, "title_row"
+    for candidate in path_term_candidates(path):
+        code, label, _, _ = parse_term_code(candidate)
+        if code:
+            return label, "folder_or_filename"
+    return "", "unparsed"
+
+
 def parse_grade_term(path: Path, sheet_name: object) -> str:
     for candidate in [clean_text(sheet_name), *path_term_candidates(path)]:
         term_code, term_label, _, _ = parse_term_code(candidate)
@@ -851,7 +888,7 @@ def academic_source_priority(source_file: object, term_source_basis: object = ""
 def grade_section_default_status(path: Path, sheet_name: str, section_context: str) -> str:
     combined_context = " ".join([clean_text(section_context), clean_text(sheet_name), clean_text(path.stem)])
     bucket = roster_status_bucket(combined_context, "")
-    if bucket in {"Active", "Inactive", "New Member", "Graduated", "Transfer", "Suspended", "Resigned", "Revoked", ROSTER_STATUS_EARLY_ALUMNI}:
+    if bucket in {"Active", "Inactive", "New Member", "Graduated", "Transfer", "Suspended", "Resigned", "Revoked", "H", ROSTER_STATUS_EARLY_ALUMNI}:
         return bucket
     return ""
 
@@ -2410,9 +2447,10 @@ def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, objec
             "matched_by_id_name": 1,
             "matched_by_id": 2,
             "original": 3,
-            "inferred_from_sheet_name": 4,
-            "inferred_from_file_name": 5,
-            "unresolved": 6,
+            "title_row": 4,
+            "inferred_from_sheet_name": 5,
+            "inferred_from_file_name": 6,
+            "unresolved": 7,
         }
     ).fillna(9)
     preferred = (
@@ -2447,6 +2485,8 @@ def chapter_assignment_details(
     inferred = infer_chapter(path, sheet_name) or fallback_chapter
 
     if inferred and inferred != "Unknown":
+        if fallback_source == "title_row":
+            return inferred, "title_row", "high", "Loaded from roster title row."
         if inferred_sheet and inferred == inferred_sheet and not is_placeholder_sheet_name(sheet_name):
             return inferred, "inferred_from_sheet_name", "medium", "Inferred from workbook sheet name."
         if inferred_file and inferred == inferred_file:
@@ -2470,9 +2510,11 @@ def map_grade_headers(headers: Sequence[object]) -> Dict[str, int]:
 def roster_status_bucket(raw_status: object, raw_position: object) -> str:
     status = normalize_status(clean_text(raw_status))
     status_text = status.upper()
-    combined = f"{status} {clean_text(raw_position)}".upper()
+    position_text = clean_text(raw_position).upper()
     if has_explicit_roster_graduation_status(raw_status, status):
         return "Graduated"
+    if status_text == "H":
+        return "H"
     if "ALUMNI" in status_text or "EARLY ALUM" in status_text:
         return ROSTER_STATUS_EARLY_ALUMNI
     if "SUSPEND" in status_text:
@@ -2485,10 +2527,15 @@ def roster_status_bucket(raw_status: object, raw_position: object) -> str:
         return "Resigned"
     if "INACTIVE" in status_text or "DROP" in status_text or "REMOVE" in status_text:
         return "Inactive"
-    if "NEW MEMBER" in combined:
+    if "NEW MEMBER" in status_text:
         return "New Member"
-    if "ACTIVE" in combined or "MEMBER" in combined or "COUNCIL" in combined:
+    if "ACTIVE" in status_text or "MEMBER" in status_text or "COUNCIL" in status_text:
         return "Active"
+    if not status_text:
+        if "NEW MEMBER" in position_text:
+            return "New Member"
+        if "ACTIVE" in position_text or "MEMBER" in position_text or "COUNCIL" in position_text:
+            return "Active"
     return status or "Unknown"
 
 
@@ -2705,11 +2752,14 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
             header_map["status"] = status_col_idx
         data_start_index = max(header_row_idx, status_row_idx or header_row_idx)
         source_is_new_member = source_context_indicates_new_member(path, sheet_name)
+        title_chapter_raw, title_chapter, title_term_label = roster_title_details_from_rows(table_rows, header_row_idx)
 
-        default_chapter = infer_chapter(path, sheet_name) or normalize_chapter_name(sheet_name or path.stem) or "Unknown"
-        current_chapter_raw = sheet_name
+        default_chapter = title_chapter or infer_chapter(path, sheet_name) or normalize_chapter_name(sheet_name or path.stem) or "Unknown"
+        current_chapter_raw = title_chapter_raw or sheet_name
         current_chapter = default_chapter
-        if default_chapter and default_chapter != "Unknown":
+        if title_chapter and title_chapter != "Unknown":
+            current_chapter_source = "title_row"
+        elif default_chapter and default_chapter != "Unknown":
             if normalize_chapter_name(sheet_name) == default_chapter and not is_placeholder_sheet_name(sheet_name):
                 current_chapter_source = "inferred_from_sheet_name"
             elif chapter_from_filename(path) == default_chapter:
@@ -2719,12 +2769,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
         else:
             current_chapter_source = "unresolved"
 
-        term_label = ""
-        for candidate in path_term_candidates(path):
-            code, label, _, _ = parse_term_code(candidate)
-            if code:
-                term_label = label
-                break
+        term_label, term_source_basis = roster_term_label_from_context(path, title_term_label)
         term_code, term_label, term_year, term_season = parse_term_code(term_label)
         if not term_code:
             exceptions.append(
@@ -2759,6 +2804,17 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
             chapter_raw = clean_text(get_cell(row, header_map.get("chapter")))
             status_raw = clean_text(get_cell(row, header_map.get("status")))
             position_raw = clean_text(get_cell(row, header_map.get("position")))
+            if is_excluded_roster_position(position_raw):
+                exceptions.append(
+                    {
+                        "exception_type": "roster_staff_position_excluded",
+                        "source_file": source_label,
+                        "student_id": normalize_banner_id(banner_raw),
+                        "term_code": term_code,
+                        "details": f"Excluded roster row with position {position_raw}.",
+                    }
+                )
+                continue
             semester_joined_raw = clean_text(get_cell(row, header_map.get("semester_joined")))
             chapter, chapter_assignment_source, chapter_assignment_confidence, chapter_assignment_notes = chapter_assignment_details(
                 path,
@@ -2793,7 +2849,7 @@ def load_roster_term_table(roots: Sequence[Path]) -> Tuple[pd.DataFrame, pd.Data
                     "term_label": term_label,
                     "term_year": term_year,
                     "term_season": term_season,
-                    "term_source_basis": "folder_or_filename",
+                    "term_source_basis": term_source_basis,
                     "chapter": chapter,
                     "chapter_raw": chapter_raw or current_chapter_raw or sheet_name,
                     "chapter_assignment_source": chapter_assignment_source,
@@ -3937,6 +3993,7 @@ def resolve_roster_conflicts(roster: pd.DataFrame, settings: Dict[str, object]) 
                 "Inactive": 55,
                 "New Member": 54,
                 "Active": 50,
+                "H": 40,
             }
         ).fillna(0)
         ranked = ranked.sort_values(by=["_resigned_or_revoked", "_secondary_org", "_source_version_priority", "_source_month_priority", "_source_format_priority", "_status_priority", "_new_member", "_known_id"], ascending=[True, True, False, False, False, False, False, False])
@@ -6062,6 +6119,7 @@ def build_status_exceptions(roster: pd.DataFrame, academic: pd.DataFrame) -> pd.
         ROSTER_STATUS_EARLY_ALUMNI,
         "New Member",
         "Active",
+        "H",
         "Unknown",
     }
     if not roster.empty:

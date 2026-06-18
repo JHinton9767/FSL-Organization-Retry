@@ -1,11 +1,14 @@
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
 
 from src.build_canonical_pipeline import (
     apply_manual_roster_corrections,
     build_current_active_fields,
+    build_status_exceptions,
     graduation_evidence_to_manual_adjustments,
+    load_roster_term_table,
     outcome_overrides_to_manual_adjustments,
     roster_exclusions_to_manual_roster_corrections,
     roster_file_version_details,
@@ -116,6 +119,8 @@ def test_roster_status_bucket_only_marks_explicit_roster_graduation_codes() -> N
     assert roster_status_bucket("Early Alumni", "Member") == "Early Alumni"
     assert roster_status_bucket("T", "Member") == "Transfer"
     assert roster_status_bucket("Transfer", "Member") == "Transfer"
+    assert roster_status_bucket("H", "Member") == "H"
+    assert roster_status_bucket("", "Member") == "Active"
 
 
 def test_banner_id_normalization_only_keeps_valid_a0_ids() -> None:
@@ -126,6 +131,40 @@ def test_banner_id_normalization_only_keeps_valid_a0_ids() -> None:
     assert normalize_banner_id("A12345678") == ""
     assert normalize_banner_id("A0123456") == ""
     assert normalize_banner_id("") == ""
+
+
+def test_roster_loader_handles_screenshot_style_roster_and_excludes_staff(tmp_path) -> None:
+    root = tmp_path / "Rosters"
+    roster_folder = root / "Spring 2023"
+    roster_folder.mkdir(parents=True)
+    path = roster_folder / "Delta Zeta roster.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Roster"
+    sheet.append(["Delta Zeta Spring 2023 Roster", "", "", "", "", "", ""])
+    sheet.append(["Last Name", "First Name", "Banner ID", "Email", "Position", "Semester Joined", "Status"])
+    sheet.append(["Neal", "Chloe", "A05168725", "abc@example.edu", "Member", "2022 F", "A"])
+    sheet.append(["Advisor", "Person", "A05168726", "advisor@example.edu", "Advisor", "2022 F", "A"])
+    sheet.append(["Staff", "Person", "A05168727", "staff@example.edu", "Greek Staff", "2022 F", "A"])
+    sheet.append(["Hold", "Harper", "A05168728", "hold@example.edu", "Member", "2022 F", "H"])
+    sheet.append(["Bad", "Id", "not-a-banner", "bad@example.edu", "Member", "2022 F", "A"])
+    workbook.save(path)
+
+    roster, issues = load_roster_term_table([root])
+
+    assert roster["student_id"].tolist() == ["A05168725", "A05168728"]
+    assert roster.set_index("student_id").loc["A05168725", "org_status_bucket"] == "Active"
+    assert roster.set_index("student_id").loc["A05168728", "org_status_bucket"] == "H"
+    assert roster["chapter"].unique().tolist() == ["Delta Zeta"]
+    assert roster["chapter_assignment_source"].unique().tolist() == ["title_row"]
+    assert roster["term_label"].unique().tolist() == ["Spring 2023"]
+    assert roster["term_source_basis"].unique().tolist() == ["semester_folder"]
+    assert "roster_staff_position_excluded" in issues["exception_type"].tolist()
+    assert len(issues.loc[issues["exception_type"].eq("roster_staff_position_excluded")]) == 2
+
+    status_issues = build_status_exceptions(roster, pd.DataFrame())
+
+    assert status_issues.empty
 
 
 def test_manual_roster_corrections_override_status_and_chapter() -> None:
