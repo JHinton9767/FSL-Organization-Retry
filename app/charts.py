@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
+
 
 PLOTLY_TEMPLATE = "plotly_white"
 COLOR_SEQUENCE = [
@@ -15,10 +17,17 @@ COLOR_SEQUENCE = [
     "#F4D35E",
 ]
 PERSISTENCE_OUTCOME_COLORS = {
-    "Retained": "#5C1418",
-    "Graduated": "#9A7D4F",
-    "Not Retained / Unresolved": "#B7B4AA",
+    "Active": "#5C1418",
+    "Early Alumni": "#C69026",
+    "Inactive/Suspended": "#D97706",
+    "Resigned": "#6B7280",
+    "Revoked": "#9F1D35",
+    "Dropped": "#7C3AED",
+    "Transfer": "#0B6C94",
+    "Unknown": "#B7B4AA",
+    "Graduated": "#2F7D4A",
 }
+PERSISTENCE_DARK_TEXT_OUTCOMES = {"Early Alumni", "Unknown"}
 
 
 def _finalize_figure(fig: go.Figure, y_format: str = "", **layout_updates: object) -> go.Figure:
@@ -144,8 +153,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         return empty_figure("No persistence or graduation data is available for the selected cohort.")
 
     fig = go.Figure()
-    order = ["Retained", "Graduated", "Not Retained / Unresolved"]
-    for outcome in order:
+    for outcome in PERSISTENCE_OUTCOME_ORDER:
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
             continue
@@ -156,7 +164,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
             marker_color=PERSISTENCE_OUTCOME_COLORS[outcome],
             text=subset["Label"],
             textposition="inside",
-            textfont={"color": "white" if outcome != "Not Retained / Unresolved" else "#2F2E2A", "size": 12},
+            textfont={"color": "#2F2E2A" if outcome in PERSISTENCE_DARK_TEXT_OUTCOMES else "white", "size": 11},
             customdata=subset[["Count"]],
             hovertemplate=f"{outcome}<br>%{{x}}<br>%{{y:.1%}}<br>n=%{{customdata[0]:,}}<extra></extra>",
         )
@@ -164,12 +172,12 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
         barmode="stack",
-        height=560,
+        height=610,
         title={"text": title + (f"<br><sup>{subtitle}</sup>" if subtitle else ""), "x": 0.01, "xanchor": "left"},
         legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
         xaxis_title="",
         yaxis_title="Share of cohort",
-        margin={"l": 24, "r": 24, "t": 90, "b": 80},
+        margin={"l": 24, "r": 24, "t": 90, "b": 120},
     )
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
     return fig

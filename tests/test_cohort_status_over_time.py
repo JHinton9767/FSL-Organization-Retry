@@ -8,7 +8,7 @@ def _status_rows(table: pd.DataFrame, cohort: str, checkpoint: str) -> pd.DataFr
     return rows.set_index("status")
 
 
-def test_cohort_status_over_time_tracks_retained_graduated_and_not_retained() -> None:
+def test_cohort_status_over_time_tracks_active_graduated_and_unknown() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["A00000001", "A00000002", "A00000003"],
@@ -33,12 +33,12 @@ def test_cohort_status_over_time_tracks_retained_graduated_and_not_retained() ->
 
     baseline = _status_rows(table, "Fall 2019", "Cohort Year")
     four_year = _status_rows(table, "Fall 2019", "4 Year")
-    assert int(baseline.loc["Retained", "student_count"]) == 3
+    assert int(baseline.loc["Active", "student_count"]) == 3
     assert int(baseline.loc["Graduated", "student_count"]) == 0
-    assert int(baseline.loc["Not Retained", "student_count"]) == 0
-    assert int(four_year.loc["Retained", "student_count"]) == 1
+    assert int(baseline.loc["Unknown", "student_count"]) == 0
+    assert int(four_year.loc["Active", "student_count"]) == 1
     assert int(four_year.loc["Graduated", "student_count"]) == 1
-    assert int(four_year.loc["Not Retained", "student_count"]) == 1
+    assert int(four_year.loc["Unknown", "student_count"]) == 1
     assert four_year.loc["Graduated", "share"] == 1 / 3
 
 
@@ -85,7 +85,7 @@ def test_cohort_status_over_time_does_not_count_unconfirmed_graduation() -> None
     four_year = _status_rows(table, "Fall 2019", "4 Year")
 
     assert int(four_year.loc["Graduated", "student_count"]) == 0
-    assert int(four_year.loc["Not Retained", "student_count"]) == 1
+    assert int(four_year.loc["Unknown", "student_count"]) == 1
 
 
 def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_checkpoints() -> None:
@@ -111,6 +111,6 @@ def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_che
     table = build_cohort_status_over_time(summary, longitudinal, max_years=6)
     four_year = _status_rows(table, "Fall 2019", "4 Year")
 
-    assert int(four_year.loc["Retained", "student_count"]) == 1
-    assert int(four_year.loc["Not Retained", "student_count"]) == 1
+    assert int(four_year.loc["Active", "student_count"]) == 1
+    assert int(four_year.loc["Unknown", "student_count"]) == 1
     assert not table["checkpoint"].eq("5 Year").any()

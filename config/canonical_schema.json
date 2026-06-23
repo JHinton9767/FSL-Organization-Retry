@@ -130,7 +130,9 @@
       "is_active_outcome",
       "is_unknown_outcome",
       "is_graduated",
-      "is_known_non_graduate_exit"
+      "is_known_non_graduate_exit",
+      "manual_outcome_status",
+      "manual_outcome_term"
     ],
     "student_summary": [
       "student_id",
@@ -174,6 +176,8 @@
       "is_unknown_outcome",
       "is_graduated",
       "is_known_non_graduate_exit",
+      "manual_outcome_status",
+      "manual_outcome_term",
       "latest_roster_status_bucket",
       "initial_roster_status_bucket",
       "active_flag",
@@ -329,7 +333,11 @@
       "outcome_confidence",
       "ambiguity_flags",
       "manual_review_required",
-      "manual_review_reason"
+      "manual_review_reason",
+      "org_entry_cohort",
+      "manual_adjustments_applied",
+      "manual_outcome_status",
+      "manual_outcome_term"
     ],
     "input_group_outcome_buckets": [
       "input_group_id",

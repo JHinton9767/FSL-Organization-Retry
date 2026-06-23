@@ -16,6 +16,7 @@ from app.metrics_engine import (
 )
 from app.models import MetricDefinition
 from app.status_framework import outcome_population_summary, resolved_outcomes_only_frame, student_count
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, checkpoint_outcome_counts
 
 
 DIMENSION_LABELS = {
@@ -1215,7 +1216,17 @@ def build_persistence_dashboard(
     empty = {
         "cohort": cohort,
         "chart_frame": pd.DataFrame(columns=["Milestone", "Milestone Sort", "Outcome", "Share", "Count", "Label"]),
-        "table_frame": pd.DataFrame(columns=["Milestone", "Term", "Retained", "Retained Count", "Graduated", "Graduated Count", "Not Retained / Unresolved", "Not Retained / Unresolved Count"]),
+        "table_frame": pd.DataFrame(
+            columns=[
+                "Milestone",
+                "Term",
+                *[
+                    column
+                    for outcome in PERSISTENCE_OUTCOME_ORDER
+                    for column in (outcome, f"{outcome} Count")
+                ],
+            ]
+        ),
         "meta": {
             "cohort_term": cohort_term,
             "distinction": distinction,
@@ -1274,30 +1285,7 @@ def build_persistence_dashboard(
         empty["meta"]["note"] = "No roster-present longitudinal rows matched the selected cohort."
         return empty
 
-    presence_by_term = {
-        int(term_sort): set(group["student_id"].tolist())
-        for term_sort, group in presence_rows.groupby("observed_term_sort", dropna=False)
-        if pd.notna(term_sort)
-    }
-    presence_rows["persistence_academic_year_start"] = presence_rows.get("observed_term", pd.Series("", index=presence_rows.index)).map(
-        _persistence_academic_year_start
-    )
-    presence_by_academic_year = {
-        int(year_value): set(group["student_id"].tolist())
-        for year_value, group in presence_rows.loc[presence_rows["persistence_academic_year_start"].notna()].groupby(
-            "persistence_academic_year_start",
-            dropna=False,
-        )
-        if pd.notna(year_value)
-    }
     max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
-
-    def students_rostered_at_or_after(target_sort: int) -> set[str]:
-        retained: set[str] = set()
-        for term_sort, student_set in presence_by_term.items():
-            if target_sort <= int(term_sort) <= max_term_sort:
-                retained.update(student_set)
-        return retained
 
     cohort_work = cohort.copy()
     cohort_work["student_id"] = cohort_work["student_id"].fillna("").astype(str).str.strip()
@@ -1309,6 +1297,18 @@ def build_persistence_dashboard(
         cohort_work["graduation_sort"] = cohort_work["graduation_sort"].where(cohort_work["graduation_sort"].lt(999999), alt_sort)
     graduated_mask = cohort_work.get("is_graduated", pd.Series(False, index=cohort_work.index)).fillna(False).astype(bool)
     cohort_work["graduation_sort"] = cohort_work["graduation_sort"].where(graduated_mask, 999999)
+    cohort_work["_graduation_sort"] = cohort_work["graduation_sort"]
+    manual_status = cohort_work.get("manual_outcome_status", pd.Series("", index=cohort_work.index)).fillna("").astype(str).str.strip()
+    manual_term = cohort_work.get("manual_outcome_term", pd.Series("", index=cohort_work.index)).fillna("").astype(str).str.strip()
+    fallback_manual_term = cohort_work.get(
+        "last_observed_org_term_code",
+        cohort_work.get("last_observed_org_term", pd.Series("", index=cohort_work.index)),
+    ).fillna("").astype(str).str.strip()
+    effective_manual_term = manual_term.where(manual_term.ne(""), fallback_manual_term)
+    cohort_work["_manual_outcome_sort"] = [
+        parse_term_label(term_value)["sort_value"] if status_value and term_value else 999999
+        for status_value, term_value in zip(manual_status, effective_manual_term)
+    ]
 
     chart_rows: list[dict[str, object]] = []
     table_rows: list[dict[str, object]] = []
@@ -1336,40 +1336,23 @@ def build_persistence_dashboard(
 
         last_milestone_label = display_label
         milestone_label = _milestone_label(display_label, offset)
-        if offset == 0:
-            retained_count = student_count_total
-            graduated_count = 0
-            not_retained_count = 0
-        else:
-            graduated_students = set(
-                cohort_work.loc[cohort_work["graduation_sort"].le(target_sort), "student_id"]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .tolist()
-            )
-            retained_students = students_rostered_at_or_after(target_retention_sort) - graduated_students
-            graduated_count = len(graduated_students)
-            retained_count = len(retained_students)
-            not_retained_count = max(student_count_total - retained_count - graduated_count, 0)
-
-        milestone_counts = {
-            "Retained": retained_count,
-            "Graduated": graduated_count,
-            "Not Retained / Unresolved": not_retained_count,
-        }
-        table_rows.append(
-            {
-                "Milestone": f"{offset} Year" if offset else "Cohort Year",
-                "Term": display_label,
-                "Retained": (retained_count / student_count_total) if student_count_total else np.nan,
-                "Retained Count": retained_count,
-                "Graduated": (graduated_count / student_count_total) if student_count_total else np.nan,
-                "Graduated Count": graduated_count,
-                "Not Retained / Unresolved": (not_retained_count / student_count_total) if student_count_total else np.nan,
-                "Not Retained / Unresolved Count": not_retained_count,
-            }
+        milestone_counts = checkpoint_outcome_counts(
+            cohort_work,
+            long_frame,
+            target_sort,
+            max_term_sort,
+            presence_start_sort=target_retention_sort,
+            baseline=offset == 0,
         )
+        table_row: dict[str, object] = {
+            "Milestone": f"{offset} Year" if offset else "Cohort Year",
+            "Term": display_label,
+        }
+        for outcome in PERSISTENCE_OUTCOME_ORDER:
+            count = int(milestone_counts.get(outcome, 0))
+            table_row[outcome] = (count / student_count_total) if student_count_total else np.nan
+            table_row[f"{outcome} Count"] = count
+        table_rows.append(table_row)
         for outcome, count in milestone_counts.items():
             share = (count / student_count_total) if student_count_total else np.nan
             label = ""
@@ -1398,9 +1381,9 @@ def build_persistence_dashboard(
             "students": student_count_total,
             "max_milestone": last_milestone_label,
             "note": (
-                "Retained counts show students observed on a roster at or after the checkpoint through the latest input roster. Graduated counts use explicit graduation evidence only. Checkpoints after the latest roster are not measured."
+                "Checkpoint outcomes use roster status and later roster presence first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
                 if not is_total_cohort
-                else "Retained counts show students observed on a roster during or after the academic-year checkpoint through the latest input roster. Graduated counts use explicit graduation evidence only through the end of the checkpoint spring term. Checkpoints after the latest roster are not measured."
+                else "Checkpoint outcomes use roster status and later roster presence across the academic year first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
             ),
         },
     }

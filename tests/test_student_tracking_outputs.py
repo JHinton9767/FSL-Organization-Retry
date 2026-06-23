@@ -243,6 +243,7 @@ def test_manual_transfer_code_creates_transfer_outcome() -> None:
     tracking = build_student_longitudinal_tracking(appearances, _summary("A00000012"), manual)
 
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_TRANSFERRED_LEFT
+    assert tracking.loc[0, "manual_outcome_status"] == "T"
 
 
 def test_input_group_buckets_count_unique_students_once() -> None:

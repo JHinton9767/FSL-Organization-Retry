@@ -89,6 +89,7 @@ from app.metrics_engine import (
 from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
 from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 
 
 st.set_page_config(
@@ -274,7 +275,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     cohort_options = persistence_cohort_options(summary)
 
     _persistence_header()
-    st.caption("This view mirrors the Texas State persistence/graduation presentation style while using organization join term cohorts and confirmed graduation evidence only.")
+    st.caption("This view tracks organization join-term cohorts across nine roster-aligned outcomes, with dated manual corrections applied after roster evidence.")
 
     if not cohort_options:
         st.warning("No organization join-term cohorts were available for the persistence and graduation view.")
@@ -324,7 +325,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
 
     title = f"Persistence and Graduation for {cohort_term}"
     subtitle = (
-        f"{distinction} distinction | Explicit graduation evidence only | Gray segment = not retained or unresolved at that checkpoint"
+        f"{distinction} distinction | Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
     )
     chart = persistence_milestone_chart(chart_frame, title=title, subtitle=subtitle)
     st.plotly_chart(chart, use_container_width=True)
@@ -332,7 +333,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
 
     if not table_frame.empty:
         st.dataframe(
-            _format_display_frame(table_frame, percent_cols=["Retained", "Graduated", "Not Retained / Unresolved"]),
+            _format_display_frame(table_frame, percent_cols=PERSISTENCE_OUTCOME_ORDER),
             use_container_width=True,
             hide_index=True,
         )

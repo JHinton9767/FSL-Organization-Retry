@@ -97,11 +97,11 @@ def test_build_persistence_dashboard_uses_explicit_graduation_and_roster_checkpo
     assert dashboard["meta"]["students"] == 3
     assert four_year["Term"] == "Fall 2023"
     assert four_year["Graduated Count"] == 1
-    assert four_year["Retained Count"] == 1
-    assert four_year["Not Retained / Unresolved Count"] == 1
+    assert four_year["Active Count"] == 1
+    assert four_year["Unknown Count"] == 1
     assert four_year["Graduated"] == 1 / 3
-    assert four_year["Retained"] == 1 / 3
-    assert four_year["Not Retained / Unresolved"] == 1 / 3
+    assert four_year["Active"] == 1 / 3
+    assert four_year["Unknown"] == 1 / 3
 
 
 def test_build_persistence_dashboard_counts_roster_presence_as_retained() -> None:
@@ -133,8 +133,8 @@ def test_build_persistence_dashboard_counts_roster_presence_as_retained() -> Non
 
     assert dashboard["meta"]["students"] == 3
     assert four_year["Graduated Count"] == 1
-    assert four_year["Retained Count"] == 1
-    assert four_year["Not Retained / Unresolved Count"] == 1
+    assert four_year["Active Count"] == 1
+    assert four_year["Unknown Count"] == 1
 
 
 def test_build_persistence_dashboard_supports_academic_year_total_checkpoints() -> None:
@@ -166,8 +166,8 @@ def test_build_persistence_dashboard_supports_academic_year_total_checkpoints() 
     assert dashboard["meta"]["students"] == 3
     assert four_year["Term"] == "Fall 2019 Total"
     assert four_year["Graduated Count"] == 1
-    assert four_year["Retained Count"] == 1
-    assert four_year["Not Retained / Unresolved Count"] == 1
+    assert four_year["Active Count"] == 1
+    assert four_year["Unknown Count"] == 1
 
 
 def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_latest_roster() -> None:
@@ -196,6 +196,61 @@ def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_
     table = dashboard["table_frame"]
     four_year = table.loc[table["Milestone"].eq("4 Year")].iloc[0]
 
-    assert four_year["Retained Count"] == 1
-    assert four_year["Not Retained / Unresolved Count"] == 1
+    assert four_year["Active Count"] == 1
+    assert four_year["Unknown Count"] == 1
     assert not table["Milestone"].eq("5 Year").any()
+
+
+def test_build_persistence_dashboard_uses_nine_roster_categories_then_manual_override() -> None:
+    student_ids = [f"A0000000{index}" for index in range(1, 10)]
+    summary = pd.DataFrame(
+        {
+            "student_id": student_ids,
+            "join_term": ["Fall 2020"] * 9,
+            "council": ["IFC"] * 9,
+            "org_type": ["Fraternity"] * 9,
+            "is_graduated": [False] * 8 + [True],
+            "graduation_term": [""] * 8 + ["Fall 2024"],
+            "graduation_term_code": [""] * 8 + ["2024FA"],
+            "manual_outcome_status": ["", "", "", "", "", "Dropped", "", "", ""],
+            "manual_outcome_term": ["", "", "", "", "", "Fall 2024", "", "", ""],
+            "last_observed_org_term_code": ["2024FA"] * 9,
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": student_ids,
+            "observed_term": ["Fall 2024"] * 9,
+            "observed_term_sort": [20243] * 9,
+            "roster_present": ["Yes"] * 9,
+            "org_status_bucket": [
+                "Active",
+                "Early Alumni",
+                "Inactive",
+                "Resigned",
+                "Revoked",
+                "Active",
+                "Transfer",
+                "H",
+                "Graduated",
+            ],
+        }
+    )
+
+    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2020", "ALL")
+    four_year = dashboard["table_frame"].loc[
+        dashboard["table_frame"]["Milestone"].eq("4 Year")
+    ].iloc[0]
+
+    for outcome in [
+        "Active",
+        "Early Alumni",
+        "Inactive/Suspended",
+        "Resigned",
+        "Revoked",
+        "Dropped",
+        "Transfer",
+        "Unknown",
+        "Graduated",
+    ]:
+        assert four_year[f"{outcome} Count"] == 1

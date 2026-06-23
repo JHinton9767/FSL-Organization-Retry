@@ -66,6 +66,7 @@ from src.build_master_roster import (
     should_upgrade_to_new_member_status,
 )
 from src.path_config import load_path_config, validate_path_config
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, checkpoint_outcome_counts
 from src.shared_utils import (
     apply_chapter_mapping_overrides,
     bucket_30_hours,
@@ -251,6 +252,8 @@ STUDENT_LONGITUDINAL_TRACKING_COLUMNS = [
     "manual_review_reason",
     "org_entry_cohort",
     "manual_adjustments_applied",
+    "manual_outcome_status",
+    "manual_outcome_term",
 ]
 
 INPUT_GROUP_OUTCOME_BUCKET_COLUMNS = [
@@ -299,7 +302,7 @@ COHORT_STATUS_OVER_TIME_COLUMNS = [
     "notes",
 ]
 
-COHORT_STATUS_ORDER = ["Retained", "Graduated", "Not Retained"]
+COHORT_STATUS_ORDER = PERSISTENCE_OUTCOME_ORDER
 COHORT_TERM_CANDIDATES = [
     ("join_term_code", "join_term", "organization_join_term"),
 ]
@@ -3841,6 +3844,8 @@ SUMMARY_TO_MASTER_COLUMNS = [
     "is_unknown_outcome",
     "is_graduated",
     "is_known_non_graduate_exit",
+    "manual_outcome_status",
+    "manual_outcome_term",
 ]
 
 
@@ -4550,7 +4555,7 @@ def manual_roster_corrections_to_manual_adjustments(corrections: pd.DataFrame) -
                     "adjustment_id": f"legacy_outcome_{idx}_{student_id}",
                     "adjustment_type": "outcome_override",
                     "field_to_override": "final_outcome_bucket",
-                    "original_value": "",
+                    "original_value": _clean_display(correction.get("final_status_term", "")),
                     "adjusted_value": final_status,
                 }
             )
@@ -4852,6 +4857,8 @@ def build_student_longitudinal_tracking(
 
         manual_rows = active_adjustments.loc[active_adjustments["_normalized_student_id"].eq(normalized_id)] if not active_adjustments.empty else pd.DataFrame()
         manual_outcome_bucket = ""
+        manual_outcome_status = ""
+        manual_outcome_term = ""
         manual_chapter = ""
         manual_org = ""
         manual_applied: List[str] = []
@@ -4860,6 +4867,8 @@ def build_student_longitudinal_tracking(
                 field = _clean_display(getattr(manual, "field_to_override", "")).lower()
                 adjusted = _clean_display(getattr(manual, "adjusted_value", ""))
                 if field in {"final_outcome_bucket", "latest_outcome_bucket", "outcome_bucket", "final_status", "status"}:
+                    manual_outcome_status = adjusted
+                    manual_outcome_term = _clean_display(getattr(manual, "original_value", ""))
                     manual_outcome_bucket = _outcome_bucket_from_manual_value(adjusted)
                     if manual_outcome_bucket == OUTCOME_GRADUATED_CONFIRMED:
                         explicit_grad = True
@@ -4906,6 +4915,8 @@ def build_student_longitudinal_tracking(
             "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
             "manual_outcome_bucket": manual_outcome_bucket,
             "manual_adjustments_applied": _unique_join(manual_applied),
+            "manual_outcome_status": manual_outcome_status,
+            "manual_outcome_term": manual_outcome_term,
         }
         bucket, confidence, flags, review_reason = classify_student_outcome(pd.Series(row))
         row.update(
@@ -4931,7 +4942,16 @@ def apply_tracking_outcomes_to_summary(summary: pd.DataFrame, tracking: pd.DataF
     tracking_lookup["_normalized_student_id"] = tracking_lookup["normalized_student_id"].map(normalize_banner_id)
     result["_normalized_student_id"] = result["student_id"].map(normalize_banner_id)
     mapped = tracking_lookup.drop_duplicates(subset=["_normalized_student_id"], keep="first").set_index("_normalized_student_id")
-    for column in ["final_outcome_bucket", "outcome_confidence", "ambiguity_flags", "manual_review_required", "manual_review_reason", "manual_adjustments_applied"]:
+    for column in [
+        "final_outcome_bucket",
+        "outcome_confidence",
+        "ambiguity_flags",
+        "manual_review_required",
+        "manual_review_reason",
+        "manual_adjustments_applied",
+        "manual_outcome_status",
+        "manual_outcome_term",
+    ]:
         result[column] = result["_normalized_student_id"].map(mapped[column]) if column in mapped.columns else ""
 
     bucket = result["final_outcome_bucket"].fillna("").astype(str)
@@ -5967,6 +5987,17 @@ def _summary_with_known_cohorts(summary: pd.DataFrame) -> pd.DataFrame:
         else 999999
         for graduated, code_value, label_value in zip(work["_graduated_flag"], graduation_code, graduation_label)
     ]
+    manual_status = work.get("manual_outcome_status", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
+    manual_term = work.get("manual_outcome_term", pd.Series("", index=work.index)).fillna("").astype(str).str.strip()
+    fallback_manual_term = work.get(
+        "last_observed_org_term_code",
+        work.get("last_observed_org_term", pd.Series("", index=work.index)),
+    ).fillna("").astype(str).str.strip()
+    effective_manual_term = manual_term.where(manual_term.ne(""), fallback_manual_term)
+    work["_manual_outcome_sort"] = [
+        sort_term_code(parse_term_code(term_value)[0]) if status_value and term_value else 999999
+        for status_value, term_value in zip(manual_status, effective_manual_term)
+    ]
 
     return (
         work.sort_values(["student_id", "_cohort_term_sort", "_cohort_term_code"], na_position="last")
@@ -5975,45 +6006,31 @@ def _summary_with_known_cohorts(summary: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _roster_presence_by_checkpoint(longitudinal: pd.DataFrame) -> Tuple[Dict[int, set[str]], int]:
+def _latest_roster_checkpoint_sort(longitudinal: pd.DataFrame) -> int:
     if longitudinal.empty or "student_id" not in longitudinal.columns:
-        return {}, 0
+        return 0
 
     frame = longitudinal.copy()
     frame["student_id"] = frame["student_id"].fillna("").astype(str).str.strip()
     frame = frame.loc[frame["student_id"].ne("")].copy()
     if frame.empty:
-        return {}, 0
+        return 0
 
     if "observed_term_sort" in frame.columns:
         frame["_checkpoint_sort"] = coerce_numeric(frame["observed_term_sort"])
     elif "term_code" in frame.columns:
         frame["_checkpoint_sort"] = frame["term_code"].map(sort_term_code)
     else:
-        return {}, 0
+        return 0
     frame = frame.loc[frame["_checkpoint_sort"].notna() & frame["_checkpoint_sort"].lt(999999)].copy()
     if frame.empty:
-        return {}, 0
+        return 0
 
     roster_present = boolish_series(frame.get("roster_present", pd.Series(False, index=frame.index)))
     present = frame.loc[roster_present].copy()
     if present.empty:
-        return {}, 0
-
-    presence = {
-        int(term_sort): set(group["student_id"].tolist())
-        for term_sort, group in present.groupby("_checkpoint_sort", dropna=False)
-        if pd.notna(term_sort)
-    }
-    return presence, int(present["_checkpoint_sort"].dropna().max())
-
-
-def _students_observed_at_or_after(presence_by_term: Dict[int, set[str]], checkpoint_sort: int, latest_roster_sort: int) -> set[str]:
-    retained: set[str] = set()
-    for term_sort, student_ids in presence_by_term.items():
-        if checkpoint_sort <= int(term_sort) <= latest_roster_sort:
-            retained.update(student_ids)
-    return retained
+        return 0
+    return int(present["_checkpoint_sort"].dropna().max())
 
 
 def build_cohort_status_over_time(
@@ -6030,9 +6047,12 @@ def build_cohort_status_over_time(
     if cohort_summary.empty:
         return pd.DataFrame(columns=schema_columns)
 
-    presence_by_term, max_measurable_sort = _roster_presence_by_checkpoint(longitudinal)
+    max_measurable_sort = _latest_roster_checkpoint_sort(longitudinal)
     rows: List[dict] = []
-    measurement_basis = "Roster presence at or after the checkpoint through the latest input roster; graduation requires confirmed evidence."
+    measurement_basis = (
+        "Nine-category checkpoint outcome from roster status and later roster presence; "
+        "explicit graduation evidence is required, then dated manual corrections override."
+    )
 
     for (cohort_code, cohort_term, cohort_sort), cohort in cohort_summary.groupby(
         ["_cohort_term_code", "_cohort_term", "_cohort_term_sort"],
@@ -6054,25 +6074,13 @@ def build_cohort_status_over_time(
                 continue
             checkpoint_term = term_label_from_code(checkpoint_code)
 
-            if offset == 0:
-                status_counts = {"Retained": cohort_size, "Graduated": 0, "Not Retained": 0}
-            else:
-                graduated_ids = set(
-                    cohort.loc[coerce_numeric(cohort["_graduation_sort"]).le(checkpoint_sort), "student_id"]
-                    .fillna("")
-                    .astype(str)
-                    .str.strip()
-                    .replace("", pd.NA)
-                    .dropna()
-                    .tolist()
-                )
-                retained_ids = (_students_observed_at_or_after(presence_by_term, checkpoint_sort, max_measurable_sort) & cohort_ids) - graduated_ids
-                not_retained_ids = cohort_ids - graduated_ids - retained_ids
-                status_counts = {
-                    "Retained": len(retained_ids),
-                    "Graduated": len(graduated_ids),
-                    "Not Retained": len(not_retained_ids),
-                }
+            status_counts = checkpoint_outcome_counts(
+                cohort,
+                longitudinal,
+                checkpoint_sort,
+                max_measurable_sort,
+                baseline=offset == 0,
+            )
 
             for status in COHORT_STATUS_ORDER:
                 count = int(status_counts.get(status, 0))

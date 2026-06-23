@@ -314,6 +314,10 @@ def test_decision_registries_convert_to_canonical_adjustments() -> None:
         "Dropped",
         "Early Alumni",
     ]
+    assert outcome_adjustments.loc[outcome_adjustments["field_to_override"].eq("final_outcome_bucket"), "original_value"].tolist() == [
+        "Fall 2025",
+        "Spring 2026",
+    ]
 
 
 def test_roster_exclusion_registry_converts_to_roster_corrections() -> None:
