@@ -9,9 +9,8 @@ PERSISTENCE_OUTCOME_ORDER = [
     "Active",
     "Early Alumni",
     "Inactive/Suspended",
-    "Resigned",
+    "Dropped/Resigned",
     "Revoked",
-    "Dropped",
     "Transfer",
     "Unknown",
     "Graduated",
@@ -32,11 +31,11 @@ def persistence_outcome_from_status(value: object) -> str:
     if upper in {"I", "INACTIVE", "S", "SUSPENDED", "INACTIVE/SUSPENDED"}:
         return "Inactive/Suspended"
     if upper in {"RS", "RESIGNED"} or "RESIGN" in upper:
-        return "Resigned"
+        return "Dropped/Resigned"
     if upper in {"RV", "REVOKED"} or "REVOK" in upper:
         return "Revoked"
     if upper in {"D", "DROPPED"} or "DROP" in upper or "WITHDRAW" in upper:
-        return "Dropped"
+        return "Dropped/Resigned"
     if upper in {"T", "TRANSFER", "TRANSFERRED", "TRANSFERRED / LEFT INSTITUTION"} or "TRANSFER" in upper:
         return "Transfer"
     if upper in {"G", "GRAD", "GRADUATED", "GRADUATED CONFIRMED"}:

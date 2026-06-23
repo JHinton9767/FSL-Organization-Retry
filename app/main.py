@@ -275,7 +275,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     cohort_options = persistence_cohort_options(summary)
 
     _persistence_header()
-    st.caption("This view tracks organization join-term cohorts across nine roster-aligned outcomes, with dated manual corrections applied after roster evidence.")
+    st.caption("This view tracks organization join-term cohorts across eight roster-aligned outcomes, with dated manual corrections applied after roster evidence.")
 
     if not cohort_options:
         st.warning("No organization join-term cohorts were available for the persistence and graduation view.")

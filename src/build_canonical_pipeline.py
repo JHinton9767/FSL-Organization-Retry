@@ -6050,7 +6050,7 @@ def build_cohort_status_over_time(
     max_measurable_sort = _latest_roster_checkpoint_sort(longitudinal)
     rows: List[dict] = []
     measurement_basis = (
-        "Nine-category checkpoint outcome from roster status and later roster presence; "
+        "Eight-category checkpoint outcome from roster status and later roster presence; "
         "explicit graduation evidence is required, then dated manual corrections override."
     )
 

@@ -201,7 +201,7 @@ def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_
     assert not table["Milestone"].eq("5 Year").any()
 
 
-def test_build_persistence_dashboard_uses_nine_roster_categories_then_manual_override() -> None:
+def test_build_persistence_dashboard_uses_eight_roster_categories_then_manual_override() -> None:
     student_ids = [f"A0000000{index}" for index in range(1, 10)]
     summary = pd.DataFrame(
         {
@@ -246,11 +246,11 @@ def test_build_persistence_dashboard_uses_nine_roster_categories_then_manual_ove
         "Active",
         "Early Alumni",
         "Inactive/Suspended",
-        "Resigned",
+        "Dropped/Resigned",
         "Revoked",
-        "Dropped",
         "Transfer",
         "Unknown",
         "Graduated",
     ]:
-        assert four_year[f"{outcome} Count"] == 1
+        expected = 2 if outcome == "Dropped/Resigned" else 1
+        assert four_year[f"{outcome} Count"] == expected
