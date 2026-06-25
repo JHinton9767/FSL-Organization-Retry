@@ -89,7 +89,7 @@ from app.metrics_engine import (
 from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
 from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
-from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
 
 st.set_page_config(
@@ -112,6 +112,7 @@ CURRENT_ACTIVE_DIMENSION_OVERRIDES = {
     "active_membership_group": "current_active_membership_group",
 }
 PERSISTENCE_DEFAULT_DISTINCTION = "ALL"
+MANUAL_OUTCOME_OPTIONS = PERSISTENCE_OUTCOME_ORDER
 FILTER_LIST_STATE_KEYS = [
     "chapters",
     "chapter_groups",
@@ -1874,11 +1875,20 @@ def _render_manual_corrections_editor(bundle) -> None:
         with evidence_filters[4]:
             chapter_filter = st.multiselect("Chapter", options=_unique_text_options(review_queue, "chapter"))
 
+        normalized_outcome_bucket = review_queue.get(
+            "outcome_bucket",
+            pd.Series("", index=review_queue.index, dtype="object"),
+        ).fillna("").astype(str).str.strip()
+        review_queue["outcome_bucket"] = normalized_outcome_bucket.where(
+            normalized_outcome_bucket.eq(""),
+            normalized_outcome_bucket.map(persistence_outcome_from_status),
+        )
+
         issue_filters = st.columns(4)
         with issue_filters[0]:
             issue_filter = st.multiselect("Issue type", options=_unique_text_options(review_queue, "issue_type"))
         with issue_filters[1]:
-            outcome_filter = st.multiselect("Outcome bucket", options=_unique_text_options(review_queue, "outcome_bucket"))
+            outcome_filter = st.multiselect("Outcome bucket", options=MANUAL_OUTCOME_OPTIONS)
         with issue_filters[2]:
             priority_filter = st.multiselect("Priority", options=_unique_text_options(review_queue, "priority"))
         with issue_filters[3]:
@@ -1992,11 +2002,11 @@ def _render_manual_corrections_editor(bundle) -> None:
 
         button_disabled = len(selected_review_keys) == 0
         st.caption("Batch outcome buttons")
-        quick_statuses = ["Early Alumni", "Inactive", "Dropped", "Resigned", "Revoked", "Suspended", "Transfer", "Unknown", "Graduated"]
+        quick_statuses = MANUAL_OUTCOME_OPTIONS
         quick_status_cols = st.columns(len(quick_statuses))
         for index, status in enumerate(quick_statuses):
             with quick_status_cols[index]:
-                if st.button(status, use_container_width=True, key=f"batch_status_{status.lower()}", disabled=button_disabled):
+                if st.button(status, use_container_width=True, key=f"batch_status_{safe_slug(status)}", disabled=button_disabled):
                     _apply_batch_status(status)
 
         batch_action_cols = st.columns(3)
@@ -2054,13 +2064,20 @@ def _render_manual_corrections_editor(bundle) -> None:
 
     with correction_tab:
         st.subheader("Saved decision registries")
+        outcome_overrides_display = outcome_overrides.copy()
+        if not outcome_overrides_display.empty and "final_status" in outcome_overrides_display.columns:
+            saved_status = outcome_overrides_display["final_status"].fillna("").astype(str).str.strip()
+            outcome_overrides_display["final_status"] = saved_status.where(
+                saved_status.eq(""),
+                saved_status.map(persistence_outcome_from_status),
+            )
         registry_cols = st.columns(3)
         with registry_cols[0]:
             st.metric("Graduation evidence", f"{len(graduation_evidence):,}")
             st.dataframe(graduation_evidence, use_container_width=True, hide_index=True, height=220)
         with registry_cols[1]:
             st.metric("Outcome overrides", f"{len(outcome_overrides):,}")
-            st.dataframe(outcome_overrides, use_container_width=True, hide_index=True, height=220)
+            st.dataframe(outcome_overrides_display, use_container_width=True, hide_index=True, height=220)
         with registry_cols[2]:
             st.metric("Roster exclusions", f"{len(roster_exclusions):,}")
             st.dataframe(roster_exclusions, use_container_width=True, hide_index=True, height=220)
@@ -2070,6 +2087,11 @@ def _render_manual_corrections_editor(bundle) -> None:
             if column not in editor_frame.columns:
                 editor_frame[column] = ""
         editor_frame = editor_frame[MANUAL_ROSTER_CORRECTION_COLUMNS]
+        saved_final_status = editor_frame["final_status"].fillna("").astype(str).str.strip()
+        editor_frame["final_status"] = saved_final_status.where(
+            saved_final_status.eq(""),
+            saved_final_status.map(persistence_outcome_from_status),
+        )
         with st.expander("Graduated alumni batch", expanded=False):
             batch_defaults = st.columns(2)
             with batch_defaults[0]:
@@ -2195,7 +2217,10 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "organization_name": st.column_config.TextColumn("Organization Name"),
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
                     "final_status_term": st.column_config.TextColumn("Final Status Term"),
-                    "final_status": st.column_config.TextColumn("Final Status"),
+                    "final_status": st.column_config.SelectboxColumn(
+                        "Final Status",
+                        options=["", *MANUAL_OUTCOME_OPTIONS],
+                    ),
                     "exclude_from_roster_calculations": st.column_config.CheckboxColumn(
                         "Exclude From Roster Calculations",
                         help=(

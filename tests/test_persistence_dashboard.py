@@ -1,6 +1,24 @@
 import pandas as pd
 
 from app.analysis import build_persistence_dashboard, filter_persistence_population, persistence_cohort_options
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
+
+
+def test_manual_outcome_labels_match_persistence_buckets() -> None:
+    assert PERSISTENCE_OUTCOME_ORDER == [
+        "Active",
+        "Early Alumni",
+        "Inactive/Suspended",
+        "Dropped/Resigned",
+        "Revoked",
+        "Transfer",
+        "Unknown",
+        "Graduated",
+    ]
+    assert persistence_outcome_from_status("Inactive") == "Inactive/Suspended"
+    assert persistence_outcome_from_status("Suspended") == "Inactive/Suspended"
+    assert persistence_outcome_from_status("Dropped") == "Dropped/Resigned"
+    assert persistence_outcome_from_status("Resigned") == "Dropped/Resigned"
 
 
 def test_filter_persistence_population_supports_council_and_org_type_distinctions() -> None:
