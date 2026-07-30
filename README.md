@@ -93,6 +93,19 @@ py run_canonical_pipeline.py --config config\local_paths.yaml
 
 After the canonical bundle exists, use the application for review, filtering, exports, chapter health, advisor queues, and audit tables.
 
+To build a semester-by-semester chapter presence list for reviewing possible chapter kicks / returns, run:
+
+```powershell
+$env:UV_CACHE_DIR = ".uv-cache"
+uv run --no-sync python scripts\build_chapter_semester_inventory.py --config config\local_paths.yaml
+```
+
+This writes these lightweight review files next to the canonical `roster_term.csv`:
+
+- `chapter_semester_inventory.csv` lists every observed chapter alphabetically within each semester, with valid-Banner-ID roster counts and status counts.
+- `chapter_semester_matrix.csv` lists one row per chapter and one column per semester, with blanks showing terms where that chapter was not present.
+- `chapter_lifecycle_review_template.csv` summarizes first/last seen terms and possible gaps, with blank kicked/returned/note columns for review.
+
 ## Helper manual-correction workflow
 
 For people who only need to make manual roster corrections, use the double-click launcher:
