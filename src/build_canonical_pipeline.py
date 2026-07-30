@@ -66,7 +66,13 @@ from src.build_master_roster import (
     should_upgrade_to_new_member_status,
 )
 from src.path_config import load_path_config, validate_path_config
-from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, checkpoint_outcome_counts
+from src.persistence_outcomes import (
+    CHAPTER_KICKED_OUTCOME,
+    PERSISTENCE_OUTCOME_ORDER,
+    chapter_kicked_at_checkpoint,
+    checkpoint_outcome_counts,
+    persistence_outcome_from_status,
+)
 from src.shared_utils import (
     apply_chapter_mapping_overrides,
     bucket_30_hours,
@@ -184,6 +190,7 @@ OUTCOME_RETAINED_PERSISTED = "Retained / Persisted"
 OUTCOME_NOT_RETAINED = "Not Retained / Disappeared"
 OUTCOME_TRANSFERRED_LEFT = "Transferred / Left Institution"
 OUTCOME_INACTIVE_EXIT = "Inactive / Resigned / Suspended / Revoked"
+OUTCOME_CHAPTER_KICKED = CHAPTER_KICKED_OUTCOME
 OUTCOME_UNKNOWN_REVIEW = "Unknown / Manual Review Required"
 OUTCOME_SOURCE_PROBLEM = "Roster Problem / Source Problem"
 ROSTER_STATUS_EARLY_ALUMNI = "Early Alumni"
@@ -195,6 +202,7 @@ FINAL_OUTCOME_BUCKETS = [
     OUTCOME_NOT_RETAINED,
     OUTCOME_TRANSFERRED_LEFT,
     OUTCOME_INACTIVE_EXIT,
+    OUTCOME_CHAPTER_KICKED,
     OUTCOME_UNKNOWN_REVIEW,
     OUTCOME_SOURCE_PROBLEM,
 ]
@@ -273,6 +281,7 @@ INPUT_GROUP_OUTCOME_BUCKET_COLUMNS = [
     "not_retained_disappeared_count",
     "inactive_resigned_suspended_revoked_count",
     "transferred_left_count",
+    "chapter_kicked_count",
     "unknown_manual_review_count",
     "source_problem_count",
     "graduation_rate_conservative",
@@ -4717,6 +4726,8 @@ def _outcome_bucket_from_manual_value(value: object) -> str:
         return OUTCOME_GRADUATED_CONFIRMED
     if upper in {"T", "TRANSFER", "TRANSFERRED"} or "TRANSFER" in upper or "LEFT INSTITUTION" in upper:
         return OUTCOME_TRANSFERRED_LEFT
+    if upper in {"CHAPTER KICKED", OUTCOME_CHAPTER_KICKED.upper()} or ("CHAPTER" in upper and "KICK" in upper):
+        return OUTCOME_CHAPTER_KICKED
     if any(token in upper for token in ["INACTIVE", "RESIGN", "SUSPEND", "REVOK", "DROP", "REMOVE", "WITHDRAW", "ALUMNI", "EARLY ALUM"]):
         return OUTCOME_INACTIVE_EXIT
     if "ACTIVE" in upper or "CURRENT" in upper or "NEW MEMBER" in upper:
@@ -4808,6 +4819,17 @@ def build_student_longitudinal_tracking(
             active_adjustments["student_id"],
         ).map(normalize_banner_id)
 
+    roster_coverage = app.loc[app["source_type"].eq("roster") & app["_has_term"]].copy()
+    latest_loaded_roster_sort = 0
+    chapter_roster_terms: Dict[str, list[int]] = {}
+    if not roster_coverage.empty:
+        latest_loaded_roster_sort = int(coerce_numeric(roster_coverage["_term_sort"]).dropna().max())
+        roster_coverage["_chapter_key"] = chapter_key_series(roster_coverage["chapter"])
+        chapter_roster_terms = {
+            key: sorted({int(value) for value in coerce_numeric(group["_term_sort"]).dropna().tolist() if int(value) < 999999})
+            for key, group in roster_coverage.loc[roster_coverage["_chapter_key"].ne("")].groupby("_chapter_key", dropna=False)
+        }
+
     rows: List[dict] = []
     for normalized_id, group in app.groupby("_normalized_student_id", dropna=False, sort=False):
         ordered = group.sort_values(["_term_sort", "source_type", "source_file", "source_sheet"], na_position="last")
@@ -4821,6 +4843,7 @@ def build_student_longitudinal_tracking(
         last_roster_code = _last_non_blank(roster_rows.sort_values("_term_sort")["term_code"].tolist()) if not roster_rows.empty else ""
         first_grade_code = _first_non_blank(grade_rows.sort_values("_term_sort")["term_code"].tolist()) if not grade_rows.empty else ""
         last_grade_code = _last_non_blank(grade_rows.sort_values("_term_sort")["term_code"].tolist()) if not grade_rows.empty else ""
+        latest_known_status = _last_non_blank(ordered["normalized_status"].tolist())
 
         graduation_source = ""
         graduation_term = ""
@@ -4881,6 +4904,23 @@ def build_student_longitudinal_tracking(
                     manual_org = manual_chapter
                     manual_applied.append(_clean_display(getattr(manual, "adjustment_id", "")))
 
+        latest_known_org = manual_org or _last_non_blank(ordered["organization"].tolist())
+        latest_known_chapter = manual_chapter or _last_non_blank(ordered["chapter"].tolist())
+        current_active_flag = _clean_display(summary_row.get("current_active_flag", ""))
+        auto_chapter_kicked = (
+            not manual_outcome_bucket
+            and not explicit_grad
+            and current_active_flag.strip().lower() != "yes"
+            and persistence_outcome_from_status(latest_known_status) in {"Active", "Unknown"}
+            and chapter_kicked_at_checkpoint(
+                chapter_roster_terms,
+                latest_known_chapter,
+                sort_term_code(last_roster_code),
+                latest_loaded_roster_sort,
+                latest_loaded_roster_sort,
+            )
+        )
+
         row = {
             "student_id": _first_non_blank(ordered["student_id"].tolist()),
             "normalized_student_id": normalized_id,
@@ -4904,13 +4944,13 @@ def build_student_longitudinal_tracking(
             "source_files_seen": _unique_join(ordered["source_file"].tolist()),
             "source_sheets_seen": _unique_join(ordered["source_sheet"].tolist()),
             "statuses_seen": _unique_join(ordered["normalized_status"].tolist()),
-            "latest_known_status": _last_non_blank(ordered["normalized_status"].tolist()),
-            "latest_known_org": manual_org or _last_non_blank(ordered["organization"].tolist()),
-            "latest_known_chapter": manual_chapter or _last_non_blank(ordered["chapter"].tolist()),
+            "latest_known_status": latest_known_status,
+            "latest_known_org": latest_known_org,
+            "latest_known_chapter": latest_known_chapter,
             "explicit_graduation_evidence": "Yes" if explicit_grad else "No",
             "graduation_evidence_source": graduation_source,
             "graduation_term": graduation_term,
-            "current_active_flag": _clean_display(summary_row.get("current_active_flag", "")),
+            "current_active_flag": current_active_flag,
             "current_active_roster_term_code": _clean_display(summary_row.get("current_active_roster_term_code", "")),
             "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
             "manual_outcome_bucket": manual_outcome_bucket,
@@ -4919,6 +4959,21 @@ def build_student_longitudinal_tracking(
             "manual_outcome_term": manual_outcome_term,
         }
         bucket, confidence, flags, review_reason = classify_student_outcome(pd.Series(row))
+        if auto_chapter_kicked and bucket in {
+            OUTCOME_STILL_ACTIVE,
+            OUTCOME_RETAINED_PERSISTED,
+            OUTCOME_NOT_RETAINED,
+            OUTCOME_UNKNOWN_REVIEW,
+            OUTCOME_SOURCE_PROBLEM,
+        }:
+            bucket = OUTCOME_CHAPTER_KICKED
+            confidence = "medium"
+            flags = "; ".join(filter(None, [flags, "chapter_kicked_inferred_from_roster_gap"]))
+            review_reason = ""
+            row["graduation_evidence_source"] = (
+                row["graduation_evidence_source"]
+                or "Chapter roster disappeared before the latest loaded roster term; no later explicit student outcome was observed."
+            )
         row.update(
             {
                 "final_outcome_bucket": bucket,
@@ -4957,7 +5012,7 @@ def apply_tracking_outcomes_to_summary(summary: pd.DataFrame, tracking: pd.DataF
     bucket = result["final_outcome_bucket"].fillna("").astype(str)
     grad = bucket.eq(OUTCOME_GRADUATED_CONFIRMED)
     active = bucket.eq(OUTCOME_STILL_ACTIVE)
-    non_grad_resolved = bucket.isin([OUTCOME_TRANSFERRED_LEFT, OUTCOME_INACTIVE_EXIT])
+    non_grad_resolved = bucket.isin([OUTCOME_TRANSFERRED_LEFT, OUTCOME_INACTIVE_EXIT, OUTCOME_CHAPTER_KICKED])
     unknown = bucket.isin([OUTCOME_RETAINED_PERSISTED, OUTCOME_NOT_RETAINED, OUTCOME_UNKNOWN_REVIEW, OUTCOME_SOURCE_PROBLEM, ""])
     resolved = grad | non_grad_resolved
 
@@ -4974,6 +5029,9 @@ def apply_tracking_outcomes_to_summary(summary: pd.DataFrame, tracking: pd.DataF
     result["resolved_outcome_excluded_flag"] = (~resolved).map(lambda value: "Yes" if value else "No")
     result["resolved_outcome_exclusion_reason"] = result["latest_outcome_bucket"].where(~resolved, "")
     result["graduation_evidence_confirmed"] = grad.map(lambda value: "Yes" if value else "No")
+    result["roster_disappeared_unknown_flag"] = result["latest_outcome_bucket"].isin(
+        [ROSTER_DISAPPEARED_UNKNOWN, OUTCOME_CHAPTER_KICKED]
+    ).map(lambda value: "Yes" if value else "No")
     result["graduated_eventual"] = grad.map(lambda value: "Yes" if value else "No")
     measurable_4 = result.get("graduated_4yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
     measurable_5 = result.get("graduated_5yr_measurable", pd.Series("", index=result.index)).fillna("").astype(str).eq("Yes")
@@ -5004,6 +5062,7 @@ def build_input_group_outcome_buckets(appearances: pd.DataFrame, tracking: pd.Da
         not_retained = int(counts.get(OUTCOME_NOT_RETAINED, 0))
         inactive = int(counts.get(OUTCOME_INACTIVE_EXIT, 0))
         transferred = int(counts.get(OUTCOME_TRANSFERRED_LEFT, 0))
+        chapter_kicked = int(counts.get(OUTCOME_CHAPTER_KICKED, 0))
         unknown = int(counts.get(OUTCOME_UNKNOWN_REVIEW, 0))
         source_problem = int(counts.get(OUTCOME_SOURCE_PROBLEM, 0))
         denominator_conservative = total
@@ -5024,6 +5083,7 @@ def build_input_group_outcome_buckets(appearances: pd.DataFrame, tracking: pd.Da
                 "not_retained_disappeared_count": not_retained,
                 "inactive_resigned_suspended_revoked_count": inactive,
                 "transferred_left_count": transferred,
+                "chapter_kicked_count": chapter_kicked,
                 "unknown_manual_review_count": unknown,
                 "source_problem_count": source_problem,
                 "graduation_rate_conservative": (graduated / denominator_conservative) if denominator_conservative else pd.NA,
@@ -5205,6 +5265,7 @@ def validate_outcome_tracking(tracking: pd.DataFrame, input_groups: pd.DataFrame
                     "not_retained_disappeared_count",
                     "inactive_resigned_suspended_revoked_count",
                     "transferred_left_count",
+                    "chapter_kicked_count",
                     "unknown_manual_review_count",
                     "source_problem_count",
                 ]
@@ -5230,6 +5291,8 @@ def explicit_exit_reason(latest_outcome_bucket: str, latest_status_bucket: str) 
         return "Dropped/Resigned/Revoked/Inactive"
     if outcome in {"Graduated", "Suspended", "Transfer"}:
         return outcome
+    if outcome == OUTCOME_CHAPTER_KICKED:
+        return OUTCOME_CHAPTER_KICKED
     return ""
 
 
@@ -5249,6 +5312,24 @@ def should_mark_roster_disappeared_unknown(
     if last_seen_sort is None:
         return False
     return int(last_seen_sort) < int(latest_roster_term_sort)
+
+
+def should_mark_chapter_kicked(
+    latest_outcome_bucket: str,
+    latest_chapter: str,
+    student_last_roster_sort: object,
+    chapter_roster_terms: Dict[str, list[int]],
+    latest_roster_term_sort: int,
+) -> bool:
+    if clean_text(latest_outcome_bucket) not in UNRESOLVED_OUTCOMES:
+        return False
+    return chapter_kicked_at_checkpoint(
+        chapter_roster_terms,
+        latest_chapter,
+        student_last_roster_sort,
+        latest_roster_term_sort,
+        latest_roster_term_sort,
+    )
 
 
 def build_student_summary(
@@ -5289,11 +5370,16 @@ def build_student_summary(
         )
     latest_roster_term_sort = 0
     chapter_last_roster_sort: Dict[str, int] = {}
+    chapter_roster_terms: Dict[str, list[int]] = {}
     if not roster_present_master.empty:
         roster_term_sorts = coerce_numeric(roster_present_master["observed_term_sort"]).dropna()
         if not roster_term_sorts.empty:
             latest_roster_term_sort = int(roster_term_sorts.max())
         roster_present_master["_chapter_key"] = chapter_key_series(roster_present_master["chapter"])
+        chapter_roster_terms = {
+            key: sorted({int(value) for value in coerce_numeric(group["observed_term_sort"]).dropna().tolist() if int(value) < 999999})
+            for key, group in roster_present_master.loc[roster_present_master["_chapter_key"].ne("")].groupby("_chapter_key", dropna=False)
+        }
         chapter_last_roster_sort = (
             roster_present_master.loc[roster_present_master["_chapter_key"].ne("")]
             .groupby("_chapter_key", dropna=False)["observed_term_sort"]
@@ -5362,15 +5448,16 @@ def build_student_summary(
             graduation_status_corrected = True
             graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
         latest_chapter_value = clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else ""
-        if should_mark_roster_disappeared_unknown(
+        student_last_roster_sort = coerce_numeric(roster_rows["observed_term_sort"]).dropna().iloc[-1] if not roster_rows.empty and not coerce_numeric(roster_rows["observed_term_sort"]).dropna().empty else 999999
+        if should_mark_chapter_kicked(
             latest_outcome_bucket,
             latest_chapter_value,
-            current_active_chapter_keys,
-            chapter_last_roster_sort,
+            student_last_roster_sort,
+            chapter_roster_terms,
             latest_roster_term_sort,
         ):
-            latest_outcome_bucket = ROSTER_DISAPPEARED_UNKNOWN
-            evidence_source = "Chapter roster disappeared from the currently active chapter list; no later explicit student outcome was observed."
+            latest_outcome_bucket = OUTCOME_CHAPTER_KICKED
+            evidence_source = "Chapter roster disappeared before the latest loaded roster term; no later explicit student outcome was observed."
         if latest_outcome_bucket in UNRESOLVED_OUTCOMES:
             outcome_exceptions.append(
                 {
@@ -5379,9 +5466,7 @@ def build_student_summary(
                     "student_id": student_id,
                     "term_code": clean_text(ordered["term_code"].iloc[-1]),
                     "details": (
-                        "Chapter roster disappeared from the active chapter universe; student remains unresolved."
-                        if latest_outcome_bucket == ROSTER_DISAPPEARED_UNKNOWN
-                        else "No explicit outcome evidence; student remains unresolved."
+                        "No explicit outcome evidence; student remains unresolved."
                     ),
                 }
             )
@@ -5501,7 +5586,7 @@ def build_student_summary(
                 "graduation_evidence_confirmed": "Yes" if graduation_confirmed else "No",
                 "graduation_status_corrected_flag": "Yes" if graduation_status_corrected else "No",
                 "graduation_status_correction_reason": graduation_status_correction_reason,
-                "roster_disappeared_unknown_flag": "Yes" if latest_outcome_bucket == ROSTER_DISAPPEARED_UNKNOWN else "No",
+                "roster_disappeared_unknown_flag": "Yes" if latest_outcome_bucket in {ROSTER_DISAPPEARED_UNKNOWN, OUTCOME_CHAPTER_KICKED} else "No",
                 "latest_roster_status_bucket": latest_status_bucket or "Unknown",
                 "initial_roster_status_bucket": clean_text(roster_rows["org_status_bucket"].iloc[0]) if not roster_rows.empty else "Unknown",
                 "active_flag": "Yes" if latest_status_bucket in {"Active", "New Member"} else "No",
@@ -6050,7 +6135,7 @@ def build_cohort_status_over_time(
     max_measurable_sort = _latest_roster_checkpoint_sort(longitudinal)
     rows: List[dict] = []
     measurement_basis = (
-        "Eight-category checkpoint outcome from roster status and later roster presence; "
+        "Nine-category checkpoint outcome from roster status and later roster presence; "
         "explicit graduation evidence is required, then dated manual corrections override."
     )
 

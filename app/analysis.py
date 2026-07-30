@@ -16,7 +16,7 @@ from app.metrics_engine import (
 )
 from app.models import MetricDefinition
 from app.status_framework import outcome_population_summary, resolved_outcomes_only_frame, student_count
-from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, checkpoint_outcome_counts
+from src.persistence_outcomes import CHAPTER_KICKED_OUTCOME, PERSISTENCE_OUTCOME_ORDER, checkpoint_outcome_counts
 
 
 DIMENSION_LABELS = {
@@ -46,6 +46,7 @@ PERSISTENCE_TOTAL_RE = re.compile(r"^(?:fall\s+)?((?:19|20)\d{2})\s+total$", re.
 CHAPTER_HEALTH_OUTCOME_ORDER = [
     "Graduated",
     "Resolved Non-Graduate Exit",
+    CHAPTER_KICKED_OUTCOME,
     "Still Active",
     "Roster Dissapeared/Unknown",
     "Other Unknown",
@@ -289,7 +290,7 @@ def _roster_disappeared_mask(frame: pd.DataFrame) -> pd.Series:
     if "latest_outcome_bucket" in frame.columns:
         masks.append(
             _frame_text_series(frame, "latest_outcome_bucket").str.contains(
-                r"roster\s+dis+ap+eared|roster\s+dis+appeared|roster\s+dissapeared",
+                r"roster\s+dis+ap+eared|roster\s+dis+appeared|roster\s+dissapeared|chapter\s+kicked",
                 case=False,
                 regex=True,
                 na=False,
@@ -486,6 +487,7 @@ def _chapter_risk_flags(
     first_year_gpa_students = int(kpis.get("first_year_gpa_students", 0) or 0)
     unknown_total = int(kpis.get("unknown_outcomes", 0) or 0)
     roster_disappeared_total = int(kpis.get("roster_disappeared_unknown", 0) or 0)
+    chapter_kicked_total = int(kpis.get("chapter_kicked", 0) or 0)
     current_active_total = int(kpis.get("current_active_members", 0) or 0)
 
     unknown_share = _share(unknown_total, entry_total)
@@ -528,7 +530,7 @@ def _chapter_risk_flags(
                 {
                     "Severity": "High",
                     "Flag": "Roster disappeared unknowns",
-                    "Details": f"{roster_disappeared_total:,} students ({roster_disappeared_share:.1%} of entry students) became unresolved after chapter roster coverage disappeared.",
+                    "Details": f"{roster_disappeared_total:,} students ({roster_disappeared_share:.1%} of entry students) remain unresolved after chapter roster coverage disappeared.",
                 }
             )
         elif roster_disappeared_total >= 2 or roster_disappeared_share >= 0.08:
@@ -539,6 +541,14 @@ def _chapter_risk_flags(
                     "Details": f"{roster_disappeared_total:,} students are in the Roster Dissapeared/Unknown bucket for this chapter.",
                 }
             )
+    if chapter_kicked_total:
+        rows.append(
+            {
+                "Severity": "Monitor",
+                "Flag": "Chapter kicked outcome",
+                "Details": f"{chapter_kicked_total:,} entry student(s) are classified as Chapter Kicked from roster coverage gaps.",
+            }
+        )
 
     if resolved_total >= 10 and pd.notna(resolved_grad_rate):
         if float(resolved_grad_rate) < 0.45:
@@ -1268,21 +1278,23 @@ def build_persistence_dashboard(
         return empty
 
     long_frame["student_id"] = long_frame["student_id"].fillna("").astype(str).str.strip()
+    coverage_frame = long_frame.copy()
     long_frame = long_frame.loc[long_frame["student_id"].isin(student_ids)].copy()
     if long_frame.empty:
         empty["meta"]["note"] = "No longitudinal rows matched the selected cohort."
         return empty
 
-    if "observed_term_sort" not in long_frame.columns:
-        if "observed_term" in long_frame.columns:
-            long_frame["observed_term_sort"] = long_frame["observed_term"].map(lambda value: parse_term_label(value)["sort_value"])
-        else:
-            long_frame["observed_term_sort"] = 999999
+    for frame in [coverage_frame, long_frame]:
+        if "observed_term_sort" not in frame.columns:
+            if "observed_term" in frame.columns:
+                frame["observed_term_sort"] = frame["observed_term"].map(lambda value: parse_term_label(value)["sort_value"])
+            else:
+                frame["observed_term_sort"] = 999999
 
-    presence_mask = _truthy_series(long_frame.get("roster_present"), long_frame.index)
-    presence_rows = long_frame.loc[presence_mask].copy()
+    presence_mask = _truthy_series(coverage_frame.get("roster_present"), coverage_frame.index)
+    presence_rows = coverage_frame.loc[presence_mask].copy()
     if presence_rows.empty:
-        empty["meta"]["note"] = "No roster-present longitudinal rows matched the selected cohort."
+        empty["meta"]["note"] = "No roster-present longitudinal rows were available for milestone calculations."
         return empty
 
     max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
@@ -1338,7 +1350,7 @@ def build_persistence_dashboard(
         milestone_label = _milestone_label(display_label, offset)
         milestone_counts = checkpoint_outcome_counts(
             cohort_work,
-            long_frame,
+            coverage_frame,
             target_sort,
             max_term_sort,
             presence_start_sort=target_retention_sort,
@@ -1462,7 +1474,13 @@ def build_chapter_health_dashboard(
     graduated_total = _truthy_student_count(entry_students, "is_graduated")
     active_outcome_total = _truthy_student_count(entry_students, "is_active_outcome")
     unknown_total = _truthy_student_count(entry_students, "is_unknown_outcome")
-    roster_disappeared_total = _truthy_student_count(entry_students, "roster_disappeared_unknown_flag")
+    chapter_kicked_total = student_count(
+        entry_students.loc[_frame_text_series(entry_students, "latest_outcome_bucket").eq(CHAPTER_KICKED_OUTCOME)]
+    )
+    roster_disappeared_total = max(
+        _truthy_student_count(entry_students, "roster_disappeared_unknown_flag") - chapter_kicked_total,
+        0,
+    )
     resolved_non_grad_total = _truthy_student_count(entry_students, "is_known_non_graduate_exit")
 
     measurable_next_fall = _truthy_filter(entry_students, "retained_next_fall_measurable")
@@ -1492,6 +1510,7 @@ def build_chapter_health_dashboard(
         "still_active_outcomes": active_outcome_total,
         "unknown_outcomes": unknown_total,
         "roster_disappeared_unknown": roster_disappeared_total,
+        "chapter_kicked": chapter_kicked_total,
         "resolved_non_graduate_exits": resolved_non_grad_total,
     }
 
@@ -1542,11 +1561,13 @@ def build_chapter_health_dashboard(
                 }
             )
 
+    resolved_non_grad_without_kicked = max(resolved_non_grad_total - chapter_kicked_total, 0)
     other_unknown_total = max(unknown_total - roster_disappeared_total, 0)
     other_unmapped_total = max(
         entry_total
         - graduated_total
-        - resolved_non_grad_total
+        - resolved_non_grad_without_kicked
+        - chapter_kicked_total
         - active_outcome_total
         - roster_disappeared_total
         - other_unknown_total,
@@ -1555,7 +1576,8 @@ def build_chapter_health_dashboard(
     outcome_breakdown = pd.DataFrame(
         [
             {"Outcome": "Graduated", "Students": graduated_total},
-            {"Outcome": "Resolved Non-Graduate Exit", "Students": resolved_non_grad_total},
+            {"Outcome": "Resolved Non-Graduate Exit", "Students": resolved_non_grad_without_kicked},
+            {"Outcome": CHAPTER_KICKED_OUTCOME, "Students": chapter_kicked_total},
             {"Outcome": "Still Active", "Students": active_outcome_total},
             {"Outcome": "Roster Dissapeared/Unknown", "Students": roster_disappeared_total},
             {"Outcome": "Other Unknown", "Students": other_unknown_total},
@@ -1580,7 +1602,13 @@ def build_chapter_health_dashboard(
             cohort_graduated_n = _truthy_student_count(frame, "is_graduated")
             cohort_active_n = _truthy_student_count(frame, "is_active_outcome")
             cohort_unknown_n = _truthy_student_count(frame, "is_unknown_outcome")
-            cohort_roster_disappeared_n = _truthy_student_count(frame, "roster_disappeared_unknown_flag")
+            cohort_chapter_kicked_n = student_count(
+                frame.loc[_frame_text_series(frame, "latest_outcome_bucket").eq(CHAPTER_KICKED_OUTCOME)]
+            )
+            cohort_roster_disappeared_n = max(
+                _truthy_student_count(frame, "roster_disappeared_unknown_flag") - cohort_chapter_kicked_n,
+                0,
+            )
             cohort_measurable = _truthy_filter(frame, "retained_next_fall_measurable")
             cohort_measurable_n = student_count(cohort_measurable)
             cohort_retained_n = _truthy_student_count(cohort_measurable, "retained_next_fall")
@@ -1594,6 +1622,7 @@ def build_chapter_health_dashboard(
                     "Graduated Students": cohort_graduated_n,
                     "Still Active": cohort_active_n,
                     "Unknown": cohort_unknown_n,
+                    CHAPTER_KICKED_OUTCOME: cohort_chapter_kicked_n,
                     "Roster Dissapeared/Unknown": cohort_roster_disappeared_n,
                     "Resolved Graduation Rate": (cohort_graduated_n / cohort_resolved_n) if cohort_resolved_n else np.nan,
                     "Full Population Graduation Rate": (cohort_graduated_n / cohort_students) if cohort_students else np.nan,
@@ -1624,9 +1653,10 @@ def build_chapter_health_dashboard(
 
     review_students = pd.DataFrame()
     if not entry_students.empty:
+        chapter_kicked_mask = _frame_text_series(entry_students, "latest_outcome_bucket").eq(CHAPTER_KICKED_OUTCOME)
         review_mask = (
             _truthy_series(entry_students.get("is_unknown_outcome"), entry_students.index)
-            | _truthy_series(entry_students.get("roster_disappeared_unknown_flag"), entry_students.index)
+            | (_truthy_series(entry_students.get("roster_disappeared_unknown_flag"), entry_students.index) & ~chapter_kicked_mask)
         )
         review_students = _selected_table(
             entry_students.loc[review_mask].copy(),
@@ -1645,6 +1675,8 @@ def build_chapter_health_dashboard(
     note_parts = []
     if current_active_total == 0:
         note_parts.append("This chapter is not currently active on the latest roster.")
+    if chapter_kicked_total:
+        note_parts.append(f"{chapter_kicked_total:,} entry student(s) are classified as Chapter Kicked.")
     if roster_disappeared_total:
         note_parts.append(f"{roster_disappeared_total:,} entry student(s) are currently classified as Roster Dissapeared/Unknown.")
     if not note_parts:

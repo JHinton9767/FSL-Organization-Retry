@@ -1,6 +1,7 @@
 import pandas as pd
 
 from src.build_canonical_pipeline import (
+    OUTCOME_CHAPTER_KICKED,
     OUTCOME_GRADUATED_CONFIRMED,
     OUTCOME_INACTIVE_EXIT,
     OUTCOME_NOT_RETAINED,
@@ -244,6 +245,41 @@ def test_manual_transfer_code_creates_transfer_outcome() -> None:
 
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_TRANSFERRED_LEFT
     assert tracking.loc[0, "manual_outcome_status"] == "T"
+
+
+def test_manual_chapter_kicked_creates_resolved_chapter_kicked_outcome() -> None:
+    appearances = build_student_source_appearances(_roster("A00000013"), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    manual = pd.DataFrame(
+        {
+            "adjustment_id": ["manual-kicked"],
+            "student_id": ["A00000013"],
+            "normalized_student_id": ["A00000013"],
+            "field_to_override": ["final_outcome_bucket"],
+            "adjusted_value": ["Chapter Kicked"],
+            "active": ["Yes"],
+        }
+    )
+
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000013"), manual)
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_CHAPTER_KICKED
+    assert tracking.loc[0, "manual_outcome_status"] == "Chapter Kicked"
+
+
+def test_tracking_marks_chapter_kicked_when_chapter_rosters_stop() -> None:
+    alpha = _roster("A00000014", status="Active", chapter="Alpha")
+    beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021["term_code"] = "2021FA"
+    beta_2021["term_label"] = "Fall 2021"
+    roster = pd.concat([alpha, beta_2020, beta_2021], ignore_index=True)
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000014"), pd.DataFrame())
+    alpha_tracking = tracking.loc[tracking["normalized_student_id"].eq("A00000014")].iloc[0]
+
+    assert alpha_tracking["final_outcome_bucket"] == OUTCOME_CHAPTER_KICKED
+    assert alpha_tracking["manual_review_required"] == "No"
 
 
 def test_input_group_buckets_count_unique_students_once() -> None:

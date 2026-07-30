@@ -345,7 +345,7 @@ Recent app additions:
 
 - `Persistence & Graduation` includes a graduation-rate denominator toggle for the selected cohort/council view, with `Resolved Outcomes Only`, `Full Population`, and side-by-side tables.
 - `Retention & GPA` separates next-fall organization retention from academic continuation and shows GPA trend coverage so incomplete grade files stay visible.
-- `Roster Disappearances` isolates students in the `Roster Dissapeared/Unknown` bucket, with chapter rollups, join-term timing, last-observed timing, and downloadable student detail.
+- `Roster Disappearances` isolates students whose chapter roster coverage disappeared, including resolved `Chapter Kicked` outcomes and unresolved `Roster Dissapeared/Unknown` cases, with chapter rollups, join-term timing, last-observed timing, and downloadable student detail.
 - `Chapter Health` keeps roster-disappeared unknowns visible beside resolved graduation rates so disappeared rosters do not silently become graduations.
 
 Current active membership is now defined separately from historical activeness:

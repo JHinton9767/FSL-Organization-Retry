@@ -276,7 +276,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
     cohort_options = persistence_cohort_options(summary)
 
     _persistence_header()
-    st.caption("This view tracks organization join-term cohorts across eight roster-aligned outcomes, with dated manual corrections applied after roster evidence.")
+    st.caption("This view tracks organization join-term cohorts across nine roster-aligned outcomes, with dated manual corrections applied after roster evidence.")
 
     if not cohort_options:
         st.warning("No organization join-term cohorts were available for the persistence and graduation view.")
@@ -478,8 +478,8 @@ def _render_chapter_health_dashboard(bundle) -> None:
     with second_kpi_cols[2]:
         st.metric("Avg first-year GPA", _display_metric_value(kpis["average_first_year_gpa"], "decimal"))
     with second_kpi_cols[3]:
-        unresolved_label = f"{int(kpis['roster_disappeared_unknown']):,} / {int(kpis['unknown_outcomes']):,}"
-        st.metric("Roster disappeared / unknown", unresolved_label)
+        unresolved_label = f"{int(kpis.get('chapter_kicked', 0)):,} kicked / {int(kpis['roster_disappeared_unknown']):,} unresolved"
+        st.metric("Chapter kicked / unresolved", unresolved_label)
 
     risk_flags = dashboard["risk_flags"]
     st.subheader("Chapter risk flags")
@@ -587,7 +587,7 @@ def _render_chapter_health_dashboard(bundle) -> None:
         st.subheader("Students needing review")
         review_students = dashboard["review_students"]
         if review_students.empty:
-            st.caption("No unresolved or roster-disappeared entry students are currently flagged for this chapter.")
+            st.caption("No unresolved entry students are currently flagged for this chapter.")
         else:
             st.dataframe(
                 _format_display_frame(review_students, percent_cols=["Data Completeness Rate"]),
@@ -601,14 +601,14 @@ def _render_roster_disappearance_tracker(bundle) -> None:
 
     st.title("Roster Disappearance Tracker")
     st.caption(
-        "This view isolates students classified as `Roster Dissapeared/Unknown`: they are not treated as graduates, "
-        "but their chapter roster coverage appears to have disappeared before a confirmed final outcome was found."
+        "This view isolates students whose chapter roster coverage disappeared. `Chapter Kicked` is a resolved non-graduate category; "
+        "`Roster Dissapeared/Unknown` remains unresolved."
     )
 
     base_tracker = build_roster_disappearance_tracker(summary)
     base_students = base_tracker["student_table"]
     if base_students.empty:
-        st.success("No roster-disappeared unknown students were found in the current canonical summary.")
+        st.success("No roster-disappeared or chapter-kicked students were found in the current canonical summary.")
         return
 
     filter_cols = st.columns(3)

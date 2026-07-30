@@ -12,6 +12,7 @@ def test_manual_outcome_labels_match_persistence_buckets() -> None:
         "Dropped/Resigned",
         "Revoked",
         "Transfer",
+        "Chapter Kicked",
         "Unknown",
         "Graduated",
     ]
@@ -19,6 +20,7 @@ def test_manual_outcome_labels_match_persistence_buckets() -> None:
     assert persistence_outcome_from_status("Suspended") == "Inactive/Suspended"
     assert persistence_outcome_from_status("Dropped") == "Dropped/Resigned"
     assert persistence_outcome_from_status("Resigned") == "Dropped/Resigned"
+    assert persistence_outcome_from_status("Chapter Kicked") == "Chapter Kicked"
 
 
 def test_filter_persistence_population_supports_council_and_org_type_distinctions() -> None:
@@ -219,28 +221,28 @@ def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_
     assert not table["Milestone"].eq("5 Year").any()
 
 
-def test_build_persistence_dashboard_uses_eight_roster_categories_then_manual_override() -> None:
-    student_ids = [f"A0000000{index}" for index in range(1, 10)]
+def test_build_persistence_dashboard_uses_roster_categories_then_manual_override() -> None:
+    student_ids = [f"A000000{index:02d}" for index in range(1, 11)]
     summary = pd.DataFrame(
         {
             "student_id": student_ids,
-            "join_term": ["Fall 2020"] * 9,
-            "council": ["IFC"] * 9,
-            "org_type": ["Fraternity"] * 9,
-            "is_graduated": [False] * 8 + [True],
-            "graduation_term": [""] * 8 + ["Fall 2024"],
-            "graduation_term_code": [""] * 8 + ["2024FA"],
-            "manual_outcome_status": ["", "", "", "", "", "Dropped", "", "", ""],
-            "manual_outcome_term": ["", "", "", "", "", "Fall 2024", "", "", ""],
-            "last_observed_org_term_code": ["2024FA"] * 9,
+            "join_term": ["Fall 2020"] * 10,
+            "council": ["IFC"] * 10,
+            "org_type": ["Fraternity"] * 10,
+            "is_graduated": [False] * 9 + [True],
+            "graduation_term": [""] * 9 + ["Fall 2024"],
+            "graduation_term_code": [""] * 9 + ["2024FA"],
+            "manual_outcome_status": ["", "", "", "", "", "Dropped", "", "", "Chapter Kicked", ""],
+            "manual_outcome_term": ["", "", "", "", "", "Fall 2024", "", "", "Fall 2024", ""],
+            "last_observed_org_term_code": ["2024FA"] * 10,
         }
     )
     longitudinal = pd.DataFrame(
         {
             "student_id": student_ids,
-            "observed_term": ["Fall 2024"] * 9,
-            "observed_term_sort": [20243] * 9,
-            "roster_present": ["Yes"] * 9,
+            "observed_term": ["Fall 2024"] * 10,
+            "observed_term_sort": [20243] * 10,
+            "roster_present": ["Yes"] * 10,
             "org_status_bucket": [
                 "Active",
                 "Early Alumni",
@@ -250,6 +252,7 @@ def test_build_persistence_dashboard_uses_eight_roster_categories_then_manual_ov
                 "Active",
                 "Transfer",
                 "H",
+                "Active",
                 "Graduated",
             ],
         }
@@ -267,6 +270,7 @@ def test_build_persistence_dashboard_uses_eight_roster_categories_then_manual_ov
         "Dropped/Resigned",
         "Revoked",
         "Transfer",
+        "Chapter Kicked",
         "Unknown",
         "Graduated",
     ]:

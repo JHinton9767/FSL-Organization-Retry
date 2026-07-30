@@ -356,6 +356,7 @@
       "not_retained_disappeared_count",
       "inactive_resigned_suspended_revoked_count",
       "transferred_left_count",
+      "chapter_kicked_count",
       "unknown_manual_review_count",
       "source_problem_count",
       "graduation_rate_conservative",

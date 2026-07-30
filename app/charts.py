@@ -23,6 +23,7 @@ PERSISTENCE_OUTCOME_COLORS = {
     "Dropped/Resigned": "#7C3AED",
     "Revoked": "#9F1D35",
     "Transfer": "#0B6C94",
+    "Chapter Kicked": "#475569",
     "Unknown": "#B7B4AA",
     "Graduated": "#2F7D4A",
 }

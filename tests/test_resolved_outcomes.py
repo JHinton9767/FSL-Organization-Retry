@@ -183,6 +183,24 @@ def test_roster_disappeared_unknown_is_not_treated_as_still_active() -> None:
     assert bool(result.loc[0, "is_active_outcome"]) is False
 
 
+def test_chapter_kicked_is_resolved_non_graduate_exit() -> None:
+    frame = pd.DataFrame(
+        {
+            "student_id": ["1"],
+            "latest_outcome_bucket": ["Chapter Kicked"],
+            "latest_roster_status_bucket": ["Active"],
+            "active_flag": ["Yes"],
+            "outcome_evidence_source": ["Chapter roster disappeared before the latest loaded roster term."],
+        }
+    )
+
+    result = build_outcome_resolution_fields(frame, {})
+
+    assert result.loc[0, "outcome_resolution_group"] == "Resolved Non-Graduate Exit"
+    assert bool(result.loc[0, "is_known_non_graduate_exit"]) is True
+    assert bool(result.loc[0, "is_unknown_outcome"]) is False
+
+
 def test_group_summary_can_rank_on_resolved_only_denominator() -> None:
     frame = pd.DataFrame(
         {
