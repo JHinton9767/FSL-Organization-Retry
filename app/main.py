@@ -74,7 +74,7 @@ from app.config_loader import (
     prepare_manual_corrections_workspace,
     save_manual_roster_corrections,
 )
-from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes
+from app.exports import dataframe_to_csv_bytes, figure_to_html_bytes, figure_to_png_bytes, frames_to_excel_bytes
 from app.io_utils import parse_term_label, safe_slug
 from app.data_loader import discover_dataset_versions, load_analysis_bundle, load_manual_corrections_bundle, scan_preloaded_sources, select_default_dataset
 from app.metrics_engine import (
@@ -90,6 +90,11 @@ from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
 from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
+from src.chapter_semester_inventory import (
+    INVENTORY_COLUMNS,
+    LIFECYCLE_COLUMNS,
+    build_chapter_semester_tables,
+)
 
 
 st.set_page_config(
@@ -728,6 +733,150 @@ def _render_roster_disappearance_tracker(bundle) -> None:
                 mime="text/csv",
                 use_container_width=True,
             )
+
+
+def _chapter_inventory_frames(roster: pd.DataFrame) -> tuple[object, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    source = roster.fillna("").astype(str) if roster is not None and not roster.empty else pd.DataFrame()
+    tables = build_chapter_semester_tables(source.to_dict(orient="records"))
+    inventory = pd.DataFrame(tables.inventory_rows, columns=INVENTORY_COLUMNS)
+    matrix = pd.DataFrame(tables.matrix_rows, columns=tables.matrix_columns or ["chapter"])
+    lifecycle = pd.DataFrame(tables.lifecycle_rows, columns=LIFECYCLE_COLUMNS)
+    return tables, inventory, matrix, lifecycle
+
+
+def _render_chapter_semester_inventory(bundle) -> None:
+    roster = getattr(bundle, "tables", {}).get("roster_term", pd.DataFrame())
+
+    st.title("Chapter Semester Inventory")
+    st.caption(
+        "Roster presence by semester and chapter. Counts use valid Banner IDs only and skip Advisor / Greek Staff positions."
+    )
+
+    if roster is None or roster.empty:
+        st.warning("No roster_term rows were loaded in this dataset. Run the canonical pipeline after pointing config/local_paths.yaml at the roster source folders.")
+        return
+
+    tables, inventory, matrix, lifecycle = _chapter_inventory_frames(roster)
+
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        st.metric("Semesters", f"{int(tables.term_count):,}")
+    with metric_cols[1]:
+        st.metric("Chapters", f"{int(tables.chapter_count):,}")
+    with metric_cols[2]:
+        st.metric("Chapter-semester rows", f"{len(inventory):,}")
+    with metric_cols[3]:
+        st.metric("Valid roster rows used", f"{int(tables.valid_rows):,}")
+    with metric_cols[4]:
+        skipped = int(tables.invalid_id_rows) + int(tables.excluded_position_rows)
+        st.metric("Rows skipped", f"{skipped:,}")
+
+    if inventory.empty:
+        st.warning("Roster files were loaded, but no rows had a valid Banner ID and usable chapter/term values.")
+        return
+
+    term_options = (
+        inventory[["term_label", "term_sort"]]
+        .drop_duplicates()
+        .sort_values(["term_sort", "term_label"])["term_label"]
+        .tolist()
+    )
+    chapter_options = sorted(
+        inventory["chapter"].fillna("").astype(str).replace("", pd.NA).dropna().unique().tolist(),
+        key=lambda value: value.casefold(),
+    )
+
+    filter_cols = st.columns([1.4, 1.6, 1])
+    with filter_cols[0]:
+        selected_terms = st.multiselect("Semesters", options=term_options, key="chapter_inventory_terms")
+    with filter_cols[1]:
+        selected_chapters = st.multiselect("Chapters", options=chapter_options, key="chapter_inventory_chapters")
+    with filter_cols[2]:
+        gaps_only = st.checkbox("Lifecycle gaps only", key="chapter_inventory_gaps_only")
+
+    inventory_view = inventory.copy()
+    if selected_terms:
+        inventory_view = inventory_view.loc[inventory_view["term_label"].isin(selected_terms)].copy()
+    if selected_chapters:
+        inventory_view = inventory_view.loc[inventory_view["chapter"].isin(selected_chapters)].copy()
+
+    matrix_view = matrix.copy()
+    if selected_chapters and "chapter" in matrix_view.columns:
+        matrix_view = matrix_view.loc[matrix_view["chapter"].isin(selected_chapters)].copy()
+    if selected_terms:
+        visible_matrix_columns = ["chapter"] + [term for term in selected_terms if term in matrix_view.columns]
+        matrix_view = matrix_view[[column for column in visible_matrix_columns if column in matrix_view.columns]].copy()
+
+    lifecycle_view = lifecycle.copy()
+    if selected_chapters:
+        lifecycle_view = lifecycle_view.loc[lifecycle_view["chapter"].isin(selected_chapters)].copy()
+    if gaps_only and "possible_gap_count_between_first_and_last_seen" in lifecycle_view.columns:
+        gap_count = pd.to_numeric(lifecycle_view["possible_gap_count_between_first_and_last_seen"], errors="coerce").fillna(0)
+        lifecycle_view = lifecycle_view.loc[gap_count.gt(0)].copy()
+
+    qa_frame = pd.DataFrame(
+        [
+            {"Check": "Source roster rows read", "Rows": int(tables.source_rows)},
+            {"Check": "Rows used after strict Banner ID / position filters", "Rows": int(tables.valid_rows)},
+            {"Check": "Rows skipped for invalid or missing Banner ID", "Rows": int(tables.invalid_id_rows)},
+            {"Check": "Rows skipped for Advisor / Greek Staff position", "Rows": int(tables.excluded_position_rows)},
+            {"Check": "Chapter-semester rows built", "Rows": len(inventory)},
+            {"Check": "Chapters represented", "Rows": int(tables.chapter_count)},
+            {"Check": "Semesters represented", "Rows": int(tables.term_count)},
+        ]
+    )
+
+    st.download_button(
+        "Download chapter inventory workbook",
+        data=frames_to_excel_bytes(
+            {
+                "Semester Inventory": inventory,
+                "Matrix": matrix,
+                "Lifecycle Review": lifecycle,
+                "Source QA": qa_frame,
+            }
+        ),
+        file_name="chapter_semester_inventory_review.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
+
+    semester_tab, matrix_tab, lifecycle_tab, qa_tab = st.tabs(
+        ["Semester List", "Matrix", "Lifecycle Review", "Source QA"]
+    )
+
+    with semester_tab:
+        st.dataframe(inventory_view, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download semester list CSV",
+            data=dataframe_to_csv_bytes(inventory_view),
+            file_name="chapter_semester_inventory.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with matrix_tab:
+        st.dataframe(matrix_view, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download matrix CSV",
+            data=dataframe_to_csv_bytes(matrix_view),
+            file_name="chapter_semester_matrix.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with lifecycle_tab:
+        st.dataframe(lifecycle_view, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download lifecycle review CSV",
+            data=dataframe_to_csv_bytes(lifecycle_view),
+            file_name="chapter_lifecycle_review_template.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with qa_tab:
+        st.dataframe(qa_frame, use_container_width=True, hide_index=True)
 
 
 def _render_retention_and_gpa_dashboard(bundle) -> None:
@@ -3422,8 +3571,8 @@ def main() -> None:
         st.session_state["min_n"],
         population_label=outcome_population_view,
     ) if st.session_state["control_field"] != "None" else pd.DataFrame()
-    landing_tab, retention_gpa_tab, chapter_health_tab, roster_disappearance_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
-        ["Persistence & Graduation", "Retention & GPA", "Chapter Health", "Roster Disappearances", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
+    landing_tab, retention_gpa_tab, chapter_inventory_tab, chapter_health_tab, roster_disappearance_tab, advisor_help_tab, corrections_tab, advanced_tab = st.tabs(
+        ["Persistence & Graduation", "Retention & GPA", "Chapter Inventory", "Chapter Health", "Roster Disappearances", "Advisor Help", "Manual Corrections", "Advanced Analytics"]
     )
 
     with landing_tab:
@@ -3431,6 +3580,9 @@ def main() -> None:
 
     with retention_gpa_tab:
         _render_retention_and_gpa_dashboard(bundle)
+
+    with chapter_inventory_tab:
+        _render_chapter_semester_inventory(bundle)
 
     with chapter_health_tab:
         _render_chapter_health_dashboard(bundle)

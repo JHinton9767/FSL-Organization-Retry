@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from scripts.build_chapter_semester_inventory import build_chapter_semester_exports
+from src.chapter_semester_inventory import build_chapter_semester_exports, build_chapter_semester_tables
 
 
 ROSTER_COLUMNS = [
@@ -139,3 +139,33 @@ def test_chapter_lifecycle_template_flags_gaps_between_seen_terms(tmp_path: Path
     assert matrix["Alpha Chapter"]["Fall 2024"] == "1"
     assert matrix["Alpha Chapter"]["Spring 2025"] == ""
     assert matrix["Alpha Chapter"]["Fall 2025"] == "1"
+
+
+def test_chapter_semester_tables_can_be_built_from_loaded_roster_rows() -> None:
+    tables = build_chapter_semester_tables(
+        [
+            {
+                "student_id": "A00000001",
+                "term_code": "2025SP",
+                "term_label": "Spring 2025",
+                "chapter": "Alpha Chapter",
+                "org_status_bucket": "A",
+                "org_position_raw": "Member",
+            },
+            {
+                "student_id": "A00000002",
+                "term_code": "2025SP",
+                "term_label": "Spring 2025",
+                "chapter": "Alpha Chapter",
+                "org_status_bucket": "N",
+                "org_position_raw": "Member",
+            },
+        ]
+    )
+
+    assert tables.source_rows == 2
+    assert tables.valid_rows == 2
+    assert tables.term_count == 1
+    assert tables.chapter_count == 1
+    assert tables.inventory_rows[0]["chapter"] == "Alpha Chapter"
+    assert tables.inventory_rows[0]["active_or_new_count"] == 2
