@@ -157,6 +157,14 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
             continue
+        customdata_columns = ["Count"]
+        hovertemplate = f"{outcome}<br>%{{x}}<br>%{{y:.1%}}<br>n=%{{customdata[0]:,}}<extra></extra>"
+        if "Denominator" in subset.columns:
+            customdata_columns.append("Denominator")
+            hovertemplate = (
+                f"{outcome}<br>%{{x}}<br>%{{y:.1%}}"
+                "<br>n=%{customdata[0]:,}<br>measured=%{customdata[1]:,}<extra></extra>"
+            )
         fig.add_bar(
             x=subset["Milestone"],
             y=subset["Share"],
@@ -165,8 +173,8 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
             text=subset["Label"],
             textposition="inside",
             textfont={"color": "#2F2E2A" if outcome in PERSISTENCE_DARK_TEXT_OUTCOMES else "white", "size": 11},
-            customdata=subset[["Count"]],
-            hovertemplate=f"{outcome}<br>%{{x}}<br>%{{y:.1%}}<br>n=%{{customdata[0]:,}}<extra></extra>",
+            customdata=subset[customdata_columns],
+            hovertemplate=hovertemplate,
         )
 
     fig.update_layout(

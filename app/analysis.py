@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from typing import Dict, Iterable, Optional
 
 import numpy as np
@@ -42,7 +41,7 @@ DIMENSION_LABELS = {
 }
 
 PERSISTENCE_COUNCIL_OPTIONS = ["ALL", "IFC", "PHC", "NPHC", "MGC", "FRA", "SOR"]
-PERSISTENCE_TOTAL_RE = re.compile(r"^(?:fall\s+)?((?:19|20)\d{2})\s+total$", re.IGNORECASE)
+PERSISTENCE_ALL_TIME_LABEL = "All Time"
 CHAPTER_HEALTH_OUTCOME_ORDER = [
     "Graduated",
     "Resolved Non-Graduate Exit",
@@ -1051,32 +1050,13 @@ def chapter_health_options(summary: pd.DataFrame, longitudinal: pd.DataFrame) ->
     return sorted(values, key=lambda value: value.lower())
 
 
-def _persistence_total_start_year(value: object) -> int | None:
-    match = PERSISTENCE_TOTAL_RE.fullmatch(str(value).strip())
-    return int(match.group(1)) if match else None
-
-
-def _persistence_academic_year_start(term_label: object) -> int | None:
-    parsed = parse_term_label(term_label)
-    year = parsed["year"]
-    season = str(parsed["season"]).lower()
-    if year is None:
-        return None
-    if season == "fall":
-        return int(year)
-    if season == "spring":
-        return int(year) - 1
-    return None
-
-
-def _persistence_academic_year_label(start_year: int) -> str:
-    return f"Fall {int(start_year)} Total"
+def _is_persistence_all_time(value: object) -> bool:
+    return str(value or "").strip().casefold() == PERSISTENCE_ALL_TIME_LABEL.casefold()
 
 
 def persistence_cohort_sort_key(value: str) -> tuple[int, int, int, str]:
-    total_year = _persistence_total_start_year(value)
-    if total_year is not None:
-        return (total_year, 2, total_year + 1, str(value).strip().lower())
+    if _is_persistence_all_time(value):
+        return (-9999, -1, -9999, PERSISTENCE_ALL_TIME_LABEL.casefold())
 
     parsed = parse_term_label(value)
     year = parsed["year"]
@@ -1091,11 +1071,27 @@ def persistence_cohort_sort_key(value: str) -> tuple[int, int, int, str]:
 
 
 def persistence_checkpoint_sort_value(cohort_label: str, offset: int) -> int | None:
-    total_year = _persistence_total_start_year(cohort_label)
-    if total_year is not None:
-        return int(parse_term_label(f"Spring {int(total_year) + int(offset) + 1}")["sort_value"])
+    if _is_persistence_all_time(cohort_label):
+        return None
 
     parsed = parse_term_label(cohort_label)
+    year = parsed["year"]
+    season = str(parsed["season"]).lower()
+    season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
+    season_code = season_codes.get(season, "")
+    if year is None or not season_code:
+        return None
+    return int(parse_term_label(f"{int(year) + int(offset)}{season_code}")["sort_value"])
+
+
+def _personal_persistence_checkpoint_sort(row: pd.Series, offset: int) -> int | None:
+    term_value = ""
+    for column in ["join_term_code", "join_term"]:
+        value = row.get(column, "")
+        if str(value).strip():
+            term_value = value
+            break
+    parsed = parse_term_label(term_value)
     year = parsed["year"]
     season = str(parsed["season"]).lower()
     season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
@@ -1124,31 +1120,7 @@ def persistence_cohort_options(summary: pd.DataFrame) -> list[str]:
         .tolist()
     )
     sorted_terms = sorted(values, key=persistence_cohort_sort_key)
-    academic_year_seasons: dict[int, set[str]] = {}
-    for value in sorted_terms:
-        parsed = parse_term_label(value)
-        season = str(parsed["season"]).lower()
-        start_year = _persistence_academic_year_start(value)
-        if start_year is None or season not in {"fall", "spring"}:
-            continue
-        academic_year_seasons.setdefault(start_year, set()).add(season)
-
-    options: list[str] = []
-    emitted_totals: set[int] = set()
-    for value in sorted_terms:
-        options.append(value)
-        parsed = parse_term_label(value)
-        season = str(parsed["season"]).lower()
-        start_year = _persistence_academic_year_start(value)
-        if (
-            season == "spring"
-            and start_year is not None
-            and {"fall", "spring"}.issubset(academic_year_seasons.get(start_year, set()))
-            and start_year not in emitted_totals
-        ):
-            options.append(_persistence_academic_year_label(start_year))
-            emitted_totals.add(start_year)
-    return options
+    return [PERSISTENCE_ALL_TIME_LABEL, *sorted_terms] if sorted_terms else []
 
 
 def _normalized_council_series(frame: pd.DataFrame) -> pd.Series:
@@ -1180,14 +1152,8 @@ def filter_persistence_population(summary: pd.DataFrame, cohort_term: str, disti
 
     cohort_terms = _persistence_cohort_series(summary)
     cohort_label = str(cohort_term).strip()
-    total_start_year = _persistence_total_start_year(cohort_label)
-    if total_start_year is not None:
-        academic_year_start = cohort_terms.map(_persistence_academic_year_start)
-        season_series = cohort_terms.map(lambda value: str(parse_term_label(value)["season"]).lower())
-        frame = summary.loc[
-            academic_year_start.eq(total_start_year)
-            & season_series.isin({"fall", "spring"})
-        ].copy()
+    if _is_persistence_all_time(cohort_label):
+        frame = summary.loc[cohort_terms.fillna("").astype(str).str.strip().ne("")].copy()
     else:
         frame = summary.loc[cohort_terms.eq(cohort_label)].copy()
     if frame.empty:
@@ -1230,6 +1196,7 @@ def build_persistence_dashboard(
             columns=[
                 "Milestone",
                 "Term",
+                "Measured Students",
                 *[
                     column
                     for outcome in PERSISTENCE_OUTCOME_ORDER
@@ -1248,14 +1215,13 @@ def build_persistence_dashboard(
     if cohort.empty:
         return empty
 
-    total_start_year = _persistence_total_start_year(cohort_term)
+    is_all_time_cohort = _is_persistence_all_time(cohort_term)
     cohort_term_parts = parse_term_label(cohort_term)
     base_year = cohort_term_parts["year"]
     base_season = str(cohort_term_parts["season"]).lower()
     season_codes = {"winter": "WI", "spring": "SP", "summer": "SU", "fall": "FA"}
     season_code = season_codes.get(base_season, "")
-    is_total_cohort = total_start_year is not None
-    if not is_total_cohort and (base_year is None or not season_code):
+    if not is_all_time_cohort and (base_year is None or not season_code):
         empty["meta"]["note"] = "The selected cohort term could not be parsed into milestone checkpoints."
         return empty
 
@@ -1328,13 +1294,31 @@ def build_persistence_dashboard(
     last_milestone_label = ""
 
     for offset in range(0, 7):
-        if is_total_cohort:
-            target_year = int(total_start_year) + offset
-            target_label = _persistence_academic_year_label(target_year)
-            target_sort = int(parse_term_label(f"Spring {target_year + 1}")["sort_value"])
-            target_retention_sort = int(parse_term_label(f"Fall {target_year}")["sort_value"])
-            measurable = offset == 0 or (target_sort <= max_term_sort)
-            display_label = target_label
+        if is_all_time_cohort:
+            checkpoint_sorts = cohort_work.apply(lambda row: _personal_persistence_checkpoint_sort(row, offset), axis=1)
+            checkpoint_sorts = pd.to_numeric(checkpoint_sorts, errors="coerce")
+            measurable_mask = checkpoint_sorts.notna()
+            if offset > 0:
+                measurable_mask = measurable_mask & checkpoint_sorts.le(max_term_sort)
+            measurable_cohort = cohort_work.loc[measurable_mask].copy()
+            if measurable_cohort.empty:
+                continue
+
+            display_label = PERSISTENCE_ALL_TIME_LABEL
+            milestone_counts = {status: 0 for status in PERSISTENCE_OUTCOME_ORDER}
+            measurable_cohort["_personal_checkpoint_sort"] = checkpoint_sorts.loc[measurable_mask].astype(int)
+            for target_sort, checkpoint_group in measurable_cohort.groupby("_personal_checkpoint_sort", dropna=False):
+                group_counts = checkpoint_outcome_counts(
+                    checkpoint_group.drop(columns=["_personal_checkpoint_sort"]),
+                    coverage_frame,
+                    int(target_sort),
+                    max_term_sort,
+                    presence_start_sort=int(target_sort),
+                    baseline=offset == 0,
+                )
+                for outcome, count in group_counts.items():
+                    milestone_counts[outcome] = int(milestone_counts.get(outcome, 0)) + int(count)
+            milestone_student_count = int(measurable_cohort["student_id"].nunique())
         else:
             target_year = int(base_year) + offset
             target_code = f"{target_year}{season_code}"
@@ -1343,30 +1327,33 @@ def build_persistence_dashboard(
             target_retention_sort = target_sort
             measurable = offset == 0 or (target_sort <= max_term_sort)
             display_label = str(target_term["label"])
-        if not measurable:
-            continue
+            if not measurable:
+                continue
+            milestone_counts = checkpoint_outcome_counts(
+                cohort_work,
+                coverage_frame,
+                target_sort,
+                max_term_sort,
+                presence_start_sort=target_retention_sort,
+                baseline=offset == 0,
+            )
+            milestone_student_count = student_count_total
 
-        last_milestone_label = display_label
+        milestone_name = f"{offset} Year" if offset else "Cohort Year"
+        last_milestone_label = milestone_name if is_all_time_cohort else display_label
         milestone_label = _milestone_label(display_label, offset)
-        milestone_counts = checkpoint_outcome_counts(
-            cohort_work,
-            coverage_frame,
-            target_sort,
-            max_term_sort,
-            presence_start_sort=target_retention_sort,
-            baseline=offset == 0,
-        )
         table_row: dict[str, object] = {
-            "Milestone": f"{offset} Year" if offset else "Cohort Year",
+            "Milestone": milestone_name,
             "Term": display_label,
+            "Measured Students": milestone_student_count,
         }
         for outcome in PERSISTENCE_OUTCOME_ORDER:
             count = int(milestone_counts.get(outcome, 0))
-            table_row[outcome] = (count / student_count_total) if student_count_total else np.nan
+            table_row[outcome] = (count / milestone_student_count) if milestone_student_count else np.nan
             table_row[f"{outcome} Count"] = count
         table_rows.append(table_row)
         for outcome, count in milestone_counts.items():
-            share = (count / student_count_total) if student_count_total else np.nan
+            share = (count / milestone_student_count) if milestone_student_count else np.nan
             label = ""
             if count > 0 and share >= 0.085:
                 label = f"{outcome}<br>{share:.1%}<br>(n={count:,})"
@@ -1377,6 +1364,7 @@ def build_persistence_dashboard(
                     "Outcome": outcome,
                     "Share": share,
                     "Count": count,
+                    "Denominator": milestone_student_count,
                     "Label": label,
                 }
             )
@@ -1393,9 +1381,9 @@ def build_persistence_dashboard(
             "students": student_count_total,
             "max_milestone": last_milestone_label,
             "note": (
-                "Checkpoint outcomes use roster status and later roster presence first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
-                if not is_total_cohort
-                else "Checkpoint outcomes use roster status and later roster presence across the academic year first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
+                "All Time uses each member's organization join term as their own clock. Future personal checkpoints after the latest loaded roster are not measured."
+                if is_all_time_cohort
+                else "Checkpoint outcomes use roster status and later roster presence first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
             ),
         },
     }

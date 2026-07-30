@@ -31,6 +31,7 @@ from app.analysis import (
     persistence_cohort_sort_key,
     stakeholder_summary,
     summarize_metric_by_group,
+    PERSISTENCE_ALL_TIME_LABEL,
     PERSISTENCE_COUNCIL_OPTIONS,
 )
 from app.charts import bar_chart, box_plot, histogram, line_chart, persistence_milestone_chart, scatter_chart, stacked_bar_chart
@@ -252,6 +253,8 @@ def _persistence_header() -> None:
 def _default_persistence_cohort(cohort_options: List[str], longitudinal: pd.DataFrame) -> str:
     if not cohort_options:
         return ""
+    if PERSISTENCE_ALL_TIME_LABEL in cohort_options:
+        return PERSISTENCE_ALL_TIME_LABEL
     if longitudinal.empty or "observed_term" not in longitudinal.columns:
         return cohort_options[-1]
 
@@ -339,7 +342,7 @@ def _render_persistence_and_graduation_view(bundle) -> None:
 
     if not table_frame.empty:
         st.dataframe(
-            _format_display_frame(table_frame, percent_cols=PERSISTENCE_OUTCOME_ORDER),
+            _format_display_frame(table_frame, percent_cols=PERSISTENCE_OUTCOME_ORDER, integer_cols=["Measured Students"]),
             use_container_width=True,
             hide_index=True,
         )
