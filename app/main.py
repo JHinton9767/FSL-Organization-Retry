@@ -1414,7 +1414,10 @@ def _graduation_evidence_from_corrections(corrections: pd.DataFrame, entered_by:
     result = pd.DataFrame(
         {
             "student_id": cleaned["student_id"],
-            "organization_name": cleaned["organization_name"],
+            "organization_name": cleaned["corrected_organization_name"].where(
+                cleaned["corrected_organization_name"].ne(""),
+                cleaned["organization_name"],
+            ),
             "organization_join_term": cleaned["organization_join_term"],
             "graduation_term": cleaned["final_status_term"],
             "evidence_source": "Graduated alumni list",
@@ -1457,7 +1460,7 @@ def _manual_adjustments_from_corrections(corrections: pd.DataFrame, reviewer: st
                     "adjusted_value": final_status,
                 }
             )
-        organization = str(row.get("organization_name", "") or "").strip()
+        organization = str(row.get("corrected_organization_name", "") or row.get("organization_name", "") or "").strip()
         if organization:
             rows.append(
                 {
@@ -2214,7 +2217,8 @@ def _render_manual_corrections_editor(bundle) -> None:
                     "last_name": st.column_config.TextColumn("Last Name"),
                     "first_name": st.column_config.TextColumn("First Name"),
                     "organization_join_term": st.column_config.TextColumn("Organization Join Term"),
-                    "organization_name": st.column_config.TextColumn("Organization Name"),
+                    "organization_name": st.column_config.TextColumn("Current / Wrong Organization"),
+                    "corrected_organization_name": st.column_config.TextColumn("Corrected Organization"),
                     "leaving_organization_term": st.column_config.TextColumn("Leaving Organization Term"),
                     "final_status_term": st.column_config.TextColumn("Final Status Term"),
                     "final_status": st.column_config.SelectboxColumn(

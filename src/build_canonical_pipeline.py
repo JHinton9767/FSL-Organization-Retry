@@ -3508,8 +3508,13 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
     for correction in corrections.itertuples(index=False):
         student_mask = _manual_student_mask(result, correction)
         organization_name = normalize_chapter_name(getattr(correction, "organization_name", ""))
+        corrected_organization_name = normalize_chapter_name(getattr(correction, "corrected_organization_name", ""))
+        target_organization_name = corrected_organization_name or organization_name
+        scope_by_existing_organization = bool(corrected_organization_name and organization_name)
         organization_mask = _manual_org_mask(result, organization_name)
-        matched_student_org = student_mask if organization_name else student_mask & organization_mask
+        matched_student_org = student_mask & (
+            organization_mask if scope_by_existing_organization else pd.Series(True, index=result.index, dtype="bool")
+        )
         note_text = "Applied from config/manual_roster_corrections.csv."
 
         organization_join_term = _manual_term_code(getattr(correction, "organization_join_term", ""))
@@ -3532,21 +3537,23 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
         result_term_sort = result["term_code"].map(sort_term_code)
         if leaving_organization_term and final_status_term and sort_term_code(leaving_organization_term) < sort_term_code(final_status_term):
             gap_mask = matched_student_org & result_term_sort.gt(sort_term_code(leaving_organization_term)) & result_term_sort.lt(sort_term_code(final_status_term))
-            _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked org-exit/final-status gap as Unknown.", organization_name)
+            _apply_manual_unknown_gap(result, gap_mask, "Manual correction marked org-exit/final-status gap as Unknown.", target_organization_name)
 
-        if organization_name and matched_student_org.any():
-            result.loc[matched_student_org, "chapter"] = organization_name
-            result.loc[matched_student_org, "chapter_raw"] = organization_name
+        if target_organization_name and matched_student_org.any():
+            result.loc[matched_student_org, "chapter"] = target_organization_name
+            result.loc[matched_student_org, "chapter_raw"] = target_organization_name
             result.loc[matched_student_org, "chapter_assignment_source"] = "manual_roster_correction"
             result.loc[matched_student_org, "chapter_assignment_confidence"] = "manual"
             result.loc[matched_student_org, "chapter_assignment_notes"] = note_text
 
         if organization_join_term:
             org_join_mask = student_mask & _manual_term_mask(result, organization_join_term)
+            if scope_by_existing_organization:
+                org_join_mask = org_join_mask & organization_mask
             if org_join_mask.any():
-                if organization_name:
-                    result.loc[org_join_mask, "chapter"] = organization_name
-                    result.loc[org_join_mask, "chapter_raw"] = organization_name
+                if target_organization_name:
+                    result.loc[org_join_mask, "chapter"] = target_organization_name
+                    result.loc[org_join_mask, "chapter_raw"] = target_organization_name
                 result.loc[org_join_mask, "org_status_raw"] = "New Member"
                 result.loc[org_join_mask, "org_status_bucket"] = "New Member"
                 result.loc[org_join_mask, "new_member_flag"] = "Yes"
@@ -3559,7 +3566,7 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
                         result.columns,
                         correction,
                         organization_join_term,
-                        organization_name,
+                        target_organization_name,
                         "New Member",
                         note_text,
                     )
@@ -3567,11 +3574,13 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
 
         if final_status and final_status_term:
             final_mask = student_mask & _manual_term_mask(result, final_status_term)
+            if scope_by_existing_organization:
+                final_mask = final_mask & organization_mask
             status_bucket = roster_status_bucket(final_status, "")
             if final_mask.any():
-                if organization_name:
-                    result.loc[final_mask, "chapter"] = organization_name
-                    result.loc[final_mask, "chapter_raw"] = organization_name
+                if target_organization_name:
+                    result.loc[final_mask, "chapter"] = target_organization_name
+                    result.loc[final_mask, "chapter_raw"] = target_organization_name
                 result.loc[final_mask, "org_status_raw"] = final_status
                 result.loc[final_mask, "org_status_bucket"] = status_bucket
                 result.loc[final_mask, "new_member_flag"] = "Yes" if status_bucket == "New Member" else "No"
@@ -3584,7 +3593,7 @@ def apply_manual_roster_corrections(roster: pd.DataFrame, corrections: pd.DataFr
                         result.columns,
                         correction,
                         final_status_term,
-                        organization_name,
+                        target_organization_name,
                         final_status,
                         note_text,
                     )
@@ -4568,7 +4577,7 @@ def manual_roster_corrections_to_manual_adjustments(corrections: pd.DataFrame) -
                     "adjusted_value": final_status,
                 }
             )
-        organization = _clean_display(correction.get("organization_name", ""))
+        organization = _clean_display(correction.get("corrected_organization_name", "")) or _clean_display(correction.get("organization_name", ""))
         if organization:
             rows.append(
                 {
@@ -4907,8 +4916,16 @@ def build_student_longitudinal_tracking(
         latest_known_org = manual_org or _last_non_blank(ordered["organization"].tolist())
         latest_known_chapter = manual_chapter or _last_non_blank(ordered["chapter"].tolist())
         current_active_flag = _clean_display(summary_row.get("current_active_flag", ""))
+        effective_manual_outcome_bucket = manual_outcome_bucket
+        manual_outcome_sort = sort_term_code(_manual_term_code(manual_outcome_term)) if manual_outcome_term else 999999
+        if (
+            manual_outcome_bucket == OUTCOME_CHAPTER_KICKED
+            and sort_term_code(last_roster_code) < 999999
+            and sort_term_code(last_roster_code) > manual_outcome_sort
+        ):
+            effective_manual_outcome_bucket = ""
         auto_chapter_kicked = (
-            not manual_outcome_bucket
+            not effective_manual_outcome_bucket
             and not explicit_grad
             and current_active_flag.strip().lower() != "yes"
             and persistence_outcome_from_status(latest_known_status) in {"Active", "Unknown"}
@@ -4953,7 +4970,7 @@ def build_student_longitudinal_tracking(
             "current_active_flag": current_active_flag,
             "current_active_roster_term_code": _clean_display(summary_row.get("current_active_roster_term_code", "")),
             "org_entry_cohort": _clean_display(summary_row.get("org_entry_cohort", summary_row.get("join_term", ""))),
-            "manual_outcome_bucket": manual_outcome_bucket,
+            "manual_outcome_bucket": effective_manual_outcome_bucket,
             "manual_adjustments_applied": _unique_join(manual_applied),
             "manual_outcome_status": manual_outcome_status,
             "manual_outcome_term": manual_outcome_term,

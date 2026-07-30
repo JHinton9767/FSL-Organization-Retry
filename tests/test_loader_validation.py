@@ -82,6 +82,7 @@ def test_manual_roster_corrections_use_organization_join_term_only(tmp_path) -> 
         "first_name",
         "organization_join_term",
         "organization_name",
+        "corrected_organization_name",
         "leaving_organization_term",
         "final_status_term",
         "final_status",
@@ -110,6 +111,23 @@ def test_manual_roster_corrections_accept_exclusion_action(tmp_path) -> None:
 
     assert len(loaded) == 1
     assert loaded.loc[0, "exclude_from_roster_calculations"] == "Yes"
+
+
+def test_manual_roster_corrections_accept_corrected_organization_alias(tmp_path) -> None:
+    path = tmp_path / "manual_roster_corrections.csv"
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "new chapter": ["Chi Omega"],
+        }
+    )
+
+    corrections.to_csv(path, index=False)
+    loaded = load_manual_roster_corrections(path)
+
+    assert loaded.loc[0, "organization_name"] == "Alpha Sigma Phi"
+    assert loaded.loc[0, "corrected_organization_name"] == "Chi Omega"
 
 
 def test_append_manual_roster_corrections_only_adds_new_rows(tmp_path) -> None:

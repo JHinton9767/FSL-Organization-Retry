@@ -142,3 +142,33 @@ def test_cohort_status_over_time_marks_chapter_kicked_from_roster_gap() -> None:
 
     assert int(one_year.loc["Chapter Kicked", "student_count"]) == 1
     assert int(one_year.loc["Active", "student_count"]) == 1
+
+
+def test_cohort_status_over_time_later_roster_supersedes_manual_chapter_kicked() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "join_term": ["Fall 2020"],
+            "is_graduated": [False],
+            "graduation_term_code": [""],
+            "graduation_term": [""],
+            "manual_outcome_status": ["Chapter Kicked"],
+            "manual_outcome_term": ["Fall 2020"],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000001"],
+            "term_code": ["2020FA", "2021FA"],
+            "observed_term_sort": [20203, 20213],
+            "roster_present": ["Yes", "Yes"],
+            "chapter": ["Alpha", "Beta"],
+            "org_status_bucket": ["Active", "Active"],
+        }
+    )
+
+    table = build_cohort_status_over_time(summary, longitudinal, max_years=1)
+    one_year = _status_rows(table, "Fall 2020", "1 Year")
+
+    assert int(one_year.loc["Active", "student_count"]) == 1
+    assert int(one_year.loc["Chapter Kicked", "student_count"]) == 0

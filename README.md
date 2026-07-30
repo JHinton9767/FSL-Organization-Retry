@@ -541,6 +541,7 @@ Persistent manual roster corrections:
   - `first_name`
   - `organization_join_term`
   - `organization_name`
+  - `corrected_organization_name`
   - `leaving_organization_term`
   - `final_status_term`
   - `final_status`
@@ -551,13 +552,14 @@ Manual roster correction behavior:
 1. exact `student_id` match is preferred
 2. exact `first_name` + `last_name` is used when no ID is supplied
 3. `organization_join_term` anchors the corrected organization-entry term and can create a manual New Member row
-4. `organization_name` changes the chapter assignment for matched roster rows
-5. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
-6. `final_status_term` and `final_status` can create or update the final manual status row
-7. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
-8. saving or committing correction rows in the app creates missing transcript paste-in templates under the configured `transcript_text_root/Transcripts/`
-9. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
-10. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
+4. `organization_name` can identify the existing/wrong chapter to match; if `corrected_organization_name` is blank, it keeps the older behavior and also acts as the corrected chapter
+5. `corrected_organization_name` changes the chapter assignment for matched roster rows
+6. `leaving_organization_term` and `final_status_term` mark existing roster rows between those terms as `Unknown`
+7. `final_status_term` and `final_status` can create or update the final manual status row
+8. the app can stage correction rows in memory for fast bulk cleanup, then commit them to `config/manual_roster_corrections.csv` all at once
+9. saving or committing correction rows in the app creates missing transcript paste-in templates under the configured `transcript_text_root/Transcripts/`
+10. the app shows an `x` helper column for deleting saved or staged correction rows, but the `x` column itself is not written to the CSV
+11. `exclude_from_roster_calculations` removes matching raw roster rows from canonical roster-based calculations without modifying the raw source files
 
 Roster exclusion behavior:
 

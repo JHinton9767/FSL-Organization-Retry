@@ -119,6 +119,7 @@ def checkpoint_outcome_counts(
         return {status: 0 for status in PERSISTENCE_OUTCOME_ORDER}
 
     presence_start = int(presence_start_sort if presence_start_sort is not None else checkpoint_sort)
+    student_latest_roster_sort_at_checkpoint: Dict[str, int] = {}
     roster_source = longitudinal.copy()
     if not roster_source.empty and "student_id" in roster_source.columns:
         roster_source["student_id"] = roster_source["student_id"].fillna("").astype(str).str.strip()
@@ -163,6 +164,11 @@ def checkpoint_outcome_counts(
                     .drop_duplicates(subset=["student_id"], keep="last")
                     .set_index("student_id")
                 )
+                student_latest_roster_sort_at_checkpoint = {
+                    student_id: int(term_sort)
+                    for student_id, term_sort in latest_rows["_persistence_term_sort"].dropna().items()
+                    if int(term_sort) < 999999
+                }
                 status_column = next(
                     (column for column in ["org_status_bucket", "org_status_raw"] if column in latest_rows.columns),
                     "",
@@ -207,6 +213,15 @@ def checkpoint_outcome_counts(
     manual_rows = cohort.loc[manual_status.ne("") & manual_sort.le(checkpoint_sort), ["student_id"]].copy()
     if not manual_rows.empty:
         manual_rows["manual_category"] = manual_status.loc[manual_rows.index].map(persistence_outcome_from_status)
+        manual_rows["manual_sort"] = manual_sort.loc[manual_rows.index]
+        if student_latest_roster_sort_at_checkpoint:
+            latest_roster_sort = manual_rows["student_id"].map(student_latest_roster_sort_at_checkpoint)
+            later_roster_after_chapter_kick = (
+                manual_rows["manual_category"].eq(CHAPTER_KICKED_OUTCOME)
+                & latest_roster_sort.notna()
+                & latest_roster_sort.gt(manual_rows["manual_sort"])
+            )
+            manual_rows = manual_rows.loc[~later_roster_after_chapter_kick].copy()
         manual_categories = manual_rows.drop_duplicates(subset=["student_id"], keep="last").set_index("student_id")[
             "manual_category"
         ]

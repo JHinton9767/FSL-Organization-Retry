@@ -206,6 +206,40 @@ def test_manual_roster_corrections_override_status_and_chapter() -> None:
     assert jane["new_member_flag"] == "Yes"
 
 
+def test_manual_roster_corrections_can_scope_wrong_chapter_to_corrected_chapter() -> None:
+    roster = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000001"],
+            "first_name": ["Jane", "Jane"],
+            "last_name": ["Doe", "Doe"],
+            "term_code": ["2026SP", "2026FA"],
+            "term_label": ["Spring 2026", "Fall 2026"],
+            "chapter": ["Alpha Sigma Phi", "Lambda Chi Alpha"],
+            "chapter_raw": ["Alpha Sigma Phi", "Lambda Chi Alpha"],
+            "chapter_assignment_source": ["original", "original"],
+            "chapter_assignment_confidence": ["high", "high"],
+            "chapter_assignment_notes": ["", ""],
+            "org_status_raw": ["Active", "Active"],
+            "org_status_bucket": ["Active", "Active"],
+            "new_member_flag": ["No", "No"],
+        }
+    )
+    corrections = pd.DataFrame(
+        {
+            "student_id": ["A00000001"],
+            "organization_name": ["Alpha Sigma Phi"],
+            "corrected_organization_name": ["Chi Omega"],
+        }
+    )
+
+    result = apply_manual_roster_corrections(roster, corrections)
+
+    chapters = result.set_index("term_code")["chapter"].to_dict()
+    assert chapters["2026SP"] == "Chi Omega"
+    assert chapters["2026FA"] == "Lambda Chi Alpha"
+    assert result.loc[result["chapter"].eq("Chi Omega"), "chapter_assignment_source"].iloc[0] == "manual_roster_correction"
+
+
 def test_manual_roster_corrections_mark_between_terms_unknown() -> None:
     roster = pd.DataFrame(
         {

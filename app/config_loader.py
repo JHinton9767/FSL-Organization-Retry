@@ -258,6 +258,7 @@ MANUAL_ROSTER_CORRECTION_COLUMNS = [
     "first_name",
     "organization_join_term",
     "organization_name",
+    "corrected_organization_name",
     "leaving_organization_term",
     "final_status_term",
     "final_status",
@@ -801,11 +802,14 @@ def normalize_manual_roster_corrections(frame: Optional[pd.DataFrame]) -> pd.Dat
     for column in MANUAL_ROSTER_CORRECTION_COLUMNS:
         cleaned[column] = cleaned[column].str.strip()
     cleaned["student_id"] = cleaned["student_id"].map(normalize_banner_id)
+    for column in ["organization_name", "corrected_organization_name"]:
+        cleaned[column] = cleaned[column].map(lambda value: normalize_chapter_name(normalize_text(value)))
 
     has_identity = cleaned["student_id"].ne("")
     has_action = (
         cleaned["organization_join_term"].ne("")
         | cleaned["organization_name"].ne("")
+        | cleaned["corrected_organization_name"].ne("")
         | cleaned["leaving_organization_term"].ne("")
         | cleaned["final_status_term"].ne("")
         | cleaned["final_status"].ne("")
@@ -971,7 +975,21 @@ def load_manual_roster_corrections(path: Optional[Path] = None) -> pd.DataFrame:
         "last_name": ["last_name", "last name"],
         "first_name": ["first_name", "first name"],
         "organization_join_term": ["organization_join_term", "organization join term", "org join term", "join_term", "term_code", "term code", "term_label", "term label", "term"],
-        "organization_name": ["organization_name", "organization name", "chapter_override", "chapter override", "chapter", "new chapter", "organization"],
+        "organization_name": ["organization_name", "organization name", "current_organization_name", "current organization name", "current chapter", "old chapter", "wrong chapter", "chapter", "organization"],
+        "corrected_organization_name": [
+            "corrected_organization_name",
+            "corrected organization name",
+            "corrected_chapter",
+            "corrected chapter",
+            "chapter_override",
+            "chapter override",
+            "new_chapter",
+            "new chapter",
+            "new_organization_name",
+            "new organization name",
+            "correct organization",
+            "correct chapter",
+        ],
         "leaving_organization_term": ["leaving_organization_term", "leaving organization term", "last_org_term", "last observed org term"],
         "final_status_term": ["final_status_term", "final status term", "graduation_term", "status term"],
         "final_status": ["final_status", "final status", "status_override", "status override", "status", "member status", "membership status"],
@@ -1214,6 +1232,7 @@ def manual_transcript_template(row: pd.Series) -> str:
             f"Name: {normalize_text(row.get('first_name', ''))} {normalize_text(row.get('last_name', ''))}".strip(),
             f"Organization Join Term: {normalize_text(row.get('organization_join_term', ''))}",
             f"Organization Name: {normalize_text(row.get('organization_name', ''))}",
+            f"Corrected Organization Name: {normalize_text(row.get('corrected_organization_name', ''))}",
             f"Leaving Organization Term: {normalize_text(row.get('leaving_organization_term', ''))}",
             f"Final Status Term: {normalize_text(row.get('final_status_term', ''))}",
             f"Final Status: {normalize_text(row.get('final_status', ''))}",

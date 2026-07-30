@@ -266,6 +266,34 @@ def test_manual_chapter_kicked_creates_resolved_chapter_kicked_outcome() -> None
     assert tracking.loc[0, "manual_outcome_status"] == "Chapter Kicked"
 
 
+def test_later_roster_row_can_supersede_manual_chapter_kicked_outcome() -> None:
+    alpha = _roster("A00000016", status="Active", chapter="Alpha")
+    beta = _roster("A00000016", status="Active", chapter="Beta")
+    beta["term_code"] = "2021FA"
+    beta["term_label"] = "Fall 2021"
+    appearances = build_student_source_appearances(pd.concat([alpha, beta], ignore_index=True), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    manual = pd.DataFrame(
+        {
+            "adjustment_id": ["manual-kicked"],
+            "student_id": ["A00000016"],
+            "normalized_student_id": ["A00000016"],
+            "field_to_override": ["final_outcome_bucket"],
+            "original_value": ["Fall 2020"],
+            "adjusted_value": ["Chapter Kicked"],
+            "active": ["Yes"],
+        }
+    )
+
+    tracking = build_student_longitudinal_tracking(
+        appearances,
+        _summary("A00000016", current_active="Yes", current_roster_term_code="2021FA"),
+        manual,
+    )
+
+    assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_STILL_ACTIVE
+    assert tracking.loc[0, "manual_outcome_status"] == "Chapter Kicked"
+
+
 def test_tracking_marks_chapter_kicked_when_chapter_rosters_stop() -> None:
     alpha = _roster("A00000014", status="Active", chapter="Alpha")
     beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
