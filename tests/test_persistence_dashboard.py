@@ -190,10 +190,45 @@ def test_build_persistence_dashboard_supports_all_time_personal_checkpoints() ->
 
     assert dashboard["meta"]["students"] == 4
     assert four_year["Term"] == PERSISTENCE_ALL_TIME_LABEL
-    assert four_year["Measured Students"] == 2
+    assert four_year["Measured Students"] == 4
     assert four_year["Graduated Count"] == 1
-    assert four_year["Active Count"] == 1
+    assert four_year["Active Count"] == 3
     assert four_year["Unknown Count"] == 0
+
+
+def test_build_persistence_dashboard_all_time_uses_fixed_denominator_and_unique_year_labels() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3"],
+            "join_term": ["Fall 2015", "Fall 2015", "Fall 2025"],
+            "council": ["IFC", "IFC", "IFC"],
+            "org_type": ["Fraternity", "Fraternity", "Fraternity"],
+            "is_graduated": [True, True, False],
+            "graduation_term": ["Fall 2019", "Fall 2021", ""],
+            "graduation_term_code": ["2019FA", "2021FA", ""],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["1", "2", "3"],
+            "observed_term": ["Fall 2021", "Fall 2021", "Spring 2026"],
+            "observed_term_sort": [20213, 20213, 20261],
+            "roster_present": ["Yes", "Yes", "Yes"],
+            "org_status_bucket": ["Active", "Active", "Active"],
+        }
+    )
+
+    dashboard = build_persistence_dashboard(summary, longitudinal, PERSISTENCE_ALL_TIME_LABEL, "ALL")
+    table = dashboard["table_frame"]
+    chart = dashboard["chart_frame"]
+
+    assert table["Measured Students"].tolist() == [3] * 7
+    assert table["Graduated Count"].tolist() == sorted(table["Graduated Count"].tolist())
+    assert table.loc[table["Milestone"].eq("4 Year"), "Graduated Count"].iloc[0] == 1
+    assert table.loc[table["Milestone"].eq("6 Year"), "Graduated Count"].iloc[0] == 2
+    assert "2 Year<br>All Time" in set(chart["Milestone"])
+    assert "3 Year<br>All Time" in set(chart["Milestone"])
+    assert "5 Year<br>All Time" in set(chart["Milestone"])
 
 
 def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_latest_roster() -> None:

@@ -1173,6 +1173,9 @@ def filter_persistence_population(summary: pd.DataFrame, cohort_term: str, disti
 
 
 def _milestone_label(base_label: str, offset: int) -> str:
+    if _is_persistence_all_time(base_label):
+        milestone = "Cohort Year" if offset == 0 else "1 Year" if offset == 1 else f"{offset} Year"
+        return f"{milestone}<br>{base_label}"
     if offset == 0:
         return f"Cohort Year<br>{base_label}"
     if offset == 1:
@@ -1293,14 +1296,29 @@ def build_persistence_dashboard(
     table_rows: list[dict[str, object]] = []
     student_count_total = int(cohort_work["student_id"].nunique())
     last_milestone_label = ""
+    all_time_checkpoint_sorts_by_offset: dict[int, pd.Series] = {}
+    all_time_fixed_measured_mask = pd.Series(False, index=cohort_work.index)
+    all_time_max_offset = 0
 
-    for offset in range(0, 7):
+    if is_all_time_cohort:
+        for offset in range(0, 7):
+            checkpoint_sorts = pd.to_numeric(
+                cohort_work.apply(lambda row: _personal_persistence_checkpoint_sort(row, offset), axis=1),
+                errors="coerce",
+            )
+            if max_term_sort:
+                checkpoint_sorts = checkpoint_sorts.where(checkpoint_sorts.le(max_term_sort), max_term_sort)
+            if checkpoint_sorts.notna().any():
+                all_time_checkpoint_sorts_by_offset[offset] = checkpoint_sorts
+                all_time_max_offset = offset
+        if all_time_checkpoint_sorts_by_offset:
+            all_time_fixed_measured_mask = all_time_checkpoint_sorts_by_offset[0].notna()
+
+    loop_offsets = range(0, all_time_max_offset + 1) if is_all_time_cohort else range(0, 7)
+    for offset in loop_offsets:
         if is_all_time_cohort:
-            checkpoint_sorts = cohort_work.apply(lambda row: _personal_persistence_checkpoint_sort(row, offset), axis=1)
-            checkpoint_sorts = pd.to_numeric(checkpoint_sorts, errors="coerce")
-            measurable_mask = checkpoint_sorts.notna()
-            if offset > 0:
-                measurable_mask = measurable_mask & checkpoint_sorts.le(max_term_sort)
+            checkpoint_sorts = all_time_checkpoint_sorts_by_offset.get(offset, pd.Series(pd.NA, index=cohort_work.index))
+            measurable_mask = all_time_fixed_measured_mask
             measurable_cohort = cohort_work.loc[measurable_mask].copy()
             if measurable_cohort.empty:
                 continue
@@ -1384,7 +1402,7 @@ def build_persistence_dashboard(
             "students": student_count_total,
             "max_milestone": last_milestone_label,
             "note": (
-                "All Time uses each member's organization join term as their own clock. Future personal checkpoints after the latest loaded roster are not measured."
+                "All Time uses each member's organization join term as their own clock with one fixed denominator. Future personal checkpoints after the latest loaded roster are evaluated as of the latest loaded roster term."
                 if is_all_time_cohort
                 else "Checkpoint outcomes use roster status and later roster presence first. Explicit graduation evidence is required for Graduated, and dated manual corrections are applied last. Checkpoints after the latest roster are not measured."
             ),
