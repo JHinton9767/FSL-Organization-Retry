@@ -116,7 +116,7 @@ def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_che
     assert not table["checkpoint"].eq("5 Year").any()
 
 
-def test_cohort_status_over_time_does_not_mark_chapter_kicked_from_unconfirmed_roster_gap() -> None:
+def test_cohort_status_over_time_marks_chapter_kicked_from_roster_gap() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["A00000001", "A00000002"],
@@ -140,8 +140,8 @@ def test_cohort_status_over_time_does_not_mark_chapter_kicked_from_unconfirmed_r
     table = build_cohort_status_over_time(summary, longitudinal, max_years=1)
     one_year = _status_rows(table, "Fall 2020", "1 Year")
 
-    assert int(one_year.loc["Chapter Kicked", "student_count"]) == 0
-    assert int(one_year.loc["Unknown", "student_count"]) == 1
+    assert int(one_year.loc["Chapter Kicked", "student_count"]) == 1
+    assert int(one_year.loc["Unknown", "student_count"]) == 0
     assert int(one_year.loc["Active", "student_count"]) == 1
 
 

@@ -123,6 +123,7 @@ def checkpoint_outcome_counts(
 
     presence_start = int(presence_start_sort if presence_start_sort is not None else checkpoint_sort)
     student_latest_roster_sort_at_checkpoint: Dict[str, int] = {}
+    chapter_roster_terms: Dict[str, list[int]] = {}
     roster_source = longitudinal.copy()
     if not roster_source.empty and "student_id" in roster_source.columns:
         roster_source["student_id"] = roster_source["student_id"].fillna("").astype(str).str.strip()
@@ -143,6 +144,14 @@ def checkpoint_outcome_counts(
             & roster_source["_persistence_term_sort"].notna()
             & roster_source["_persistence_term_sort"].le(latest_roster_sort)
         ].copy()
+        if "chapter" in all_roster.columns:
+            all_roster["_chapter_key"] = all_roster["chapter"].map(normalize_chapter_key)
+            chapter_roster_terms = {
+                str(chapter_key): _sorted_term_values(group["_persistence_term_sort"].tolist())
+                for chapter_key, group in all_roster.loc[all_roster["_chapter_key"].ne("")]
+                .groupby("_chapter_key", dropna=False)
+                if str(chapter_key).strip()
+            }
 
         roster = all_roster.loc[all_roster["student_id"].isin(student_ids)].copy()
         if not roster.empty:
@@ -173,13 +182,19 @@ def checkpoint_outcome_counts(
                     roster_overrides = roster_categories.loc[~roster_categories.eq("Active")]
                     matching_ids = outcomes.index.intersection(roster_overrides.index)
                     outcomes.loc[matching_ids] = roster_overrides.reindex(matching_ids)
-                    if chapter_event_lookup and "chapter" in latest_rows.columns:
+                    if "chapter" in latest_rows.columns:
                         for student_id, row in latest_rows.iterrows():
                             status_outcome = roster_categories.get(student_id, "Unknown")
                             if status_outcome not in {"Active", "Unknown"}:
                                 continue
                             if chapter_kicked_by_status_event(
                                 chapter_event_lookup,
+                                row.get("chapter", ""),
+                                row.get("_persistence_term_sort", 999999),
+                                checkpoint_sort,
+                                latest_roster_sort,
+                            ) or chapter_kicked_at_checkpoint(
+                                chapter_roster_terms,
                                 row.get("chapter", ""),
                                 row.get("_persistence_term_sort", 999999),
                                 checkpoint_sort,

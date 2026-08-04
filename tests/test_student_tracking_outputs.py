@@ -294,7 +294,7 @@ def test_later_roster_row_can_supersede_manual_chapter_kicked_outcome() -> None:
     assert tracking.loc[0, "manual_outcome_status"] == "Chapter Kicked"
 
 
-def test_tracking_does_not_mark_chapter_kicked_from_unconfirmed_roster_gap() -> None:
+def test_tracking_marks_chapter_kicked_from_roster_gap() -> None:
     alpha = _roster("A00000014", status="Active", chapter="Alpha")
     beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
     beta_2021 = _roster("A00000015", status="Active", chapter="Beta")
@@ -306,8 +306,10 @@ def test_tracking_does_not_mark_chapter_kicked_from_unconfirmed_roster_gap() -> 
     tracking = build_student_longitudinal_tracking(appearances, _summary("A00000014"), pd.DataFrame())
     alpha_tracking = tracking.loc[tracking["normalized_student_id"].eq("A00000014")].iloc[0]
 
-    assert alpha_tracking["final_outcome_bucket"] == OUTCOME_NOT_RETAINED
-    assert alpha_tracking["manual_review_required"] == "Yes"
+    assert alpha_tracking["final_outcome_bucket"] == OUTCOME_CHAPTER_KICKED
+    assert alpha_tracking["outcome_confidence"] == "medium"
+    assert "chapter_kicked_inferred_from_roster_gap" in alpha_tracking["ambiguity_flags"]
+    assert alpha_tracking["manual_review_required"] == "No"
 
 
 def test_tracking_marks_chapter_kicked_from_confirmed_chapter_status_event() -> None:

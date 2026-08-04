@@ -77,6 +77,7 @@ from src.path_config import load_path_config, validate_path_config
 from src.persistence_outcomes import (
     CHAPTER_KICKED_OUTCOME,
     PERSISTENCE_OUTCOME_ORDER,
+    chapter_kicked_at_checkpoint,
     checkpoint_outcome_counts,
     persistence_outcome_from_status,
 )
@@ -4838,9 +4839,23 @@ def build_student_longitudinal_tracking(
 
     roster_coverage = app.loc[app["source_type"].eq("roster") & app["_has_term"]].copy()
     latest_loaded_roster_sort = 0
+    chapter_roster_terms: Dict[str, list[int]] = {}
     chapter_event_lookup = chapter_status_event_lookup(chapter_status_events)
     if not roster_coverage.empty:
         latest_loaded_roster_sort = int(coerce_numeric(roster_coverage["_term_sort"]).dropna().max())
+        roster_coverage["_chapter_key"] = chapter_key_series(roster_coverage.get("chapter", pd.Series("", index=roster_coverage.index)))
+        chapter_roster_terms = {
+            str(chapter_key): sorted(
+                {
+                    int(value)
+                    for value in coerce_numeric(group["_term_sort"]).dropna().tolist()
+                    if int(value) < 999999
+                }
+            )
+            for chapter_key, group in roster_coverage.loc[roster_coverage["_chapter_key"].ne("")]
+            .groupby("_chapter_key", dropna=False)
+            if str(chapter_key).strip()
+        }
 
     rows: List[dict] = []
     for normalized_id, group in app.groupby("_normalized_student_id", dropna=False, sort=False):
@@ -4921,24 +4936,36 @@ def build_student_longitudinal_tracking(
         current_active_flag = _clean_display(summary_row.get("current_active_flag", ""))
         effective_manual_outcome_bucket = manual_outcome_bucket
         manual_outcome_sort = sort_term_code(_manual_term_code(manual_outcome_term)) if manual_outcome_term else 999999
+        last_roster_sort = sort_term_code(last_roster_code)
         if (
             manual_outcome_bucket == OUTCOME_CHAPTER_KICKED
-            and sort_term_code(last_roster_code) < 999999
-            and sort_term_code(last_roster_code) > manual_outcome_sort
+            and last_roster_sort < 999999
+            and last_roster_sort > manual_outcome_sort
         ):
             effective_manual_outcome_bucket = ""
+        confirmed_chapter_kicked = chapter_kicked_by_status_event(
+            chapter_event_lookup,
+            latest_known_chapter,
+            last_roster_sort,
+            latest_loaded_roster_sort,
+            latest_loaded_roster_sort,
+        )
+        inferred_chapter_kicked = (
+            not confirmed_chapter_kicked
+            and chapter_kicked_at_checkpoint(
+                chapter_roster_terms,
+                latest_known_chapter,
+                last_roster_sort,
+                latest_loaded_roster_sort,
+                latest_loaded_roster_sort,
+            )
+        )
         auto_chapter_kicked = (
             not effective_manual_outcome_bucket
             and not explicit_grad
             and current_active_flag.strip().lower() != "yes"
             and persistence_outcome_from_status(latest_known_status) in {"Active", "Unknown"}
-            and chapter_kicked_by_status_event(
-                chapter_event_lookup,
-                latest_known_chapter,
-                sort_term_code(last_roster_code),
-                latest_loaded_roster_sort,
-                latest_loaded_roster_sort,
-            )
+            and (confirmed_chapter_kicked or inferred_chapter_kicked)
         )
 
         row = {
@@ -4987,12 +5014,28 @@ def build_student_longitudinal_tracking(
             OUTCOME_SOURCE_PROBLEM,
         }:
             bucket = OUTCOME_CHAPTER_KICKED
-            confidence = "high"
-            flags = "; ".join(filter(None, [flags, "chapter_kicked_from_confirmed_chapter_status_event"]))
+            confidence = "high" if confirmed_chapter_kicked else "medium"
+            flags = "; ".join(
+                filter(
+                    None,
+                    [
+                        flags,
+                        (
+                            "chapter_kicked_from_confirmed_chapter_status_event"
+                            if confirmed_chapter_kicked
+                            else "chapter_kicked_inferred_from_roster_gap"
+                        ),
+                    ],
+                )
+            )
             review_reason = ""
             row["graduation_evidence_source"] = (
                 row["graduation_evidence_source"]
-                or "Confirmed chapter status event in config/chapter_status_events.csv; no later roster appearance was observed."
+                or (
+                    "Confirmed chapter status event in config/chapter_status_events.csv; no later roster appearance was observed."
+                    if confirmed_chapter_kicked
+                    else "Chapter roster coverage disappeared before the latest loaded roster term; no later student roster appearance was observed."
+                )
             )
         row.update(
             {
@@ -6143,7 +6186,7 @@ def build_cohort_status_over_time(
     rows: List[dict] = []
     measurement_basis = (
         "Nine-category checkpoint outcome from roster status and later roster presence; "
-        "explicit graduation evidence is required, confirmed chapter-status events can resolve Chapter Kicked, "
+        "explicit graduation evidence is required, confirmed chapter-status events or roster-coverage gaps can resolve Chapter Kicked, "
         "then dated manual corrections override."
     )
 

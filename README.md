@@ -105,9 +105,9 @@ This writes these lightweight review files next to the canonical `roster_term.cs
 - `chapter_semester_inventory.csv` lists every observed chapter alphabetically within each semester, with valid-Banner-ID roster counts and status counts.
 - `chapter_semester_matrix.csv` lists one row per chapter and one column per semester, with blanks showing terms where that chapter was not present.
 - `chapter_lifecycle_review_template.csv` summarizes first/last seen terms and possible gaps, with blank kicked/returned/note columns for review.
-- `chapter_status_event_candidates.csv` lists each possible roster gap or disappearance window. These rows are review candidates only.
+- `chapter_status_event_candidates.csv` lists each possible roster gap or disappearance window. These gaps can classify otherwise unresolved students as inferred `Chapter Kicked` outcomes.
 
-Confirmed chapter removals/returns should go in `config/chapter_status_events.csv` using the columns in `config/chapter_status_events.example.csv`. Only rows with `event_type` like `Chapter Kicked`, `confidence` set to `Confirmed`, and `active` not set to `No` are allowed to classify unresolved students as `Chapter Kicked`; roster gaps alone only create candidates.
+Confirmed chapter removals/returns should go in `config/chapter_status_events.csv` using the columns in `config/chapter_status_events.example.csv`. Rows with `event_type` like `Chapter Kicked`, `confidence` set to `Confirmed`, and `active` not set to `No` make the `Chapter Kicked` evidence explicit; roster gaps remain usable as inferred chapter-kick evidence when no later student roster appearance is found.
 
 ## Helper manual-correction workflow
 

@@ -885,7 +885,10 @@ def _render_chapter_semester_inventory(bundle) -> None:
         )
 
     with candidates_tab:
-        st.caption("Roster gaps listed here are candidates only. Copy confirmed rows into config/chapter_status_events.csv with confidence set to Confirmed before they affect outcomes.")
+        st.caption(
+            "Roster gaps can classify unresolved students as inferred Chapter Kicked. "
+            "Copy confirmed rows into config/chapter_status_events.csv with confidence set to Confirmed to make the evidence explicit."
+        )
         st.dataframe(candidates, use_container_width=True, hide_index=True)
         st.download_button(
             "Download chapter status event candidates CSV",
