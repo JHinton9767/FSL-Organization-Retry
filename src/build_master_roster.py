@@ -168,7 +168,7 @@ GREEK_LETTER_WORDS = {
 }
 ALLOWED_CHAPTER_PHRASES = {
     "order of omega": "Order of Omega",
-    "kappa alpha": "Kappa Alpha Order",
+    "kappa alpha order": "Kappa Alpha Order",
 }
 
 CHAPTER_JUNK_PATTERNS = [

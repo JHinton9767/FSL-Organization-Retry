@@ -23,6 +23,7 @@ from src.build_master_roster import (
     infer_chapter,
     is_individual_new_member_form_pdf,
     normalize_banner_id,
+    normalize_chapter_name,
     should_upgrade_to_new_member_status,
     source_context_indicates_new_member,
 )
@@ -478,3 +479,10 @@ def test_chapter_named_pdf_is_not_treated_as_person_form() -> None:
 
     assert extract_person_name_from_label(path.stem) is None
     assert not is_individual_new_member_form_pdf(path)
+
+
+def test_normalize_chapter_name_does_not_overmatch_kappa_alpha_order_alias() -> None:
+    assert normalize_chapter_name("Alpha Kappa Alpha Fall 2015 Roster") == "Alpha Kappa Alpha"
+    assert normalize_chapter_name("Kappa Alpha Psi Fall 2015 Roster") == "Kappa Alpha Psi"
+    assert normalize_chapter_name("Pi Kappa Alpha Fall 2015 Roster") == "Pi Kappa Alpha"
+    assert normalize_chapter_name("Kappa Alpha Order Fall 2015 Roster") == "Kappa Alpha Order"
