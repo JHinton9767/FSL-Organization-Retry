@@ -294,7 +294,7 @@ def test_later_roster_row_can_supersede_manual_chapter_kicked_outcome() -> None:
     assert tracking.loc[0, "manual_outcome_status"] == "Chapter Kicked"
 
 
-def test_tracking_marks_chapter_kicked_when_chapter_rosters_stop() -> None:
+def test_tracking_does_not_mark_chapter_kicked_from_unconfirmed_roster_gap() -> None:
     alpha = _roster("A00000014", status="Active", chapter="Alpha")
     beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
     beta_2021 = _roster("A00000015", status="Active", chapter="Beta")
@@ -304,6 +304,36 @@ def test_tracking_marks_chapter_kicked_when_chapter_rosters_stop() -> None:
     appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     tracking = build_student_longitudinal_tracking(appearances, _summary("A00000014"), pd.DataFrame())
+    alpha_tracking = tracking.loc[tracking["normalized_student_id"].eq("A00000014")].iloc[0]
+
+    assert alpha_tracking["final_outcome_bucket"] == OUTCOME_NOT_RETAINED
+    assert alpha_tracking["manual_review_required"] == "Yes"
+
+
+def test_tracking_marks_chapter_kicked_from_confirmed_chapter_status_event() -> None:
+    alpha = _roster("A00000014", status="Active", chapter="Alpha")
+    beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021["term_code"] = "2021FA"
+    beta_2021["term_label"] = "Fall 2021"
+    roster = pd.concat([alpha, beta_2020, beta_2021], ignore_index=True)
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    chapter_status_events = pd.DataFrame(
+        {
+            "chapter": ["Alpha"],
+            "event_type": ["Chapter Kicked"],
+            "effective_term": ["Fall 2020"],
+            "confidence": ["Confirmed"],
+            "active": ["Yes"],
+        }
+    )
+
+    tracking = build_student_longitudinal_tracking(
+        appearances,
+        _summary("A00000014"),
+        pd.DataFrame(),
+        chapter_status_events,
+    )
     alpha_tracking = tracking.loc[tracking["normalized_student_id"].eq("A00000014")].iloc[0]
 
     assert alpha_tracking["final_outcome_bucket"] == OUTCOME_CHAPTER_KICKED

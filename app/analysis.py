@@ -1187,6 +1187,7 @@ def build_persistence_dashboard(
     longitudinal: pd.DataFrame,
     cohort_term: str,
     distinction: str = "ALL",
+    chapter_status_events: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     cohort = filter_persistence_population(summary, cohort_term, distinction)
     empty = {
@@ -1315,6 +1316,7 @@ def build_persistence_dashboard(
                     max_term_sort,
                     presence_start_sort=int(target_sort),
                     baseline=offset == 0,
+                    chapter_status_events=chapter_status_events,
                 )
                 for outcome, count in group_counts.items():
                     milestone_counts[outcome] = int(milestone_counts.get(outcome, 0)) + int(count)
@@ -1336,6 +1338,7 @@ def build_persistence_dashboard(
                 max_term_sort,
                 presence_start_sort=target_retention_sort,
                 baseline=offset == 0,
+                chapter_status_events=chapter_status_events,
             )
             milestone_student_count = student_count_total
 

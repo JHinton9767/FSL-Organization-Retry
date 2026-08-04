@@ -92,6 +92,7 @@ from app.presets import list_presets, load_preset, save_preset
 from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 from src.chapter_semester_inventory import (
+    CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS,
     INVENTORY_COLUMNS,
     LIFECYCLE_COLUMNS,
     build_chapter_semester_tables,
@@ -312,7 +313,8 @@ def _render_persistence_and_graduation_view(bundle) -> None:
             unsafe_allow_html=True,
         )
 
-    dashboard = build_persistence_dashboard(summary, longitudinal, cohort_term, distinction)
+    chapter_status_events = getattr(bundle, "tables", {}).get("chapter_status_events", pd.DataFrame())
+    dashboard = build_persistence_dashboard(summary, longitudinal, cohort_term, distinction, chapter_status_events)
     cohort_frame = dashboard["cohort"]
     chart_frame = dashboard["chart_frame"]
     table_frame = dashboard["table_frame"]
@@ -738,13 +740,14 @@ def _render_roster_disappearance_tracker(bundle) -> None:
             )
 
 
-def _chapter_inventory_frames(roster: pd.DataFrame) -> tuple[object, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def _chapter_inventory_frames(roster: pd.DataFrame) -> tuple[object, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     source = roster.fillna("").astype(str) if roster is not None and not roster.empty else pd.DataFrame()
     tables = build_chapter_semester_tables(source.to_dict(orient="records"))
     inventory = pd.DataFrame(tables.inventory_rows, columns=INVENTORY_COLUMNS)
     matrix = pd.DataFrame(tables.matrix_rows, columns=tables.matrix_columns or ["chapter"])
     lifecycle = pd.DataFrame(tables.lifecycle_rows, columns=LIFECYCLE_COLUMNS)
-    return tables, inventory, matrix, lifecycle
+    candidates = pd.DataFrame(tables.status_event_candidate_rows, columns=CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS)
+    return tables, inventory, matrix, lifecycle, candidates
 
 
 def _render_chapter_semester_inventory(bundle) -> None:
@@ -759,7 +762,8 @@ def _render_chapter_semester_inventory(bundle) -> None:
         st.warning("No roster_term rows were loaded in this dataset. Run the canonical pipeline after pointing config/local_paths.yaml at the roster source folders.")
         return
 
-    tables, inventory, matrix, lifecycle = _chapter_inventory_frames(roster)
+    tables, inventory, matrix, lifecycle, candidates = _chapter_inventory_frames(roster)
+    confirmed_events = getattr(bundle, "tables", {}).get("chapter_status_events", pd.DataFrame())
 
     metric_cols = st.columns(5)
     with metric_cols[0]:
@@ -836,6 +840,8 @@ def _render_chapter_semester_inventory(bundle) -> None:
                 "Semester Inventory": inventory,
                 "Matrix": matrix,
                 "Lifecycle Review": lifecycle,
+                "Status Event Candidates": candidates,
+                "Confirmed Status Events": confirmed_events,
                 "Source QA": qa_frame,
             }
         ),
@@ -844,8 +850,8 @@ def _render_chapter_semester_inventory(bundle) -> None:
         use_container_width=True,
     )
 
-    semester_tab, matrix_tab, lifecycle_tab, qa_tab = st.tabs(
-        ["Semester List", "Matrix", "Lifecycle Review", "Source QA"]
+    semester_tab, matrix_tab, lifecycle_tab, candidates_tab, confirmed_events_tab, qa_tab = st.tabs(
+        ["Semester List", "Matrix", "Lifecycle Review", "Event Candidates", "Confirmed Events", "Source QA"]
     )
 
     with semester_tab:
@@ -874,6 +880,28 @@ def _render_chapter_semester_inventory(bundle) -> None:
             "Download lifecycle review CSV",
             data=dataframe_to_csv_bytes(lifecycle_view),
             file_name="chapter_lifecycle_review_template.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with candidates_tab:
+        st.caption("Roster gaps listed here are candidates only. Copy confirmed rows into config/chapter_status_events.csv with confidence set to Confirmed before they affect outcomes.")
+        st.dataframe(candidates, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download chapter status event candidates CSV",
+            data=dataframe_to_csv_bytes(candidates),
+            file_name="chapter_status_event_candidates.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with confirmed_events_tab:
+        st.caption("These are normalized confirmed/local chapter status events loaded by the canonical run.")
+        st.dataframe(confirmed_events, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download confirmed chapter status events CSV",
+            data=dataframe_to_csv_bytes(confirmed_events),
+            file_name="chapter_status_events.csv",
             mime="text/csv",
             use_container_width=True,
         )

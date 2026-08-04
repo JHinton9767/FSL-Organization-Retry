@@ -4,6 +4,7 @@ from typing import Dict, Iterable
 
 import pandas as pd
 
+from src.chapter_status_events import chapter_kicked_by_status_event, chapter_status_event_lookup
 from src.shared_utils import normalize_chapter_key
 
 
@@ -103,6 +104,7 @@ def checkpoint_outcome_counts(
     graduation_sort_column: str = "_graduation_sort",
     manual_status_column: str = "manual_outcome_status",
     manual_sort_column: str = "_manual_outcome_sort",
+    chapter_status_events: pd.DataFrame | None = None,
 ) -> Dict[str, int]:
     student_ids = (
         cohort.get("student_id", pd.Series(dtype="object"))
@@ -117,6 +119,7 @@ def checkpoint_outcome_counts(
     outcomes = pd.Series("Active" if baseline else "Unknown", index=student_ids, dtype="object")
     if not student_ids:
         return {status: 0 for status in PERSISTENCE_OUTCOME_ORDER}
+    chapter_event_lookup = chapter_status_event_lookup(chapter_status_events)
 
     presence_start = int(presence_start_sort if presence_start_sort is not None else checkpoint_sort)
     student_latest_roster_sort_at_checkpoint: Dict[str, int] = {}
@@ -140,14 +143,6 @@ def checkpoint_outcome_counts(
             & roster_source["_persistence_term_sort"].notna()
             & roster_source["_persistence_term_sort"].le(latest_roster_sort)
         ].copy()
-
-        chapter_roster_terms: Dict[str, list[int]] = {}
-        if not all_roster.empty and "chapter" in all_roster.columns:
-            all_roster["_chapter_key"] = all_roster["chapter"].map(normalize_chapter_key)
-            chapter_roster_terms = {
-                key: _sorted_term_values(group["_persistence_term_sort"])
-                for key, group in all_roster.loc[all_roster["_chapter_key"].ne("")].groupby("_chapter_key", dropna=False)
-            }
 
         roster = all_roster.loc[all_roster["student_id"].isin(student_ids)].copy()
         if not roster.empty:
@@ -178,13 +173,13 @@ def checkpoint_outcome_counts(
                     roster_overrides = roster_categories.loc[~roster_categories.eq("Active")]
                     matching_ids = outcomes.index.intersection(roster_overrides.index)
                     outcomes.loc[matching_ids] = roster_overrides.reindex(matching_ids)
-                    if chapter_roster_terms and "chapter" in latest_rows.columns:
+                    if chapter_event_lookup and "chapter" in latest_rows.columns:
                         for student_id, row in latest_rows.iterrows():
                             status_outcome = roster_categories.get(student_id, "Unknown")
                             if status_outcome not in {"Active", "Unknown"}:
                                 continue
-                            if chapter_kicked_at_checkpoint(
-                                chapter_roster_terms,
+                            if chapter_kicked_by_status_event(
+                                chapter_event_lookup,
                                 row.get("chapter", ""),
                                 row.get("_persistence_term_sort", 999999),
                                 checkpoint_sort,

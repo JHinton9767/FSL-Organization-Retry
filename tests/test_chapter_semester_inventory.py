@@ -133,12 +133,17 @@ def test_chapter_lifecycle_template_flags_gaps_between_seen_terms(tmp_path: Path
     result = build_chapter_semester_exports(roster_path, tmp_path / "exports")
     lifecycle = {row["chapter"]: row for row in _read_csv(result.lifecycle_review_path)}
     matrix = {row["chapter"]: row for row in _read_csv(result.matrix_path)}
+    candidates = {(row["chapter"], row["missing_start_term"]): row for row in _read_csv(result.status_event_candidates_path)}
 
     assert lifecycle["Alpha Chapter"]["possible_gap_count_between_first_and_last_seen"] == "1"
     assert lifecycle["Alpha Chapter"]["possible_roster_gaps_between_first_and_last_seen"] == "Spring 2025"
     assert matrix["Alpha Chapter"]["Fall 2024"] == "1"
     assert matrix["Alpha Chapter"]["Spring 2025"] == ""
     assert matrix["Alpha Chapter"]["Fall 2025"] == "1"
+    assert candidates[("Alpha Chapter", "Spring 2025")]["candidate_event_type"] == "Possible Roster Gap / Returned"
+    assert candidates[("Alpha Chapter", "Spring 2025")]["returned_term"] == "Fall 2025"
+    assert candidates[("Beta Chapter", "Fall 2025")]["candidate_event_type"] == "Possible Roster Disappearance"
+    assert candidates[("Beta Chapter", "Fall 2025")]["confidence"] == "Needs Review"
 
 
 def test_chapter_semester_tables_can_be_built_from_loaded_roster_rows() -> None:

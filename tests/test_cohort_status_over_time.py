@@ -116,7 +116,7 @@ def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_che
     assert not table["checkpoint"].eq("5 Year").any()
 
 
-def test_cohort_status_over_time_marks_chapter_kicked_from_roster_gap() -> None:
+def test_cohort_status_over_time_does_not_mark_chapter_kicked_from_unconfirmed_roster_gap() -> None:
     summary = pd.DataFrame(
         {
             "student_id": ["A00000001", "A00000002"],
@@ -138,6 +138,49 @@ def test_cohort_status_over_time_marks_chapter_kicked_from_roster_gap() -> None:
     )
 
     table = build_cohort_status_over_time(summary, longitudinal, max_years=1)
+    one_year = _status_rows(table, "Fall 2020", "1 Year")
+
+    assert int(one_year.loc["Chapter Kicked", "student_count"]) == 0
+    assert int(one_year.loc["Unknown", "student_count"]) == 1
+    assert int(one_year.loc["Active", "student_count"]) == 1
+
+
+def test_cohort_status_over_time_marks_chapter_kicked_from_confirmed_event() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "join_term": ["Fall 2020", "Fall 2020"],
+            "is_graduated": [False, False],
+            "graduation_term_code": ["", ""],
+            "graduation_term": ["", ""],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002", "A00000002"],
+            "term_code": ["2020FA", "2020FA", "2021FA"],
+            "observed_term_sort": [20203, 20203, 20213],
+            "roster_present": ["Yes", "Yes", "Yes"],
+            "chapter": ["Alpha", "Beta", "Beta"],
+            "org_status_bucket": ["Active", "Active", "Active"],
+        }
+    )
+    chapter_status_events = pd.DataFrame(
+        {
+            "chapter": ["Alpha"],
+            "event_type": ["Chapter Kicked"],
+            "effective_term": ["Fall 2020"],
+            "confidence": ["Confirmed"],
+            "active": ["Yes"],
+        }
+    )
+
+    table = build_cohort_status_over_time(
+        summary,
+        longitudinal,
+        max_years=1,
+        chapter_status_events=chapter_status_events,
+    )
     one_year = _status_rows(table, "Fall 2020", "1 Year")
 
     assert int(one_year.loc["Chapter Kicked", "student_count"]) == 1

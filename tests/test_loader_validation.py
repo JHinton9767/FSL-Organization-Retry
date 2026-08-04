@@ -11,6 +11,7 @@ from app.config_loader import (
     append_manual_roster_corrections,
     append_outcome_overrides,
     append_roster_exclusions,
+    append_chapter_status_events,
     build_manual_corrections_package,
     find_manual_correction_conflicts,
     import_manual_corrections_package,
@@ -18,6 +19,7 @@ from app.config_loader import (
     dedupe_manual_review_queue_by_cohort,
     graduated_alumni_rows_to_manual_corrections,
     load_graduation_evidence,
+    load_chapter_status_events,
     load_manual_adjustments,
     load_manual_roster_corrections,
     load_manual_review_actions,
@@ -25,12 +27,14 @@ from app.config_loader import (
     load_roster_exclusions,
     normalize_manual_adjustments,
     save_manual_adjustments,
+    save_chapter_status_events,
     normalize_manual_roster_corrections,
     prepare_manual_corrections_workspace,
     save_manual_review_actions,
     save_manual_roster_corrections,
 )
 from app.data_loader import _validate_loaded_tables
+from src.chapter_status_events import chapter_kicked_by_status_event, chapter_status_event_lookup
 
 
 def test_canonical_loader_validation_accepts_required_tables() -> None:
@@ -287,6 +291,7 @@ def test_manual_workspace_and_package_are_helper_ready(tmp_path) -> None:
     with ZipFile(package_path) as archive:
         assert sorted(archive.namelist()) == [
             "Transcripts/A00000001_Doe_Jane.txt",
+            "chapter_status_events.csv",
             "graduation_evidence.csv",
             "manual_adjustments.csv",
             "manual_review_actions.csv",
@@ -641,3 +646,44 @@ def test_import_manual_package_merges_corrections_and_transcripts(tmp_path, monk
     assert len(load_graduation_evidence(graduation_path)) == 1
     assert len(load_outcome_overrides(outcomes_path)) == 1
     assert len(load_roster_exclusions(exclusions_path)) == 1
+
+
+def test_chapter_status_events_require_confirmed_confidence(tmp_path: Path) -> None:
+    path = tmp_path / "chapter_status_events.csv"
+    save_chapter_status_events(
+        pd.DataFrame(
+            {
+                "chapter": ["Alpha Chapter", "Beta Chapter"],
+                "event_type": ["Chapter Kicked", "Chapter Kicked"],
+                "effective_term": ["Fall 2020", "Fall 2020"],
+                "confidence": ["Confirmed", "Needs Review"],
+                "active": ["Yes", "Yes"],
+            }
+        ),
+        path,
+    )
+
+    events = load_chapter_status_events(path)
+    lookup = chapter_status_event_lookup(events)
+
+    assert events["confirmed_for_outcomes"].tolist() == ["Yes", "No"]
+    assert chapter_kicked_by_status_event(lookup, "Alpha Chapter", 20203, 20213, 20213)
+    assert not chapter_kicked_by_status_event(lookup, "Beta Chapter", 20203, 20213, 20213)
+
+
+def test_append_chapter_status_events_dedupes_rows(tmp_path: Path) -> None:
+    path = tmp_path / "chapter_status_events.csv"
+    row = pd.DataFrame(
+        {
+            "chapter": ["Alpha Chapter"],
+            "event_type": ["Chapter Kicked"],
+            "effective_term": ["Fall 2020"],
+            "confidence": ["Confirmed"],
+            "active": ["Yes"],
+        }
+    )
+
+    append_chapter_status_events(row, path)
+    append_chapter_status_events(row, path)
+
+    assert len(load_chapter_status_events(path)) == 1

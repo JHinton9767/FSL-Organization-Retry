@@ -1,0 +1,2 @@
+chapter,event_type,effective_term,return_term,evidence_source,evidence_file_or_url,confidence,active,notes
+Example Chapter,Chapter Kicked,Fall 2020,Fall 2024,FSL internal status list,,Confirmed,Yes,Example only; copy this structure into config/chapter_status_events.csv and remove this row.

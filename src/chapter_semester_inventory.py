@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -58,6 +59,32 @@ LIFECYCLE_COLUMNS = [
     "notes",
 ]
 
+CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS = [
+    "candidate_key",
+    "chapter",
+    "candidate_event_type",
+    "suggested_event_type",
+    "confidence",
+    "review_status",
+    "first_seen_term",
+    "last_seen_term",
+    "last_seen_before_gap",
+    "missing_start_term",
+    "missing_end_term",
+    "returned_term",
+    "terms_missing_count",
+    "missing_terms",
+    "terms_present_count",
+    "total_unique_valid_banner_ids_seen",
+    "last_seen_unique_valid_banner_ids",
+    "last_seen_active_or_new_count",
+    "source_files_last_seen",
+    "evidence_source",
+    "evidence_file_or_url",
+    "evidence_summary",
+    "notes",
+]
+
 
 @dataclass
 class ChapterTermPresence:
@@ -88,6 +115,7 @@ class ChapterSemesterTables:
     matrix_columns: list[str]
     matrix_rows: list[dict[str, object]]
     lifecycle_rows: list[dict[str, object]]
+    status_event_candidate_rows: list[dict[str, object]]
     term_count: int
     chapter_count: int
     source_rows: int
@@ -101,9 +129,11 @@ class ChapterSemesterExportResult:
     inventory_path: Path
     matrix_path: Path
     lifecycle_review_path: Path
+    status_event_candidates_path: Path
     inventory_rows: int
     matrix_rows: int
     lifecycle_rows: int
+    status_event_candidate_rows: int
     term_count: int
     chapter_count: int
     source_rows: int
@@ -320,6 +350,95 @@ def lifecycle_rows(
     return rows
 
 
+def chapter_status_event_candidate_rows(
+    presence_by_key: dict[tuple[str, str], ChapterTermPresence],
+    terms: list[tuple[str, str, int, str]],
+) -> list[dict[str, object]]:
+    term_labels = [label for _, label, _, _ in terms]
+    term_key_by_label = {label: term_key for term_key, label, _, _ in terms}
+    term_index_by_label = {label: index for index, label in enumerate(term_labels)}
+    chapters = sorted({presence.chapter for presence in presence_by_key.values()}, key=chapter_sort_key)
+    rows: list[dict[str, object]] = []
+
+    for chapter in chapters:
+        chapter_presence = [presence for presence in presence_by_key.values() if presence.chapter == chapter]
+        present_labels = {presence.term_label for presence in chapter_presence}
+        present_indices = sorted(term_index_by_label[label] for label in present_labels if label in term_index_by_label)
+        if not present_indices:
+            continue
+
+        all_student_ids: set[str] = set()
+        for presence in chapter_presence:
+            all_student_ids.update(presence.student_statuses)
+
+        first_seen = term_labels[present_indices[0]]
+        last_seen = term_labels[present_indices[-1]]
+        terms_present_count = len(present_indices)
+        idx = present_indices[0]
+        present_index_set = set(present_indices)
+        while idx < len(term_labels):
+            if idx in present_index_set:
+                idx += 1
+                continue
+
+            gap_start = idx
+            while idx < len(term_labels) and idx not in present_index_set:
+                idx += 1
+            gap_end = idx - 1
+            previous_present_indices = [value for value in present_indices if value < gap_start]
+            if not previous_present_indices:
+                continue
+
+            last_seen_before_gap = term_labels[previous_present_indices[-1]]
+            returned_term = term_labels[idx] if idx < len(term_labels) and idx in present_index_set else ""
+            missing_terms = term_labels[gap_start : gap_end + 1]
+            if not missing_terms:
+                continue
+
+            last_seen_key = term_key_by_label.get(last_seen_before_gap, "")
+            last_presence = presence_by_key.get((last_seen_key, chapter))
+            counts = status_counts_for(last_presence) if last_presence else Counter()
+            source_files = " | ".join(sorted(last_presence.source_files)) if last_presence else ""
+            active_or_new = counts.get("Active", 0) + counts.get("New Member", 0)
+            last_seen_ids = len(last_presence.student_statuses) if last_presence else 0
+            event_type = "Possible Roster Gap / Returned" if returned_term else "Possible Roster Disappearance"
+            evidence_summary = (
+                f"{chapter} was present in {last_seen_before_gap}, missing from "
+                f"{missing_terms[0]} through {missing_terms[-1]}"
+                + (f", and returned in {returned_term}." if returned_term else ".")
+            )
+            key_text = f"{chapter_sort_key(chapter)}|{missing_terms[0]}|{missing_terms[-1]}|{returned_term}"
+            rows.append(
+                {
+                    "candidate_key": hashlib.sha1(key_text.encode("utf-8")).hexdigest()[:16],
+                    "chapter": chapter,
+                    "candidate_event_type": event_type,
+                    "suggested_event_type": "Chapter Kicked",
+                    "confidence": "Needs Review",
+                    "review_status": "Needs Review",
+                    "first_seen_term": first_seen,
+                    "last_seen_term": last_seen,
+                    "last_seen_before_gap": last_seen_before_gap,
+                    "missing_start_term": missing_terms[0],
+                    "missing_end_term": missing_terms[-1],
+                    "returned_term": returned_term,
+                    "terms_missing_count": len(missing_terms),
+                    "missing_terms": " | ".join(missing_terms),
+                    "terms_present_count": terms_present_count,
+                    "total_unique_valid_banner_ids_seen": len(all_student_ids),
+                    "last_seen_unique_valid_banner_ids": last_seen_ids,
+                    "last_seen_active_or_new_count": active_or_new,
+                    "source_files_last_seen": source_files,
+                    "evidence_source": "Roster coverage gap candidate",
+                    "evidence_file_or_url": "",
+                    "evidence_summary": evidence_summary,
+                    "notes": "",
+                }
+            )
+
+    return rows
+
+
 def build_chapter_semester_tables(rows: Iterable[Mapping[str, object]]) -> ChapterSemesterTables:
     presence_by_key: dict[tuple[str, str], ChapterTermPresence] = {}
     source_rows = 0
@@ -366,11 +485,13 @@ def build_chapter_semester_tables(rows: Iterable[Mapping[str, object]]) -> Chapt
     inventory = inventory_rows(presence_by_key)
     matrix_columns, matrix = matrix_rows(presence_by_key, terms)
     lifecycle = lifecycle_rows(presence_by_key, terms)
+    candidates = chapter_status_event_candidate_rows(presence_by_key, terms)
     return ChapterSemesterTables(
         inventory_rows=inventory,
         matrix_columns=matrix_columns,
         matrix_rows=matrix,
         lifecycle_rows=lifecycle,
+        status_event_candidate_rows=candidates,
         term_count=len(terms),
         chapter_count=len(matrix),
         source_rows=source_rows,
@@ -395,17 +516,21 @@ def build_chapter_semester_exports(roster_path: Path, output_dir: Path) -> Chapt
     inventory_path = output_dir / "chapter_semester_inventory.csv"
     matrix_path = output_dir / "chapter_semester_matrix.csv"
     lifecycle_path = output_dir / "chapter_lifecycle_review_template.csv"
+    candidates_path = output_dir / "chapter_status_event_candidates.csv"
     write_csv(inventory_path, INVENTORY_COLUMNS, tables.inventory_rows)
     write_csv(matrix_path, tables.matrix_columns, tables.matrix_rows)
     write_csv(lifecycle_path, LIFECYCLE_COLUMNS, tables.lifecycle_rows)
+    write_csv(candidates_path, CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS, tables.status_event_candidate_rows)
 
     return ChapterSemesterExportResult(
         inventory_path=inventory_path,
         matrix_path=matrix_path,
         lifecycle_review_path=lifecycle_path,
+        status_event_candidates_path=candidates_path,
         inventory_rows=len(tables.inventory_rows),
         matrix_rows=len(tables.matrix_rows),
         lifecycle_rows=len(tables.lifecycle_rows),
+        status_event_candidate_rows=len(tables.status_event_candidate_rows),
         term_count=tables.term_count,
         chapter_count=tables.chapter_count,
         source_rows=tables.source_rows,

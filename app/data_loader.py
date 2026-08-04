@@ -36,6 +36,8 @@ CANONICAL_OPTIONAL_FILES = [
     "yearly_unique_id_checklist.parquet",
     "manual_review_queue.parquet",
     "cohort_status_over_time.parquet",
+    "chapter_status_events.parquet",
+    "chapter_status_event_candidates.parquet",
     "transcript_term_summary.parquet",
     "transcript_course_detail.parquet",
     "transcript_parse_audit.parquet",
@@ -61,6 +63,8 @@ MANUAL_CORRECTION_OPTIONAL_FILES = [
     "yearly_unique_id_checklist.parquet",
     "manual_review_queue.parquet",
     "cohort_status_over_time.parquet",
+    "chapter_status_events.parquet",
+    "chapter_status_event_candidates.parquet",
     "transcript_parse_audit.parquet",
     "transcript_parse_issues.parquet",
 ]

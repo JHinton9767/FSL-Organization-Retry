@@ -15,6 +15,12 @@ import pandas as pd
 from app.io_utils import ROOT, canonical_headers, normalize_text, parse_term_label, read_tabular_file
 from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
+from src.chapter_status_events import (
+    CHAPTER_STATUS_EVENT_COLUMNS,
+    CHAPTER_STATUS_EVENT_INTERNAL_COLUMNS,
+    empty_chapter_status_events as _empty_chapter_status_events,
+    normalize_chapter_status_events,
+)
 from src.build_master_roster import normalize_banner_id, normalize_chapter_name
 from src.path_config import load_path_config
 
@@ -34,6 +40,7 @@ MANUAL_REVIEW_ACTIONS_PATH = CONFIG_DIR / "manual_review_actions.csv"
 GRADUATION_EVIDENCE_PATH = CONFIG_DIR / "graduation_evidence.csv"
 OUTCOME_OVERRIDES_PATH = CONFIG_DIR / "outcome_overrides.csv"
 ROSTER_EXCLUSIONS_PATH = CONFIG_DIR / "roster_exclusions.csv"
+CHAPTER_STATUS_EVENTS_PATH = CONFIG_DIR / "chapter_status_events.csv"
 
 
 def _configured_transcript_text_root() -> Path:
@@ -371,6 +378,10 @@ def empty_roster_exclusions() -> pd.DataFrame:
     return pd.DataFrame(columns=ROSTER_EXCLUSION_COLUMNS)
 
 
+def empty_chapter_status_events() -> pd.DataFrame:
+    return _empty_chapter_status_events()
+
+
 def _read_optional_tabular(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -383,6 +394,54 @@ def _read_optional_tabular(path: Path) -> pd.DataFrame:
         return read_tabular_file(path)
     except pd.errors.EmptyDataError:
         return pd.DataFrame()
+
+
+def load_chapter_status_events(path: Optional[Path] = None) -> pd.DataFrame:
+    candidate = path or CHAPTER_STATUS_EVENTS_PATH
+    frame = _read_optional_tabular(candidate)
+    if frame.empty:
+        return empty_chapter_status_events()
+    return normalize_chapter_status_events(frame)
+
+
+def save_chapter_status_events(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
+    candidate = path or CHAPTER_STATUS_EVENTS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    cleaned = normalize_chapter_status_events(frame)
+    output = cleaned[CHAPTER_STATUS_EVENT_COLUMNS] if not cleaned.empty else pd.DataFrame(columns=CHAPTER_STATUS_EVENT_COLUMNS)
+    output.to_csv(candidate, index=False)
+    return candidate
+
+
+def append_chapter_status_events(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
+    candidate = path or CHAPTER_STATUS_EVENTS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    incoming = normalize_chapter_status_events(frame)
+    incoming_count = len(incoming)
+    existing = load_chapter_status_events(candidate)
+    if incoming.empty:
+        save_chapter_status_events(existing, candidate)
+        return {"path": candidate, "incoming_rows": 0, "appended_rows": 0, "skipped_rows": 0}
+
+    combined = pd.concat([existing, incoming], ignore_index=True) if not existing.empty else incoming
+    dedupe_columns = [column for column in CHAPTER_STATUS_EVENT_COLUMNS if column in combined.columns]
+    before = len(combined)
+    combined = combined.drop_duplicates(subset=dedupe_columns, keep="last").reset_index(drop=True)
+    save_chapter_status_events(combined, candidate)
+    return {
+        "path": candidate,
+        "incoming_rows": incoming_count,
+        "appended_rows": max(0, len(combined) - len(existing)),
+        "skipped_rows": max(0, before - len(combined)),
+    }
+
+
+def ensure_chapter_status_events_template(path: Optional[Path] = None) -> Path:
+    candidate = path or CHAPTER_STATUS_EVENTS_PATH
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    if not candidate.exists():
+        pd.DataFrame(columns=CHAPTER_STATUS_EVENT_COLUMNS).to_csv(candidate, index=False)
+    return candidate
 
 
 def manual_review_queue_cohort_key(row: pd.Series) -> str:
@@ -1172,6 +1231,7 @@ def prepare_manual_corrections_workspace(
     graduation_evidence_path: Optional[Path] = None,
     outcome_overrides_path: Optional[Path] = None,
     roster_exclusions_path: Optional[Path] = None,
+    chapter_status_events_path: Optional[Path] = None,
 ) -> Dict[str, Path]:
     correction_file = corrections_path or MANUAL_ROSTER_CORRECTIONS_PATH
     adjustments_file = correction_file.parent / MANUAL_ADJUSTMENTS_PATH.name
@@ -1181,9 +1241,10 @@ def prepare_manual_corrections_workspace(
     graduation_evidence = graduation_evidence_path or (correction_file.parent / GRADUATION_EVIDENCE_PATH.name)
     outcome_overrides = outcome_overrides_path or (correction_file.parent / OUTCOME_OVERRIDES_PATH.name)
     roster_exclusions = roster_exclusions_path or (correction_file.parent / ROSTER_EXCLUSIONS_PATH.name)
+    chapter_status_events = chapter_status_events_path or (correction_file.parent / CHAPTER_STATUS_EVENTS_PATH.name)
     correction_file.parent.mkdir(parents=True, exist_ok=True)
     transcripts.mkdir(parents=True, exist_ok=True)
-    for path in [review_queue, review_actions, graduation_evidence, outcome_overrides, roster_exclusions]:
+    for path in [review_queue, review_actions, graduation_evidence, outcome_overrides, roster_exclusions, chapter_status_events]:
         path.parent.mkdir(parents=True, exist_ok=True)
     if not correction_file.exists():
         empty_manual_roster_corrections().to_csv(correction_file, index=False)
@@ -1199,6 +1260,8 @@ def prepare_manual_corrections_workspace(
         empty_outcome_overrides().to_csv(outcome_overrides, index=False)
     if not roster_exclusions.exists():
         empty_roster_exclusions().to_csv(roster_exclusions, index=False)
+    if not chapter_status_events.exists():
+        pd.DataFrame(columns=CHAPTER_STATUS_EVENT_COLUMNS).to_csv(chapter_status_events, index=False)
     return {
         "corrections_path": correction_file,
         "adjustments_path": adjustments_file,
@@ -1208,6 +1271,7 @@ def prepare_manual_corrections_workspace(
         "graduation_evidence_path": graduation_evidence,
         "outcome_overrides_path": outcome_overrides,
         "roster_exclusions_path": roster_exclusions,
+        "chapter_status_events_path": chapter_status_events,
     }
 
 
@@ -1293,6 +1357,7 @@ def build_manual_corrections_package(
     graduation_evidence = workspace["graduation_evidence_path"]
     outcome_overrides = workspace["outcome_overrides_path"]
     roster_exclusions = workspace["roster_exclusions_path"]
+    chapter_status_events = workspace["chapter_status_events_path"]
     buffer = BytesIO()
     with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
         archive.write(correction_file, arcname="manual_roster_corrections.csv")
@@ -1304,6 +1369,8 @@ def build_manual_corrections_package(
             archive.write(outcome_overrides, arcname="outcome_overrides.csv")
         if roster_exclusions.exists():
             archive.write(roster_exclusions, arcname="roster_exclusions.csv")
+        if chapter_status_events.exists():
+            archive.write(chapter_status_events, arcname="chapter_status_events.csv")
         if review_actions.exists():
             archive.write(review_actions, arcname="manual_review_actions.csv")
         if review_queue.exists():
@@ -1379,6 +1446,7 @@ def import_manual_corrections_package(package_bytes: bytes) -> Dict[str, object]
     graduation_evidence_rows = 0
     outcome_override_rows = 0
     roster_exclusion_rows = 0
+    chapter_status_event_rows = 0
     correction_result: Dict[str, object] = {
         "existing_rows": len(load_manual_roster_corrections()),
         "incoming_rows": 0,
@@ -1410,6 +1478,10 @@ def import_manual_corrections_package(package_bytes: bytes) -> Dict[str, object]
             incoming_exclusions = pd.read_csv(archive.open("roster_exclusions.csv"))
             append_roster_exclusions(incoming_exclusions)
             roster_exclusion_rows = len(load_roster_exclusions())
+        if "chapter_status_events.csv" in names:
+            incoming_events = pd.read_csv(archive.open("chapter_status_events.csv"))
+            append_chapter_status_events(incoming_events)
+            chapter_status_event_rows = len(load_chapter_status_events())
         if "manual_adjustments.csv" in names:
             incoming_adjustments = pd.read_csv(archive.open("manual_adjustments.csv"))
             combined_adjustments = pd.concat([load_manual_adjustments(), incoming_adjustments], ignore_index=True)
@@ -1438,6 +1510,7 @@ def import_manual_corrections_package(package_bytes: bytes) -> Dict[str, object]
         "graduation_evidence_rows": graduation_evidence_rows,
         "outcome_override_rows": outcome_override_rows,
         "roster_exclusion_rows": roster_exclusion_rows,
+        "chapter_status_event_rows": chapter_status_event_rows,
         "transcript_imported": transcript_imported,
         "transcript_skipped": transcript_skipped,
     }

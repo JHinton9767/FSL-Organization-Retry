@@ -29,7 +29,10 @@ from app.config_loader import (
     MANUAL_ROSTER_CORRECTIONS_PATH,
     OUTCOME_OVERRIDES_PATH,
     ROSTER_EXCLUSIONS_PATH,
+    CHAPTER_STATUS_EVENTS_PATH,
+    ensure_chapter_status_events_template,
     load_chapter_mapping,
+    load_chapter_status_events,
     load_graduation_evidence,
     load_manual_adjustments,
     load_manual_chapter_assignments,
@@ -38,6 +41,11 @@ from app.config_loader import (
     load_roster_exclusions,
     load_settings,
 )
+from src.chapter_semester_inventory import (
+    CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS,
+    build_chapter_semester_tables,
+)
+from src.chapter_status_events import chapter_kicked_by_status_event, chapter_status_event_lookup
 from app.status_framework import build_outcome_resolution_fields
 from src.build_master_roster import (
     DEFAULT_INPUT_ROOT,
@@ -69,7 +77,6 @@ from src.path_config import load_path_config, validate_path_config
 from src.persistence_outcomes import (
     CHAPTER_KICKED_OUTCOME,
     PERSISTENCE_OUTCOME_ORDER,
-    chapter_kicked_at_checkpoint,
     checkpoint_outcome_counts,
     persistence_outcome_from_status,
 )
@@ -4803,6 +4810,7 @@ def build_student_longitudinal_tracking(
     appearances: pd.DataFrame,
     summary: pd.DataFrame,
     manual_adjustments: pd.DataFrame,
+    chapter_status_events: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if appearances.empty:
         return pd.DataFrame(columns=STUDENT_LONGITUDINAL_TRACKING_COLUMNS)
@@ -4830,14 +4838,9 @@ def build_student_longitudinal_tracking(
 
     roster_coverage = app.loc[app["source_type"].eq("roster") & app["_has_term"]].copy()
     latest_loaded_roster_sort = 0
-    chapter_roster_terms: Dict[str, list[int]] = {}
+    chapter_event_lookup = chapter_status_event_lookup(chapter_status_events)
     if not roster_coverage.empty:
         latest_loaded_roster_sort = int(coerce_numeric(roster_coverage["_term_sort"]).dropna().max())
-        roster_coverage["_chapter_key"] = chapter_key_series(roster_coverage["chapter"])
-        chapter_roster_terms = {
-            key: sorted({int(value) for value in coerce_numeric(group["_term_sort"]).dropna().tolist() if int(value) < 999999})
-            for key, group in roster_coverage.loc[roster_coverage["_chapter_key"].ne("")].groupby("_chapter_key", dropna=False)
-        }
 
     rows: List[dict] = []
     for normalized_id, group in app.groupby("_normalized_student_id", dropna=False, sort=False):
@@ -4929,8 +4932,8 @@ def build_student_longitudinal_tracking(
             and not explicit_grad
             and current_active_flag.strip().lower() != "yes"
             and persistence_outcome_from_status(latest_known_status) in {"Active", "Unknown"}
-            and chapter_kicked_at_checkpoint(
-                chapter_roster_terms,
+            and chapter_kicked_by_status_event(
+                chapter_event_lookup,
                 latest_known_chapter,
                 sort_term_code(last_roster_code),
                 latest_loaded_roster_sort,
@@ -4984,12 +4987,12 @@ def build_student_longitudinal_tracking(
             OUTCOME_SOURCE_PROBLEM,
         }:
             bucket = OUTCOME_CHAPTER_KICKED
-            confidence = "medium"
-            flags = "; ".join(filter(None, [flags, "chapter_kicked_inferred_from_roster_gap"]))
+            confidence = "high"
+            flags = "; ".join(filter(None, [flags, "chapter_kicked_from_confirmed_chapter_status_event"]))
             review_reason = ""
             row["graduation_evidence_source"] = (
                 row["graduation_evidence_source"]
-                or "Chapter roster disappeared before the latest loaded roster term; no later explicit student outcome was observed."
+                or "Confirmed chapter status event in config/chapter_status_events.csv; no later roster appearance was observed."
             )
         row.update(
             {
@@ -5335,13 +5338,13 @@ def should_mark_chapter_kicked(
     latest_outcome_bucket: str,
     latest_chapter: str,
     student_last_roster_sort: object,
-    chapter_roster_terms: Dict[str, list[int]],
+    chapter_status_events: pd.DataFrame,
     latest_roster_term_sort: int,
 ) -> bool:
     if clean_text(latest_outcome_bucket) not in UNRESOLVED_OUTCOMES:
         return False
-    return chapter_kicked_at_checkpoint(
-        chapter_roster_terms,
+    return chapter_kicked_by_status_event(
+        chapter_status_events,
         latest_chapter,
         student_last_roster_sort,
         latest_roster_term_sort,
@@ -5387,16 +5390,11 @@ def build_student_summary(
         )
     latest_roster_term_sort = 0
     chapter_last_roster_sort: Dict[str, int] = {}
-    chapter_roster_terms: Dict[str, list[int]] = {}
     if not roster_present_master.empty:
         roster_term_sorts = coerce_numeric(roster_present_master["observed_term_sort"]).dropna()
         if not roster_term_sorts.empty:
             latest_roster_term_sort = int(roster_term_sorts.max())
         roster_present_master["_chapter_key"] = chapter_key_series(roster_present_master["chapter"])
-        chapter_roster_terms = {
-            key: sorted({int(value) for value in coerce_numeric(group["observed_term_sort"]).dropna().tolist() if int(value) < 999999})
-            for key, group in roster_present_master.loc[roster_present_master["_chapter_key"].ne("")].groupby("_chapter_key", dropna=False)
-        }
         chapter_last_roster_sort = (
             roster_present_master.loc[roster_present_master["_chapter_key"].ne("")]
             .groupby("_chapter_key", dropna=False)["observed_term_sort"]
@@ -5466,15 +5464,6 @@ def build_student_summary(
             graduation_status_correction_reason = "Removed graduation classification because no confirmed graduation evidence was present."
         latest_chapter_value = clean_text(roster_rows["chapter"].iloc[-1]) if not roster_rows.empty else ""
         student_last_roster_sort = coerce_numeric(roster_rows["observed_term_sort"]).dropna().iloc[-1] if not roster_rows.empty and not coerce_numeric(roster_rows["observed_term_sort"]).dropna().empty else 999999
-        if should_mark_chapter_kicked(
-            latest_outcome_bucket,
-            latest_chapter_value,
-            student_last_roster_sort,
-            chapter_roster_terms,
-            latest_roster_term_sort,
-        ):
-            latest_outcome_bucket = OUTCOME_CHAPTER_KICKED
-            evidence_source = "Chapter roster disappeared before the latest loaded roster term; no later explicit student outcome was observed."
         if latest_outcome_bucket in UNRESOLVED_OUTCOMES:
             outcome_exceptions.append(
                 {
@@ -6139,6 +6128,7 @@ def build_cohort_status_over_time(
     summary: pd.DataFrame,
     longitudinal: pd.DataFrame,
     max_years: int = 6,
+    chapter_status_events: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Build chart-ready cohort status rows from each student's organization join term."""
     schema_columns = load_schema()["tables"].get("cohort_status_over_time", COHORT_STATUS_OVER_TIME_COLUMNS)
@@ -6153,7 +6143,8 @@ def build_cohort_status_over_time(
     rows: List[dict] = []
     measurement_basis = (
         "Nine-category checkpoint outcome from roster status and later roster presence; "
-        "explicit graduation evidence is required, then dated manual corrections override."
+        "explicit graduation evidence is required, confirmed chapter-status events can resolve Chapter Kicked, "
+        "then dated manual corrections override."
     )
 
     for (cohort_code, cohort_term, cohort_sort), cohort in cohort_summary.groupby(
@@ -6182,6 +6173,7 @@ def build_cohort_status_over_time(
                 checkpoint_sort,
                 max_measurable_sort,
                 baseline=offset == 0,
+                chapter_status_events=chapter_status_events,
             )
 
             for status in COHORT_STATUS_ORDER:
@@ -6794,6 +6786,7 @@ def build_canonical_pipeline(
     chapter_mapping = load_chapter_mapping()
     ensure_manual_chapter_assignment_template()
     ensure_manual_roster_corrections_template()
+    ensure_chapter_status_events_template()
     if not MANUAL_ADJUSTMENTS_PATH.exists():
         MANUAL_ADJUSTMENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(columns=MANUAL_ADJUSTMENT_COLUMNS).to_csv(MANUAL_ADJUSTMENTS_PATH, index=False)
@@ -6805,6 +6798,7 @@ def build_canonical_pipeline(
     graduation_evidence = load_graduation_evidence()
     outcome_overrides = load_outcome_overrides()
     roster_exclusions = load_roster_exclusions()
+    chapter_status_events = load_chapter_status_events()
     combined_roster_corrections = pd.concat(
         [
             manual_roster_corrections,
@@ -6824,6 +6818,7 @@ def build_canonical_pipeline(
             GRADUATION_EVIDENCE_PATH,
             OUTCOME_OVERRIDES_PATH,
             ROSTER_EXCLUSIONS_PATH,
+            CHAPTER_STATUS_EVENTS_PATH,
             TRANSCRIPT_TEXT_MANIFEST_PATH,
             SCHEMA_PATH,
         ]
@@ -7207,10 +7202,19 @@ def build_canonical_pipeline(
         snapshot,
         transcript_term_summary,
     )
+    chapter_semester_tables = build_chapter_semester_tables(roster_term.to_dict(orient="records"))
+    chapter_status_event_candidates = ensure_columns(
+        pd.DataFrame(
+            chapter_semester_tables.status_event_candidate_rows,
+            columns=CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS,
+        ),
+        CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS,
+    )
     student_longitudinal_tracking = build_student_longitudinal_tracking(
         student_source_appearances,
         student_summary,
         combined_manual_adjustments,
+        chapter_status_events,
     )
     student_summary = apply_tracking_outcomes_to_summary(student_summary, student_longitudinal_tracking)
     master_longitudinal = enrich_master_longitudinal_with_summary(master_longitudinal, student_summary)
@@ -7224,7 +7228,7 @@ def build_canonical_pipeline(
     tracking_validation_qa, tracking_validation_failures = validate_outcome_tracking(student_longitudinal_tracking, input_group_outcome_buckets)
     if tracking_validation_failures:
         raise ValueError("Outcome tracking validation failed: " + " | ".join(tracking_validation_failures))
-    cohort_status_over_time = build_cohort_status_over_time(student_summary, master_longitudinal)
+    cohort_status_over_time = build_cohort_status_over_time(student_summary, master_longitudinal, chapter_status_events=chapter_status_events)
     cohort_metrics = build_cohort_metrics(student_summary, student_longitudinal_tracking)
     graduation_status_audit = build_graduation_status_audit(student_summary)
     membership_reference_validation = build_membership_reference_validation(roster_term, membership_reference)
@@ -7325,6 +7329,8 @@ def build_canonical_pipeline(
             "yearly_unique_id_checklist": yearly_unique_id_checklist,
             "manual_review_queue": generated_manual_review_queue,
             "cohort_status_over_time": cohort_status_over_time,
+            "chapter_status_events": chapter_status_events,
+            "chapter_status_event_candidates": chapter_status_event_candidates,
             "cohort_metrics": cohort_metrics,
             "graduation_status_audit": graduation_status_audit,
             "membership_reference_validation": membership_reference_validation,
@@ -7357,6 +7363,8 @@ def build_canonical_pipeline(
         "yearly_unique_id_checklist": output_folder / "yearly_unique_id_checklist.csv",
         "manual_review_queue": output_folder / "manual_review_queue.csv",
         "cohort_status_over_time": output_folder / "cohort_status_over_time.csv",
+        "chapter_status_events": output_folder / "chapter_status_events.csv",
+        "chapter_status_event_candidates": output_folder / "chapter_status_event_candidates.csv",
         "student_outcome_audit": output_folder / "student_outcome_audit.jsonl",
         "reference_inventory": output_folder / "reference_inventory.csv",
         "reference_unclassified_rows": output_folder / "reference_unclassified_rows.csv",
@@ -7396,6 +7404,8 @@ def build_canonical_pipeline(
     write_frame(files["yearly_unique_id_checklist"], yearly_unique_id_checklist)
     write_frame(files["manual_review_queue"], generated_manual_review_queue)
     write_frame(files["cohort_status_over_time"], cohort_status_over_time)
+    write_frame(files["chapter_status_events"], chapter_status_events)
+    write_frame(files["chapter_status_event_candidates"], chapter_status_event_candidates)
     with files["student_outcome_audit"].open("w", encoding="utf-8") as handle:
         for record in build_student_outcome_audit_records(student_longitudinal_tracking):
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")

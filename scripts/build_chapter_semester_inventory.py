@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--roster-term", help="Direct path to roster_term.csv.")
     parser.add_argument(
         "--output-dir",
-        help="Directory for chapter_semester_inventory.csv, chapter_semester_matrix.csv, and chapter_lifecycle_review_template.csv.",
+        help="Directory for chapter_semester_inventory.csv, chapter_semester_matrix.csv, chapter_lifecycle_review_template.csv, and chapter_status_event_candidates.csv.",
     )
     return parser.parse_args()
 
@@ -67,6 +67,7 @@ def main() -> None:
     print(f"Wrote: {result.inventory_path}")
     print(f"Wrote: {result.matrix_path}")
     print(f"Wrote: {result.lifecycle_review_path}")
+    print(f"Wrote: {result.status_event_candidates_path}")
 
 
 if __name__ == "__main__":
