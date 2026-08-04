@@ -5188,6 +5188,8 @@ def build_generated_manual_review_queue(appearances: pd.DataFrame, tracking: pd.
     if tracking.empty:
         return pd.DataFrame(columns=GENERATED_MANUAL_REVIEW_QUEUE_COLUMNS)
 
+    queue_focus_buckets = {OUTCOME_UNKNOWN_REVIEW, OUTCOME_NOT_RETAINED, OUTCOME_SOURCE_PROBLEM}
+
     def add_review(row: pd.Series, issue_type: str, description: str, priority: str = "Medium", group_row: Optional[pd.Series] = None) -> None:
         group_row = group_row if group_row is not None else pd.Series(dtype="object")
         normalized_id = _clean_display(row.get("normalized_student_id", ""))
@@ -5223,15 +5225,16 @@ def build_generated_manual_review_queue(appearances: pd.DataFrame, tracking: pd.
     for _, row in tracking.iterrows():
         bucket = _clean_display(row.get("final_outcome_bucket", ""))
         flags = _clean_display(row.get("ambiguity_flags", ""))
-        if row.get("manual_review_required", "") == "Yes":
+        is_queue_focus_bucket = bucket in queue_focus_buckets
+        if row.get("manual_review_required", "") == "Yes" and is_queue_focus_bucket:
             add_review(row, "manual_review_required", row.get("manual_review_reason", "") or "Student requires manual review.", "High" if bucket == OUTCOME_SOURCE_PROBLEM else "Medium")
-        if bucket in {OUTCOME_UNKNOWN_REVIEW, OUTCOME_NOT_RETAINED, OUTCOME_SOURCE_PROBLEM}:
+        if is_queue_focus_bucket:
             add_review(row, "unresolved_outcome_in_denominator", "Student may enter denominators with unresolved or source-problem outcome.", "High")
         if "graduation_claim_without_confirmed_evidence" in flags:
             add_review(row, "graduation_claim_without_evidence", "A source claimed graduation without accepted explicit evidence.", "High")
-        if row.get("first_roster_term", "") and not row.get("first_grade_report_term", ""):
+        if is_queue_focus_bucket and row.get("first_roster_term", "") and not row.get("first_grade_report_term", ""):
             add_review(row, "roster_without_grade_report", "Student appears in roster but no grade/academic appearance was found.", "Medium")
-        if row.get("first_grade_report_term", "") and not row.get("first_roster_term", ""):
+        if is_queue_focus_bucket and row.get("first_grade_report_term", "") and not row.get("first_roster_term", ""):
             add_review(row, "grade_report_without_roster", "Student appears in grade/academic data but no roster appearance was found.", "Medium")
 
     if not appearances.empty:

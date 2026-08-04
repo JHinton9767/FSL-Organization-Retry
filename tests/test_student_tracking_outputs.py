@@ -312,6 +312,22 @@ def test_tracking_marks_chapter_kicked_from_roster_gap() -> None:
     assert alpha_tracking["manual_review_required"] == "No"
 
 
+def test_generated_manual_queue_excludes_resolved_chapter_kicked_soft_gaps() -> None:
+    alpha = _roster("A00000014", status="Active", chapter="Alpha")
+    beta_2020 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021 = _roster("A00000015", status="Active", chapter="Beta")
+    beta_2021["term_code"] = "2021FA"
+    beta_2021["term_label"] = "Fall 2021"
+    roster = pd.concat([alpha, beta_2020, beta_2021], ignore_index=True)
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    tracking = build_student_longitudinal_tracking(appearances, _summary("A00000014"), pd.DataFrame())
+    buckets = build_input_group_outcome_buckets(appearances, tracking)
+
+    queue = build_generated_manual_review_queue(appearances, tracking, buckets)
+
+    assert "A00000014" not in queue["normalized_student_id"].tolist()
+
+
 def test_tracking_marks_chapter_kicked_from_confirmed_chapter_status_event() -> None:
     alpha = _roster("A00000014", status="Active", chapter="Alpha")
     beta_2020 = _roster("A00000015", status="Active", chapter="Beta")

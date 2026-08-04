@@ -91,6 +91,7 @@ from app.models import DataSourceStatus, MetricDefinition
 from app.presets import list_presets, load_preset, save_preset
 from app.status_framework import FULL_POPULATION_LABEL, outcome_population_summary
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
+from src.build_master_roster import normalize_banner_id
 from src.chapter_semester_inventory import (
     CHAPTER_STATUS_EVENT_CANDIDATE_COLUMNS,
     INVENTORY_COLUMNS,
@@ -144,6 +145,12 @@ MANUAL_STAGED_CORRECTIONS_KEY = "manual_staged_corrections"
 MANUAL_SAVE_MODE_KEY = "manual_correction_save_mode"
 MANUAL_STAGE_MODE_LABEL = "Stage changes (fast batch)"
 MANUAL_IMMEDIATE_MODE_LABEL = "Save immediately"
+MANUAL_QUEUE_REVIEW_OUTCOMES = {"Unknown"}
+MANUAL_QUEUE_HARD_ISSUES = {
+    "graduation_claim_without_evidence",
+    "multiple_chapters_same_term",
+    "source_problem_count",
+}
 
 
 def _display_metric_value(value: object, format_code: str, missing: str = "n/a") -> str:
@@ -1259,6 +1266,37 @@ def _queue_reason_for_row(row: pd.Series) -> str:
     return "; ".join(reasons) or "Review recommended"
 
 
+def _manual_queue_outcome_bucket_from_row(row: pd.Series) -> str:
+    for column in ["outcome_bucket", "latest_outcome_bucket", "outcome_resolution_group", "current_outcome_bucket"]:
+        value = str(row.get(column, "") or "").strip()
+        if value:
+            return persistence_outcome_from_status(value)
+    return "Unknown"
+
+
+def _manual_queue_should_include_summary_row(row: pd.Series) -> bool:
+    student_id = normalize_banner_id(row.get("student_id", ""))
+    if not student_id:
+        return False
+    return _manual_queue_outcome_bucket_from_row(row) in MANUAL_QUEUE_REVIEW_OUTCOMES
+
+
+def _manual_queue_should_include_canonical_row(row: pd.Series, summary_row: pd.Series) -> bool:
+    issue_type = str(row.get("issue_type", "") or "").strip()
+    if issue_type in MANUAL_QUEUE_HARD_ISSUES:
+        return True
+    outcome_bucket = _manual_queue_outcome_bucket_from_row(
+        pd.Series(
+            {
+                "outcome_bucket": row.get("current_outcome_bucket", ""),
+                "latest_outcome_bucket": row.get("current_outcome_bucket", "") or summary_row.get("latest_outcome_bucket", ""),
+                "outcome_resolution_group": row.get("current_outcome_bucket", "") or summary_row.get("outcome_resolution_group", ""),
+            }
+        )
+    )
+    return outcome_bucket in MANUAL_QUEUE_REVIEW_OUTCOMES
+
+
 def _graduation_mentioned_for_row(row: pd.Series) -> bool:
     if str(row.get("is_graduated", "") or "").strip().lower() in {"true", "1", "yes", "y"}:
         return True
@@ -1292,27 +1330,33 @@ def _build_manual_assignment_queue(summary: pd.DataFrame, decision_keys: set[str
     if "student_id" not in summary.columns:
         return pd.DataFrame(columns=MANUAL_REVIEW_QUEUE_COLUMNS)
 
-    has_student_id = summary["student_id"].fillna("").astype(str).str.strip().ne("")
-    graduation_mentioned = summary.apply(_graduation_mentioned_for_row, axis=1)
-    candidates = summary.loc[has_student_id & ~graduation_mentioned].copy()
+    candidates = summary.loc[summary.apply(_manual_queue_should_include_summary_row, axis=1)].copy()
     rows: list[dict[str, object]] = []
     for _, row in candidates.iterrows():
-        review_key = _manual_review_key(row)
+        review_key = normalize_banner_id(row.get("student_id", ""))
         if not review_key:
             continue
         correction_row = pd.Series(_manual_correction_row_from_summary(row))
+        outcome_bucket = _manual_queue_outcome_bucket_from_row(row)
+        latest_outcome = row.get("latest_outcome_bucket", "") or row.get("outcome_resolution_group", "")
         rows.append(
             {
                 "review_key": review_key,
-                "student_id": row.get("student_id", ""),
+                "student_id": normalize_banner_id(row.get("student_id", "")),
                 "last_name": row.get("last_name", ""),
                 "first_name": row.get("first_name", ""),
                 "student_name": row.get("student_name", ""),
                 "chapter": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
                 "join_term": row.get("join_term", ""),
                 "last_observed_org_term": row.get("last_observed_org_term", ""),
-                "latest_outcome_bucket": row.get("latest_outcome_bucket", ""),
-                "outcome_resolution_group": row.get("outcome_resolution_group", ""),
+                "latest_outcome_bucket": latest_outcome,
+                "outcome_resolution_group": latest_outcome,
+                "academic_year": row.get("academic_year", ""),
+                "term": row.get("last_observed_org_term", "") or row.get("join_term", ""),
+                "organization": row.get("current_active_chapter", "") or row.get("latest_chapter", "") or row.get("chapter", ""),
+                "issue_type": "unknown_outcome",
+                "outcome_bucket": outcome_bucket,
+                "priority": "High" if "source problem" in str(latest_outcome).lower() else "Medium",
                 "queue_reason": _queue_reason_for_row(row),
                 "assigned_to": "",
                 "review_status": "Needs Review",
@@ -1339,33 +1383,40 @@ def _canonical_review_queue_for_app(bundle, decision_keys: set[str]) -> pd.DataF
     summary_lookup = {}
     if not summary.empty and "student_id" in summary.columns:
         for _, summary_row in summary.iterrows():
-            student_id = str(summary_row.get("student_id", "") or "").strip().upper()
+            student_id = normalize_banner_id(summary_row.get("student_id", ""))
             if student_id and student_id not in summary_lookup:
                 summary_lookup[student_id] = summary_row
     rows: list[dict[str, object]] = []
     for _, row in canonical.iterrows():
         student_id = str(row.get("student_id", "") or "").strip()
-        summary_row = summary_lookup.get(student_id.upper(), pd.Series(dtype="object"))
+        normalized_student_id = normalize_banner_id(student_id or row.get("normalized_student_id", ""))
+        if not normalized_student_id:
+            continue
+        summary_row = summary_lookup.get(normalized_student_id, pd.Series(dtype="object"))
+        if not _manual_queue_should_include_canonical_row(row, summary_row):
+            continue
         review_key = str(row.get("review_id", "") or "").strip() or student_id or str(row.get("normalized_student_id", "") or "").strip()
         if not review_key:
             continue
+        latest_outcome = row.get("current_outcome_bucket", "") or summary_row.get("latest_outcome_bucket", "")
+        outcome_bucket = _manual_queue_outcome_bucket_from_row(pd.Series({"outcome_bucket": latest_outcome}))
         rows.append(
             {
                 "review_key": review_key,
-                "student_id": student_id,
+                "student_id": normalized_student_id,
                 "last_name": "",
                 "first_name": "",
                 "student_name": summary_row.get("student_name", ""),
                 "chapter": row.get("chapter", "") or summary_row.get("chapter", ""),
                 "join_term": summary_row.get("join_term", ""),
                 "last_observed_org_term": summary_row.get("last_observed_org_term", row.get("term", "")),
-                "latest_outcome_bucket": row.get("current_outcome_bucket", "") or summary_row.get("latest_outcome_bucket", ""),
-                "outcome_resolution_group": row.get("current_outcome_bucket", ""),
+                "latest_outcome_bucket": latest_outcome,
+                "outcome_resolution_group": latest_outcome,
                 "academic_year": "",
                 "term": row.get("term", ""),
                 "organization": row.get("organization", ""),
                 "issue_type": row.get("issue_type", ""),
-                "outcome_bucket": row.get("current_outcome_bucket", ""),
+                "outcome_bucket": outcome_bucket,
                 "priority": row.get("priority", ""),
                 "input_group_id": row.get("input_group_id", ""),
                 "source_file": row.get("source_file", ""),
