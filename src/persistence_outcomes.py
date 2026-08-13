@@ -24,7 +24,17 @@ PERSISTENCE_OUTCOME_ORDER = [
     "Graduated",
 ]
 
-_ACTIVE_STATUSES = {"A", "ACTIVE", "N", "NEW", "NEW MEMBER", "STILL ACTIVE", "CURRENTLY ACTIVE"}
+_ACTIVE_STATUSES = {
+    "A",
+    "ACTIVE",
+    "N",
+    "NEW",
+    "NEW MEMBER",
+    "STILL ACTIVE",
+    "CURRENTLY ACTIVE",
+    "STILL ACTIVE / CURRENTLY ACTIVE",
+    "STILL ACTIVE/CURRENTLY ACTIVE",
+}
 
 
 def persistence_outcome_from_status(value: object) -> str:
@@ -32,7 +42,7 @@ def persistence_outcome_from_status(value: object) -> str:
     upper = text.upper()
     if not upper:
         return "Unknown"
-    if upper in _ACTIVE_STATUSES:
+    if upper in _ACTIVE_STATUSES or ("STILL ACTIVE" in upper and "CURRENTLY ACTIVE" in upper):
         return "Active"
     if upper in {"AL", "ALUMNI", "EARLY ALUMNI"} or "EARLY ALUM" in upper:
         return "Early Alumni"

@@ -2,6 +2,7 @@
   "default_min_sample_size": 5,
   "max_min_sample_size": 50,
   "high_hours_threshold": 60,
+  "latest_full_roster_term": "Spring 2026",
   "chapter_size_bands": [
     {
       "label": "Small (1-24)",

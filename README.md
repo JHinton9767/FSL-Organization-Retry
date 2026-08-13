@@ -366,10 +366,11 @@ Recent app additions:
 
 Current active membership is now defined separately from historical activeness:
 
-- `Current Active Members (Most Recent Roster)` uses only the single latest roster term in the canonical `roster_term` table.
-- A student is current active only if they appear as active or new member on that most recent roster term.
+- `Current Active Members (Latest Full Roster Marker)` uses the term configured as `latest_full_roster_term` in `config/app_settings.json`; if that term is blank or unavailable, it falls back to the latest roster term in the canonical `roster_term` table.
+- Update `latest_full_roster_term` each semester after the full roster set is loaded. For example, keep it as `Spring 2026` until Fall 2026 rosters are complete.
+- A student is current active only if they appear as active or new member on that marker term.
 - Older active rows are still kept for historical participation, cohort, retention, graduation, and trend analysis, but they do not roll forward into the present-day active headcount.
-- Current chapter headcounts in the app use the chapter assignment from that same most recent roster term, not a student's historical initial chapter.
+- Current chapter headcounts in the app use the chapter assignment from that same marker term, not a student's historical initial chapter.
 
 ## Important interpretation rules
 

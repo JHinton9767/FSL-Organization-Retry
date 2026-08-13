@@ -12,20 +12,22 @@ class _Bundle:
 def test_manual_assignment_queue_uses_true_unknown_outcomes_only() -> None:
     summary = pd.DataFrame(
         {
-            "student_id": ["A00000001", "A00000002", "A00000003", "bad-id"],
-            "student_name": ["Unknown One", "Kicked One", "Dropped One", "Bad Id"],
-            "chapter": ["Alpha", "Beta", "Gamma", "Delta"],
-            "join_term": ["Fall 2020", "Fall 2020", "Fall 2020", "Fall 2020"],
+            "student_id": ["A00000001", "A00000002", "A00000003", "A00000004", "bad-id"],
+            "student_name": ["Unknown One", "Kicked One", "Dropped One", "Active One", "Bad Id"],
+            "chapter": ["Alpha", "Beta", "Gamma", "Theta", "Delta"],
+            "join_term": ["Fall 2020", "Fall 2020", "Fall 2020", "Fall 2020", "Fall 2020"],
             "latest_outcome_bucket": [
                 "Unknown / Manual Review Required",
                 "Chapter Kicked",
                 "Dropped/Resigned",
+                "Still Active / Currently Active",
                 "Unknown / Manual Review Required",
             ],
             "outcome_resolution_group": [
                 "Unknown / Manual Review Required",
                 "Chapter Kicked",
                 "Dropped/Resigned",
+                "Still Active / Currently Active",
                 "Unknown / Manual Review Required",
             ],
         }

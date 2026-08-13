@@ -66,6 +66,7 @@ def load_settings() -> Dict[str, Any]:
         "default_min_sample_size": 5,
         "max_min_sample_size": 50,
         "high_hours_threshold": 60,
+        "latest_full_roster_term": "",
         "chapter_size_bands": [
             {"label": "Small (1-24)", "min": 1, "max": 24},
             {"label": "Medium (25-49)", "min": 25, "max": 49},

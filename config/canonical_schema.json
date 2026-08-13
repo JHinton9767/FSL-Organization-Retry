@@ -195,6 +195,7 @@
       "current_active_chapter_size_band",
       "current_active_roster_term_code",
       "current_active_roster_term",
+      "current_active_roster_term_basis",
       "current_active_source_file",
       "current_active_source_sheet",
       "major",

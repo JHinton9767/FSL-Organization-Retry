@@ -26,6 +26,7 @@ def test_manual_outcome_labels_match_persistence_buckets() -> None:
     assert persistence_outcome_from_status("Dropped") == "Dropped/Resigned"
     assert persistence_outcome_from_status("Resigned") == "Dropped/Resigned"
     assert persistence_outcome_from_status("Chapter Kicked") == "Chapter Kicked"
+    assert persistence_outcome_from_status("Still Active / Currently Active") == "Active"
 
 
 def test_filter_persistence_population_supports_council_and_org_type_distinctions() -> None:
@@ -260,6 +261,36 @@ def test_build_persistence_dashboard_uses_later_roster_presence_and_skips_after_
     assert four_year["Active Count"] == 1
     assert four_year["Unknown Count"] == 1
     assert not table["Milestone"].eq("5 Year").any()
+
+
+def test_build_persistence_dashboard_uses_latest_full_roster_marker_over_partial_future_roster() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "join_term": ["Fall 2020", "Fall 2020"],
+            "council": ["IFC", "IFC"],
+            "org_type": ["Fraternity", "Fraternity"],
+            "is_graduated": [False, False],
+            "graduation_term": ["", ""],
+            "graduation_term_code": ["", ""],
+            "current_active_roster_term_code": ["2026SP", "2026SP"],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "term_code": ["2026SP", "2026FA"],
+            "observed_term_sort": [20261, 20263],
+            "roster_present": ["Yes", "Yes"],
+            "org_status_bucket": ["Active", "Active"],
+        }
+    )
+
+    dashboard = build_persistence_dashboard(summary, longitudinal, "Fall 2020", "ALL")
+    table = dashboard["table_frame"]
+
+    assert table["Milestone"].tolist()[-1] == "5 Year"
+    assert not table["Milestone"].eq("6 Year").any()
 
 
 def test_build_persistence_dashboard_uses_roster_categories_then_manual_override() -> None:

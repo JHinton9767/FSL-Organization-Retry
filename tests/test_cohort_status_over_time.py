@@ -116,6 +116,34 @@ def test_cohort_status_over_time_uses_later_roster_presence_and_skips_future_che
     assert not table["checkpoint"].eq("5 Year").any()
 
 
+def test_cohort_status_over_time_uses_latest_full_roster_marker_over_partial_future_roster() -> None:
+    summary = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "join_term": ["Fall 2020", "Fall 2020"],
+            "is_graduated": [False, False],
+            "graduation_term_code": ["", ""],
+            "graduation_term": ["", ""],
+            "current_active_roster_term_code": ["2026SP", "2026SP"],
+        }
+    )
+    longitudinal = pd.DataFrame(
+        {
+            "student_id": ["A00000001", "A00000002"],
+            "term_code": ["2026SP", "2026FA"],
+            "observed_term_sort": [20261, 20263],
+            "roster_present": ["Yes", "Yes"],
+            "chapter": ["Alpha", "Beta"],
+            "org_status_bucket": ["Active", "Active"],
+        }
+    )
+
+    table = build_cohort_status_over_time(summary, longitudinal, max_years=6)
+
+    assert table["checkpoint"].tolist()[-9:] == ["5 Year"] * 9
+    assert not table["checkpoint"].eq("6 Year").any()
+
+
 def test_cohort_status_over_time_marks_chapter_kicked_from_roster_gap() -> None:
     summary = pd.DataFrame(
         {

@@ -4839,6 +4839,7 @@ def build_student_longitudinal_tracking(
 
     roster_coverage = app.loc[app["source_type"].eq("roster") & app["_has_term"]].copy()
     latest_loaded_roster_sort = 0
+    latest_full_roster_sort = 0
     chapter_roster_terms: Dict[str, list[int]] = {}
     chapter_event_lookup = chapter_status_event_lookup(chapter_status_events)
     if not roster_coverage.empty:
@@ -4856,6 +4857,13 @@ def build_student_longitudinal_tracking(
             .groupby("_chapter_key", dropna=False)
             if str(chapter_key).strip()
         }
+    if not summary_lookup.empty and "current_active_roster_term_code" in summary_lookup.columns:
+        marker_sorts = summary_lookup["current_active_roster_term_code"].fillna("").astype(str).map(sort_term_code)
+        marker_sorts = marker_sorts.loc[marker_sorts.lt(999999)]
+        if not marker_sorts.empty:
+            latest_full_roster_sort = int(marker_sorts.max())
+    if not latest_full_roster_sort:
+        latest_full_roster_sort = latest_loaded_roster_sort
 
     rows: List[dict] = []
     for normalized_id, group in app.groupby("_normalized_student_id", dropna=False, sort=False):
@@ -4947,8 +4955,8 @@ def build_student_longitudinal_tracking(
             chapter_event_lookup,
             latest_known_chapter,
             last_roster_sort,
-            latest_loaded_roster_sort,
-            latest_loaded_roster_sort,
+            latest_full_roster_sort,
+            latest_full_roster_sort,
         )
         inferred_chapter_kicked = (
             not confirmed_chapter_kicked
@@ -4956,8 +4964,8 @@ def build_student_longitudinal_tracking(
                 chapter_roster_terms,
                 latest_known_chapter,
                 last_roster_sort,
-                latest_loaded_roster_sort,
-                latest_loaded_roster_sort,
+                latest_full_roster_sort,
+                latest_full_roster_sort,
             )
         )
         auto_chapter_kicked = (
@@ -5440,6 +5448,16 @@ def build_student_summary(
         roster_term_sorts = coerce_numeric(roster_present_master["observed_term_sort"]).dropna()
         if not roster_term_sorts.empty:
             latest_roster_term_sort = int(roster_term_sorts.max())
+            configured_term = clean_text(
+                settings.get("latest_full_roster_term", "")
+                or settings.get("latest_complete_roster_term", "")
+                or settings.get("latest_full_roster_term_code", "")
+            )
+            configured_code = parse_term_code(configured_term)[0] if configured_term else ""
+            configured_sort = sort_term_code(configured_code) if configured_code else 999999
+            available_roster_sorts = set(roster_term_sorts.astype(int).tolist())
+            if configured_sort < 999999 and configured_sort in available_roster_sorts:
+                latest_roster_term_sort = configured_sort
         roster_present_master["_chapter_key"] = chapter_key_series(roster_present_master["chapter"])
         chapter_last_roster_sort = (
             roster_present_master.loc[roster_present_master["_chapter_key"].ne("")]
@@ -5783,7 +5801,7 @@ def build_student_summary(
             {"Check Group": "Coverage", "Check": "Still active outcomes", "Status": "Pass", "Value": int(active_mask.sum()), "Notes": ""},
             {"Check Group": "Coverage", "Check": "Truly unknown / unresolved outcomes", "Status": "Pass", "Value": int(unknown_mask.sum()), "Notes": ""},
             {"Check Group": "Coverage", "Check": "Other / unmapped outcomes", "Status": "Pass", "Value": int((~resolved_mask & ~active_mask & ~unknown_mask).sum()), "Notes": ""},
-            {"Check Group": "Coverage", "Check": "Current active students (most recent roster only)", "Status": "Pass", "Value": int(summary["current_active_flag"].fillna("").astype(str).eq("Yes").sum()), "Notes": f"Most recent roster term: {clean_text(summary['current_active_roster_term'].iloc[0]) or clean_text(summary['current_active_roster_term_code'].iloc[0])}"},
+            {"Check Group": "Coverage", "Check": "Current active students (latest full roster marker)", "Status": "Pass", "Value": int(summary["current_active_flag"].fillna("").astype(str).eq("Yes").sum()), "Notes": f"{clean_text(summary['current_active_roster_term_basis'].iloc[0]) or 'Latest observed roster term'}: {clean_text(summary['current_active_roster_term'].iloc[0]) or clean_text(summary['current_active_roster_term_code'].iloc[0])}"},
             {"Check Group": "Coverage", "Check": "Historical latest-status active students", "Status": "Pass", "Value": int(summary["active_flag"].fillna("").astype(str).eq("Yes").sum()), "Notes": "Retained for historical outcome logic only; not used for current active headcounts."},
             {"Check Group": "Coverage", "Check": "Unresolved chapter assignments", "Status": "Pass", "Value": int(summary["chapter_assignment_source"].fillna("").astype(str).eq("unresolved").sum()), "Notes": ""},
         ]
@@ -5808,6 +5826,7 @@ def build_student_summary(
         "current_active_chapter_size_band",
         "current_active_roster_term_code",
         "current_active_roster_term",
+        "current_active_roster_term_basis",
         "current_active_source_file",
         "current_active_source_sheet",
         "pell_group",
@@ -5848,6 +5867,7 @@ def build_current_active_fields(
         "current_active_chapter_size_band",
         "current_active_roster_term_code",
         "current_active_roster_term",
+        "current_active_roster_term_basis",
         "current_active_source_file",
         "current_active_source_sheet",
     ]
@@ -5872,7 +5892,20 @@ def build_current_active_fields(
         return result
 
     roster_working["_term_sort"] = roster_working["term_code"].map(sort_term_code)
-    latest_term_sort = roster_working["_term_sort"].max()
+    available_term_sorts = set(roster_working["_term_sort"].dropna().astype(int).tolist())
+    configured_term = clean_text(
+        settings.get("latest_full_roster_term", "")
+        or settings.get("latest_complete_roster_term", "")
+        or settings.get("latest_full_roster_term_code", "")
+    )
+    configured_code = parse_term_code(configured_term)[0] if configured_term else ""
+    configured_sort = sort_term_code(configured_code) if configured_code else 999999
+    if configured_sort < 999999 and configured_sort in available_term_sorts:
+        latest_term_sort = configured_sort
+        latest_term_basis = "Configured latest full roster term"
+    else:
+        latest_term_sort = roster_working["_term_sort"].max()
+        latest_term_basis = "Latest observed roster term"
     latest_roster = roster_working.loc[roster_working["_term_sort"].eq(latest_term_sort)].copy()
     if latest_roster.empty:
         return result
@@ -5881,6 +5914,7 @@ def build_current_active_fields(
     latest_term_label = term_label_from_code(latest_term_code)
     result["current_active_roster_term_code"] = latest_term_code
     result["current_active_roster_term"] = latest_term_label
+    result["current_active_roster_term_basis"] = latest_term_basis
 
     active_latest = latest_roster.loc[
         latest_roster["org_status_bucket"].fillna("").astype(str).isin(["Active", "New Member"])
@@ -6170,6 +6204,19 @@ def _latest_roster_checkpoint_sort(longitudinal: pd.DataFrame) -> int:
     return int(present["_checkpoint_sort"].dropna().max())
 
 
+def _latest_full_roster_marker_sort(summary: pd.DataFrame) -> int:
+    if summary.empty:
+        return 0
+    marker_sorts = []
+    for column in ["current_active_roster_term_code", "current_active_roster_term"]:
+        if column not in summary.columns:
+            continue
+        values = summary[column].fillna("").astype(str).str.strip()
+        marker_sorts.extend(sort_term_code(parse_term_code(value)[0]) for value in values.loc[values.ne("")].tolist())
+    valid = [int(value) for value in marker_sorts if int(value) < 999999]
+    return max(valid) if valid else 0
+
+
 def build_cohort_status_over_time(
     summary: pd.DataFrame,
     longitudinal: pd.DataFrame,
@@ -6185,7 +6232,7 @@ def build_cohort_status_over_time(
     if cohort_summary.empty:
         return pd.DataFrame(columns=schema_columns)
 
-    max_measurable_sort = _latest_roster_checkpoint_sort(longitudinal)
+    max_measurable_sort = _latest_full_roster_marker_sort(cohort_summary) or _latest_roster_checkpoint_sort(longitudinal)
     rows: List[dict] = []
     measurement_basis = (
         "Nine-category checkpoint outcome from roster status and later roster presence; "

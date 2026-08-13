@@ -1267,7 +1267,15 @@ def build_persistence_dashboard(
         empty["meta"]["note"] = "No roster-present longitudinal rows were available for milestone calculations."
         return empty
 
-    max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
+    observed_max_term_sort = int(pd.to_numeric(presence_rows["observed_term_sort"], errors="coerce").dropna().max()) if not presence_rows.empty else 0
+    marker_sorts = pd.Series(dtype="float64")
+    for column in ["current_active_roster_term_code", "current_active_roster_term"]:
+        if column in summary.columns:
+            values = summary[column].fillna("").astype(str).str.strip()
+            parsed = values.loc[values.ne("")].map(lambda value: parse_term_label(value)["sort_value"])
+            marker_sorts = pd.concat([marker_sorts, pd.to_numeric(parsed, errors="coerce")], ignore_index=True)
+    marker_sorts = marker_sorts.loc[marker_sorts.notna() & marker_sorts.lt(999999)]
+    max_term_sort = int(marker_sorts.max()) if not marker_sorts.empty else observed_max_term_sort
 
     cohort_work = cohort.copy()
     cohort_work["student_id"] = cohort_work["student_id"].fillna("").astype(str).str.strip()

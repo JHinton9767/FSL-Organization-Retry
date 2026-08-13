@@ -71,6 +71,35 @@ def test_current_active_fields_use_latest_roster_only() -> None:
     assert result.loc[2, "current_active_council"] == "PHC"
 
 
+def test_current_active_fields_use_configured_latest_full_roster_term() -> None:
+    summary = pd.DataFrame({"student_id": ["1", "2"]})
+    roster = pd.DataFrame(
+        {
+            "student_id": ["1", "2"],
+            "term_code": ["2026SP", "2026FA"],
+            "org_status_bucket": ["Active", "Active"],
+            "chapter": ["Alpha", "Beta"],
+            "source_file": ["spring_2026.xlsx", "fall_2026_partial.xlsx"],
+            "source_sheet": ["Alpha", "Beta"],
+        }
+    )
+
+    result = build_current_active_fields(
+        summary,
+        roster,
+        pd.DataFrame(columns=["chapter", "chapter_group", "council", "org_type", "family", "custom_group"]),
+        settings={
+            "latest_full_roster_term": "Spring 2026",
+            "chapter_size_bands": [{"label": "Small", "min": 1, "max": 24}],
+        },
+    )
+
+    assert result.loc[0, "current_active_flag"] == "Yes"
+    assert result.loc[1, "current_active_flag"] == "No"
+    assert result.loc[0, "current_active_roster_term_code"] == "2026SP"
+    assert result.loc[0, "current_active_roster_term_basis"] == "Configured latest full roster term"
+
+
 def test_current_active_fields_allow_missing_source_metadata_columns() -> None:
     summary = pd.DataFrame({"student_id": ["1", "2"]})
     roster = pd.DataFrame(

@@ -96,6 +96,27 @@ def test_latest_loaded_roster_explicit_exit_still_counts_as_exit() -> None:
     assert tracking.loc[0, "final_outcome_bucket"] == OUTCOME_INACTIVE_EXIT
 
 
+def test_latest_full_roster_marker_prevents_partial_future_roster_disappearance() -> None:
+    spring_active = _roster("A00000017", status="Active", chapter="Alpha")
+    spring_active["term_code"] = "2026SP"
+    spring_active["term_label"] = "Spring 2026"
+    partial_future = _roster("A00000018", status="Active", chapter="Beta")
+    partial_future["term_code"] = "2026FA"
+    partial_future["term_label"] = "Fall 2026"
+    roster = pd.concat([spring_active, partial_future], ignore_index=True)
+    appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    tracking = build_student_longitudinal_tracking(
+        appearances,
+        _summary("A00000017", current_roster_term_code="2026SP"),
+        pd.DataFrame(),
+    )
+    spring_tracking = tracking.loc[tracking["normalized_student_id"].eq("A00000017")].iloc[0]
+
+    assert spring_tracking["final_outcome_bucket"] == OUTCOME_STILL_ACTIVE
+    assert "chapter_kicked_inferred_from_roster_gap" not in spring_tracking["ambiguity_flags"]
+
+
 def test_early_alumni_roster_status_counts_as_non_graduate_exit() -> None:
     roster = _roster("A00000011", status="Early Alumni")
     appearances = build_student_source_appearances(roster, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
