@@ -4,6 +4,7 @@ from src.sqlCompile_dashboard import (
     build_dashboard_rate_table,
     build_manual_entry_template,
     build_outcome_distribution,
+    build_sql_compile_milestone_dashboard,
     odd_record_editor_to_manual_rows,
 )
 
@@ -96,3 +97,44 @@ def test_dashboard_outcome_distribution_counts_by_cohort() -> None:
 
     assert distribution.set_index("Final Outcome Bucket").loc["Graduated", "Student Count"] == 2
     assert distribution.set_index("Final Outcome Bucket").loc["Graduated", "Share of Cohort"] == 2 / 3
+
+
+def test_dashboard_milestones_support_grouped_semesters_and_status_mapping() -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2021", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2024", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2021", "Status Code": "RS", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Spring 2021", "Student ID": "A3", "Semester": "Spring 2021", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Spring 2021", "Student ID": "A3", "Semester": "Spring 2022", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A1"},
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A2"},
+            {"Cohort Semester": "Spring 2021", "Cohort Chapter": "Beta", "Student ID": "A3"},
+        ]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2020", "Spring 2021"],
+        selection_label="2 Semesters",
+    )
+    table = dashboard["table_frame"].set_index("Milestone")
+    chart = dashboard["chart_frame"]
+
+    assert dashboard["meta"]["students"] == 3
+    assert table.loc["Cohort Year", "Active Count"] == 3
+    assert table.loc["1 Year", "Active Count"] == 2
+    assert table.loc["1 Year", "Dropped/Resigned Count"] == 1
+    assert table.loc["2 Year", "Active Count"] == 1
+    assert table.loc["2 Year", "Unknown Count"] == 1
+    assert table.loc["4 Year", "Measured Students"] == 2
+    assert table.loc["4 Year", "Graduated Count"] == 1
+    assert table.loc["4 Year", "Dropped/Resigned Count"] == 1
+    assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(4), "Denominator"].iloc[0] == 2

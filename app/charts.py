@@ -153,6 +153,11 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         return empty_figure("No persistence or graduation data is available for the selected cohort.")
 
     fig = go.Figure()
+    milestone_order = (
+        frame.sort_values("Milestone Sort")["Milestone"].drop_duplicates().astype(str).tolist()
+        if "Milestone Sort" in frame.columns
+        else frame["Milestone"].drop_duplicates().astype(str).tolist()
+    )
     for outcome in PERSISTENCE_OUTCOME_ORDER:
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
@@ -180,12 +185,20 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
     fig.update_layout(
         template=PLOTLY_TEMPLATE,
         barmode="stack",
+        bargap=0.18,
         height=610,
-        title={"text": title + (f"<br><sup>{subtitle}</sup>" if subtitle else ""), "x": 0.01, "xanchor": "left"},
+        title={
+            "text": title + (f"<br><sup>{subtitle}</sup>" if subtitle else ""),
+            "x": 0.01,
+            "xanchor": "left",
+            "font": {"color": "#17213A", "size": 18},
+        },
         legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
         xaxis_title="",
         yaxis_title="Share of cohort",
         margin={"l": 24, "r": 24, "t": 90, "b": 120},
+        uniformtext={"minsize": 8, "mode": "hide"},
     )
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
+    fig.update_xaxes(categoryorder="array", categoryarray=milestone_order)
     return fig

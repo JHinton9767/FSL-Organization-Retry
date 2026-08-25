@@ -7,7 +7,10 @@ from streamlit.web import cli as stcli
 
 
 def main() -> None:
-    target = Path(__file__).resolve().parent / "app" / "sql_compile_dashboard.py"
+    root = Path(__file__).resolve().parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    target = root / "app" / "sql_compile_dashboard.py"
     sys.argv = ["streamlit", "run", str(target), *sys.argv[1:]]
     raise SystemExit(stcli.main())
 

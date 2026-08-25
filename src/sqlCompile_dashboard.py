@@ -11,9 +11,11 @@ from src.sqlCompile_cohort import (
     DEFAULT_MANUAL_STATUS_PATH,
     MANUAL_STATUS_COLUMNS,
     build_new_member_cohort_tables,
+    normalize_status_code,
     read_manual_status_rows,
     read_sql_compile_table,
 )
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
 
 RATE_COLUMNS = [
@@ -37,6 +39,25 @@ OUTCOME_DISTRIBUTION_COLUMNS = [
     "Cohort Students",
     "Share of Cohort",
 ]
+MILESTONE_CHART_COLUMNS = [
+    "Milestone",
+    "Milestone Sort",
+    "Outcome",
+    "Share",
+    "Count",
+    "Denominator",
+    "Label",
+]
+MILESTONE_TABLE_COLUMNS = [
+    "Milestone",
+    "Term",
+    "Measured Students",
+    *[
+        column
+        for outcome in PERSISTENCE_OUTCOME_ORDER
+        for column in (outcome, f"{outcome} Count")
+    ],
+]
 ODD_RECORD_COLUMNS = [
     "Cohort Semester",
     "Cohort Chapter",
@@ -57,6 +78,7 @@ KNOWN_NON_GRADUATE_BUCKETS = {
     "Suspended",
     "Transfer",
 }
+SQL_COMPILE_ALL_TIME_LABEL = "All Time"
 
 
 @dataclass(frozen=True)
@@ -144,6 +166,129 @@ def build_outcome_distribution(outcomes: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values(["_sort", "Final Outcome Bucket"], na_position="last").drop(columns=["_sort"]).reset_index(drop=True)
 
 
+def build_sql_compile_milestone_dashboard(
+    timeline: pd.DataFrame,
+    outcomes: pd.DataFrame,
+    selected_semesters: Optional[Sequence[str]] = None,
+    *,
+    selection_label: str = SQL_COMPILE_ALL_TIME_LABEL,
+    max_years: int = 6,
+) -> dict[str, object]:
+    filtered_outcomes = _filter_by_selected_semesters(outcomes, selected_semesters)
+    empty = {
+        "chart_frame": pd.DataFrame(columns=MILESTONE_CHART_COLUMNS),
+        "table_frame": pd.DataFrame(columns=MILESTONE_TABLE_COLUMNS),
+        "meta": {
+            "students": 0,
+            "cohort_term": selection_label,
+            "distinction": "ALL",
+            "max_milestone": "",
+            "note": "No new-member cohort rows matched the current selection.",
+        },
+    }
+    if filtered_outcomes.empty:
+        return empty
+
+    cohort_students = (
+        filtered_outcomes.loc[:, ["Cohort Semester", "Cohort Chapter", "Student ID"]]
+        .fillna("")
+        .astype(str)
+        .apply(lambda column: column.str.strip())
+        .replace("", pd.NA)
+        .dropna(subset=["Cohort Semester", "Student ID"])
+        .drop_duplicates(subset=["Cohort Semester", "Student ID"], keep="first")
+        .reset_index(drop=True)
+    )
+    if cohort_students.empty:
+        return empty
+
+    timeline_work = timeline.copy()
+    if not timeline_work.empty:
+        timeline_work = _ensure_missing_columns(
+            timeline_work,
+            [
+                "Cohort Semester",
+                "Student ID",
+                "Semester",
+                "Status",
+                "Status Code",
+                "Source",
+                "Included In Outcome",
+            ],
+        )
+        for column in ["Cohort Semester", "Student ID", "Semester", "Status", "Status Code", "Source", "Included In Outcome"]:
+            timeline_work[column] = timeline_work[column].fillna("").astype(str).str.strip()
+        timeline_work["_term_sort"] = timeline_work["Semester"].map(_cohort_sort)
+        timeline_work["_status_code"] = timeline_work.apply(_timeline_status_code, axis=1)
+        timeline_work["_manual_priority"] = timeline_work["Source"].eq("manual_status").astype(int)
+        if "Included In Outcome" in timeline_work.columns:
+            timeline_work = timeline_work.loc[timeline_work["Included In Outcome"].eq("Yes")].copy()
+
+    latest_sort = _latest_timeline_sort(timeline_work)
+    if latest_sort == 0:
+        latest_sort = max([_cohort_sort(value) for value in cohort_students["Cohort Semester"].tolist()] or [0])
+
+    chart_rows: list[dict[str, object]] = []
+    table_rows: list[dict[str, object]] = []
+    last_milestone = ""
+    capped_max_years = max(0, min(int(max_years), 6))
+
+    for offset in range(0, capped_max_years + 1):
+        measured = cohort_students.loc[
+            cohort_students["Cohort Semester"].map(lambda value: _milestone_is_measurable(value, offset, latest_sort))
+        ].copy()
+        if measured.empty:
+            continue
+
+        counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
+        for _, student in measured.iterrows():
+            outcome = _checkpoint_outcome(timeline_work, student["Cohort Semester"], student["Student ID"], offset)
+            counts[outcome] = int(counts.get(outcome, 0)) + 1
+
+        denominator = int(len(measured))
+        milestone_name = _milestone_name(offset)
+        last_milestone = milestone_name
+        table_row: dict[str, object] = {
+            "Milestone": milestone_name,
+            "Term": selection_label,
+            "Measured Students": denominator,
+        }
+        for outcome in PERSISTENCE_OUTCOME_ORDER:
+            count = int(counts.get(outcome, 0))
+            share = count / denominator if denominator else pd.NA
+            table_row[outcome] = share
+            table_row[f"{outcome} Count"] = count
+            chart_rows.append(
+                {
+                    "Milestone": _milestone_label(offset, selection_label),
+                    "Milestone Sort": offset,
+                    "Outcome": outcome,
+                    "Share": share,
+                    "Count": count,
+                    "Denominator": denominator,
+                    "Label": f"{outcome}<br>{share:.1%}<br>(n={count:,})" if count and share >= 0.085 else "",
+                }
+            )
+        table_rows.append(table_row)
+
+    chart_frame = pd.DataFrame(chart_rows, columns=MILESTONE_CHART_COLUMNS)
+    table_frame = pd.DataFrame(table_rows, columns=MILESTONE_TABLE_COLUMNS)
+    return {
+        "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
+        "table_frame": table_frame.reset_index(drop=True),
+        "meta": {
+            "students": int(len(cohort_students)),
+            "cohort_term": selection_label,
+            "distinction": "ALL",
+            "max_milestone": last_milestone,
+            "note": (
+                "Milestone outcomes use the latest sqlCompile roster/manual status at or before each checkpoint. "
+                "Cohorts are included in a checkpoint only when the loaded roster timeline has reached that checkpoint."
+            ),
+        },
+    }
+
+
 def build_manual_entry_template(review: pd.DataFrame) -> pd.DataFrame:
     if review.empty:
         return pd.DataFrame(columns=ODD_RECORD_COLUMNS)
@@ -215,3 +360,84 @@ def _cohort_sort(value: object) -> int:
     from src.sqlCompile_cohort import _semester_sort
 
     return _semester_sort(value)
+
+
+def _filter_by_selected_semesters(frame: pd.DataFrame, selected_semesters: Optional[Sequence[str]]) -> pd.DataFrame:
+    if selected_semesters is None or frame.empty or "Cohort Semester" not in frame.columns:
+        return frame.copy()
+    selected = {str(value).strip() for value in selected_semesters if str(value).strip()}
+    if not selected:
+        return frame.iloc[0:0].copy()
+    return frame.loc[frame["Cohort Semester"].fillna("").astype(str).str.strip().isin(selected)].copy()
+
+
+def _timeline_status_code(row: pd.Series) -> str:
+    status_code = str(row.get("Status Code", "") or "").strip()
+    if status_code:
+        return normalize_status_code(status_code)
+    return normalize_status_code(row.get("Status", ""))
+
+
+def _latest_timeline_sort(timeline: pd.DataFrame) -> int:
+    if timeline.empty or "_term_sort" not in timeline.columns:
+        return 0
+    sorts = pd.to_numeric(timeline["_term_sort"], errors="coerce")
+    sorts = sorts.loc[sorts.notna() & sorts.lt(999999)]
+    return int(sorts.max()) if not sorts.empty else 0
+
+
+def _milestone_name(offset: int) -> str:
+    return "Cohort Year" if offset == 0 else f"{offset} Year"
+
+
+def _milestone_label(offset: int, selection_label: str) -> str:
+    label = str(selection_label or SQL_COMPILE_ALL_TIME_LABEL).strip() or SQL_COMPILE_ALL_TIME_LABEL
+    return f"{_milestone_name(offset)}<br>{label}"
+
+
+def _milestone_target_sort(cohort_semester: object, offset: int) -> int:
+    cohort_sort = _cohort_sort(cohort_semester)
+    if cohort_sort >= 999999:
+        return cohort_sort
+    return cohort_sort + (int(offset) * 10)
+
+
+def _milestone_is_measurable(cohort_semester: object, offset: int, latest_sort: int) -> bool:
+    if offset == 0:
+        return True
+    target_sort = _milestone_target_sort(cohort_semester, offset)
+    return target_sort < 999999 and latest_sort >= target_sort
+
+
+def _checkpoint_outcome(timeline: pd.DataFrame, cohort_semester: str, student_id: str, offset: int) -> str:
+    if timeline.empty:
+        return "Active" if offset == 0 else "Unknown"
+
+    target_sort = _milestone_target_sort(cohort_semester, offset)
+    student_rows = timeline.loc[
+        timeline["Cohort Semester"].eq(str(cohort_semester).strip())
+        & timeline["Student ID"].eq(str(student_id).strip())
+    ].copy()
+    if student_rows.empty:
+        return "Active" if offset == 0 else "Unknown"
+
+    student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
+    before_or_at = student_rows.loc[pd.to_numeric(student_rows["_term_sort"], errors="coerce").le(target_sort)].copy()
+    if before_or_at.empty:
+        return "Active" if offset == 0 else "Unknown"
+
+    latest_status = str(before_or_at.iloc[-1].get("_status_code", "") or "").strip()
+    latest_outcome = persistence_outcome_from_status(latest_status)
+    if offset == 0 or latest_outcome != "Active":
+        return latest_outcome
+
+    at_or_after = student_rows.loc[pd.to_numeric(student_rows["_term_sort"], errors="coerce").ge(target_sort)]
+    return "Active" if not at_or_after.empty else "Unknown"
+
+
+def _ensure_missing_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    result = frame.copy()
+    for column in columns:
+        if column not in result.columns:
+            result[column] = ""
+    return result.loc[:, list(columns)]

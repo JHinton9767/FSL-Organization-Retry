@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from app.charts import COLOR_SEQUENCE, PLOTLY_TEMPLATE
+from app.charts import COLOR_SEQUENCE, PLOTLY_TEMPLATE, persistence_milestone_chart
 from app.exports import dataframe_to_csv_bytes
 from src.sqlCompile import DEFAULT_OUTPUT_PATH, sqlCompile
 from src.sqlCompile_cohort import (
@@ -19,10 +19,13 @@ from src.sqlCompile_cohort import (
 )
 from src.sqlCompile_dashboard import (
     ODD_RECORD_COLUMNS,
+    SQL_COMPILE_ALL_TIME_LABEL,
     build_dashboard_rate_table,
+    build_sql_compile_milestone_dashboard,
     load_dashboard_tables,
     odd_record_editor_to_manual_rows,
 )
+from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 
 
 st.set_page_config(
@@ -64,6 +67,9 @@ def _persistence_header() -> None:
         .txst-persistence-rule > span:nth-child(5) {background: #8ED0E5;}
         .txst-persistence-rule > span:nth-child(6) {background: #0B6C94;}
         .txst-note {color: #4A4A4A; font-size: 0.96rem;}
+        [data-testid="stMetric"] {background: transparent; border: 0; padding: 0.15rem 0 0.5rem 0;}
+        [data-testid="stMetricLabel"] p {color: #17213A; font-size: 0.92rem;}
+        [data-testid="stMetricValue"] div {color: #17213A; font-size: 2rem; font-weight: 400;}
         </style>
         <div class="txst-persistence-wrap">
           <div class="txst-persistence-title">Persistence and Graduation</div>
@@ -93,38 +99,54 @@ def _selected_cohorts(rate_table: pd.DataFrame) -> list[str]:
     return options
 
 
-def _cohort_filter(label: str, options: list[str]) -> list[str]:
+def _cohort_filter(options: list[str]) -> tuple[list[str], str]:
     if not options:
-        return []
-    selected = st.sidebar.multiselect(label, options=options, default=options)
-    return selected or options
+        return [], SQL_COMPILE_ALL_TIME_LABEL
+
+    mode = st.sidebar.radio(
+        "Cohort selection",
+        options=["All semesters", "Single semester", "Semester group"],
+        index=0,
+    )
+    if mode == "All semesters":
+        return options, SQL_COMPILE_ALL_TIME_LABEL
+    if mode == "Single semester":
+        selected = st.sidebar.selectbox("New-member semester", options=options, index=len(options) - 1)
+        return [selected], str(selected)
+
+    selected = st.sidebar.multiselect("New-member semesters", options=options, default=options)
+    if not selected:
+        return [], "No Semesters"
+    if len(selected) == len(options):
+        return selected, SQL_COMPILE_ALL_TIME_LABEL
+    if len(selected) == 1:
+        return selected, str(selected[0])
+    return selected, f"{len(selected)} Semesters"
 
 
-def _render_rate_charts(rate_table: pd.DataFrame) -> None:
+def _render_rate_charts(rate_table: pd.DataFrame, milestone_dashboard: dict[str, object], selected_label: str) -> None:
     if rate_table.empty:
         st.warning("No new-member cohorts were available. Run `python sqlCompile.py --all-semesters` after your roster path is configured.")
         return
 
-    chart_frame = rate_table.melt(
-        id_vars=["Cohort Semester"],
-        value_vars=["Persistence Rate", "Graduation Rate"],
-        var_name="Rate",
-        value_name="Value",
-    ).dropna(subset=["Value"])
-    fig = px.line(
-        chart_frame,
-        x="Cohort Semester",
-        y="Value",
-        color="Rate",
-        markers=True,
-        title="Persistence and Graduation Rates by New-Member Cohort",
-        template=PLOTLY_TEMPLATE,
-        color_discrete_sequence=COLOR_SEQUENCE,
+    chart_frame = milestone_dashboard.get("chart_frame", pd.DataFrame())
+    table_frame = milestone_dashboard.get("table_frame", pd.DataFrame())
+    title = f"Persistence and Graduation for {selected_label}"
+    subtitle = "ALL distinction | Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
+    st.plotly_chart(
+        persistence_milestone_chart(chart_frame, title=title, subtitle=subtitle),
+        use_container_width=True,
     )
-    fig.update_yaxes(tickformat=".0%", range=[0, 1])
-    fig.update_layout(xaxis_title="", yaxis_title="Resolved-student rate", legend_title="")
-    st.plotly_chart(fig, use_container_width=True)
 
+    if not table_frame.empty:
+        count_columns = ["Measured Students", *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER]]
+        st.dataframe(
+            _format_display_frame(table_frame, percent_cols=PERSISTENCE_OUTCOME_ORDER, integer_cols=count_columns),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Resolved Rate Summary")
     st.dataframe(
         _format_display_frame(
             rate_table,
@@ -261,11 +283,17 @@ def main() -> None:
         return
 
     cohort_options = _selected_cohorts(all_tables.rate_table)
-    selected_cohorts = _cohort_filter("New-member cohorts", cohort_options)
-    rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table
-    outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes
-    review_template = all_tables.manual_entry_template.loc[all_tables.manual_entry_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_entry_template.empty else all_tables.manual_entry_template
-    distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution
+    selected_cohorts, selected_label = _cohort_filter(cohort_options)
+    rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table.iloc[0:0].copy()
+    outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
+    review_template = all_tables.manual_entry_template.loc[all_tables.manual_entry_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_entry_template.empty else all_tables.manual_entry_template.iloc[0:0].copy()
+    distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()
+    milestone_dashboard = build_sql_compile_milestone_dashboard(
+        all_tables.timeline,
+        all_tables.outcomes,
+        selected_cohorts,
+        selection_label=selected_label,
+    )
 
     if st.sidebar.button("Write Report Files", use_container_width=True):
         try:
@@ -281,30 +309,25 @@ def main() -> None:
             st.sidebar.error(f"Report write failed: {exc}")
 
     kpi_frame = build_dashboard_rate_table(outcomes)
-    cohort_students = int(kpi_frame["Cohort Students"].sum()) if not kpi_frame.empty else 0
-    resolved_students = int(kpi_frame["Resolved Students"].sum()) if not kpi_frame.empty else 0
-    manual_review = int(kpi_frame["Needs Manual Review"].sum()) if not kpi_frame.empty else 0
-    persisted = int(kpi_frame["Persisted / Active"].sum()) if not kpi_frame.empty else 0
-    graduated = int(kpi_frame["Graduated"].sum()) if not kpi_frame.empty else 0
+    milestone_meta = milestone_dashboard.get("meta", {})
+    cohort_students = int(milestone_meta.get("students", 0) or 0)
 
-    kpis = st.columns(5)
+    kpis = st.columns(4)
     with kpis[0]:
-        st.metric("New Members", f"{cohort_students:,}")
+        st.metric("Cohort size", f"{cohort_students:,}")
     with kpis[1]:
-        st.metric("Resolved", f"{resolved_students:,}")
+        st.metric("Selected cohort", selected_label)
     with kpis[2]:
-        st.metric("Manual Review", f"{manual_review:,}")
+        st.metric("Council view", "ALL")
     with kpis[3]:
-        st.metric("Persistence Rate", _format_percent(persisted / resolved_students if resolved_students else pd.NA))
-    with kpis[4]:
-        st.metric("Graduation Rate", _format_percent(graduated / resolved_students if resolved_students else pd.NA))
+        st.metric("Latest measurable milestone", str(milestone_meta.get("max_milestone") or "Unknown"))
 
     rates_tab, outcomes_tab, checker_tab, manual_rows_tab = st.tabs(
         ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
     )
 
     with rates_tab:
-        _render_rate_charts(rate_table)
+        _render_rate_charts(kpi_frame, milestone_dashboard, selected_label)
 
     with outcomes_tab:
         _render_outcome_distribution(distribution)
