@@ -54,6 +54,47 @@ def test_sql_compile_resolves_statuses_by_semester_student_id(tmp_path: Path) ->
     ]
 
 
+def test_sql_compile_uses_initial_updated_final_as_same_semester_tie_breaker(tmp_path: Path) -> None:
+    root = tmp_path / "Rosters"
+    _write_roster(
+        root / "Fall 2025" / "Initial" / "Alpha Sigma Phi roster.xlsx",
+        "Alpha Sigma Phi Fall 2025 Initial Roster",
+        [
+            ["Rivera", "Ana", "A01234567", "Member", "A"],
+            ["Patel", "Nia", "A01234568", "Member", "D"],
+            ["Chen", "Leo", "A01234569", "Member", "D"],
+        ],
+    )
+    _write_roster(
+        root / "Fall 2025" / "Updated" / "Alpha Sigma Phi roster.xlsx",
+        "Alpha Sigma Phi Fall 2025 Updated Roster",
+        [
+            ["Rivera", "Ana", "A01234567", "Member", "N"],
+            ["Patel", "Nia", "A01234568", "Member", "A"],
+            ["Chen", "Leo", "A01234569", "Member", "RS"],
+        ],
+    )
+    _write_roster(
+        root / "Fall 2025" / "Final" / "Alpha Sigma Phi roster.xlsx",
+        "Alpha Sigma Phi Fall 2025 Final Roster",
+        [
+            ["Rivera", "Ana", "A01234567", "Member", "A"],
+            ["Patel", "Nia", "A01234568", "Member", "A"],
+            ["Chen", "Leo", "A01234569", "Member", "S"],
+        ],
+    )
+
+    frame, issues, source_file_count = build_sql_compile_frame([root])
+
+    assert source_file_count == 3
+    assert issues.empty
+    assert frame.to_dict("records") == [
+        {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A01234567", "Status": "N"},
+        {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A01234568", "Status": "D"},
+        {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A01234569", "Status": "S"},
+    ]
+
+
 def test_sql_compile_writes_sqlite_table_with_requested_columns(tmp_path: Path) -> None:
     root = tmp_path / "Rosters"
     _write_roster(

@@ -21,6 +21,12 @@ The base table is named `sqlCompile` and has these columns:
 Semester | Chapter | Student ID | Status
 ```
 
+When the same student appears in multiple rosters for the same semester, `sqlCompile` applies the conflict rules before writing the one semester row:
+
+- If `A` or `N` appears with any status outside `A`/`N`, the outside status wins.
+- If the only conflict is `A` versus `N`, `N` wins.
+- If statuses are in the same class, roster pass order is used as the tie-breaker: Initial first, Updated/Revised after, Final last.
+
 ## 2. Build a new-member cohort report
 
 Use the semester where the students were listed as `Status = N`.
