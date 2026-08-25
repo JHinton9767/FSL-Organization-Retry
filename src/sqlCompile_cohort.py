@@ -158,6 +158,36 @@ def read_manual_status_rows(path: str | Path = DEFAULT_MANUAL_STATUS_PATH, creat
     return _ensure_columns(frame, MANUAL_STATUS_COLUMNS)
 
 
+def write_manual_status_rows(frame: pd.DataFrame, path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> Path:
+    destination = _resolve_path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_columns(frame, MANUAL_STATUS_COLUMNS).to_csv(destination, index=False)
+    return destination
+
+
+def completed_manual_status_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = _ensure_columns(frame, MANUAL_STATUS_COLUMNS)
+    return prepared.loc[
+        prepared["Student ID"].ne("") & prepared["Semester"].ne("") & prepared["Status"].ne("")
+    ].copy()
+
+
+def append_manual_status_rows(frame: pd.DataFrame, path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> tuple[Path, int]:
+    incoming = completed_manual_status_rows(frame)
+    destination = ensure_manual_status_file(path)
+    if incoming.empty:
+        return destination, 0
+
+    existing = read_manual_status_rows(destination)
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined = combined.drop_duplicates(
+        subset=["Cohort Semester", "Cohort Chapter", "Semester", "Chapter", "Student ID"],
+        keep="last",
+    )
+    write_manual_status_rows(combined, destination)
+    return destination, len(incoming)
+
+
 def read_sql_compile_table(database_path: str | Path = DEFAULT_OUTPUT_PATH, table_name: str = TABLE_NAME) -> pd.DataFrame:
     database = _resolve_path(database_path)
     if not database.exists():

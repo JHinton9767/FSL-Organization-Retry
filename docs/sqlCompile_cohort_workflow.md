@@ -113,3 +113,17 @@ output\sqlCompile\cohorts\fall_2025\new_member_rate_summary.csv
 ```
 
 Rates use the resolved denominator, meaning students still in `new_member_form_review.csv` are excluded from rate calculations until a manual status row is added.
+
+## 6. Open the new dashboard
+
+The smaller sqlCompile dashboard shows only persistence rates, graduation rates, outcome mix, and the manual checker.
+
+```powershell
+uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py
+```
+
+If the main dashboard is already using the default Streamlit port, choose another port:
+
+```powershell
+uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py --server.port 8502
+```
