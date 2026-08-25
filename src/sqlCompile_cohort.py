@@ -4,6 +4,7 @@ import argparse
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -53,6 +54,8 @@ class NewMemberCohortReportResult:
     outcome_rows: int
     review_rows: int
     summary_rows: int
+    csv_paths: Dict[str, Path]
+    csv_warnings: List[str]
 
 
 def _normalize_semester(value: object) -> str:
@@ -585,15 +588,34 @@ def write_report_csvs(
     outcomes: pd.DataFrame,
     review: pd.DataFrame,
     summary: pd.DataFrame,
-) -> Path:
+) -> Tuple[Path, Dict[str, Path], List[str]]:
     root = _resolve_path(output_dir)
     destination = root / _slug(selected_semesters[0]) if len(selected_semesters) == 1 else root / "all_new_member_cohorts"
     destination.mkdir(parents=True, exist_ok=True)
-    timeline.to_csv(destination / "new_member_timeline.csv", index=False)
-    outcomes.to_csv(destination / "new_member_outcomes.csv", index=False)
-    review.to_csv(destination / "new_member_form_review.csv", index=False)
-    summary.to_csv(destination / "new_member_rate_summary.csv", index=False)
-    return destination
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_paths: Dict[str, Path] = {}
+    csv_warnings: List[str] = []
+    for name, frame, file_name in [
+        ("timeline", timeline, "new_member_timeline.csv"),
+        ("outcomes", outcomes, "new_member_outcomes.csv"),
+        ("review", review, "new_member_form_review.csv"),
+        ("summary", summary, "new_member_rate_summary.csv"),
+    ]:
+        path, warning = _write_report_csv(frame, destination / file_name, timestamp)
+        csv_paths[name] = path
+        if warning:
+            csv_warnings.append(warning)
+    return destination, csv_paths, csv_warnings
+
+
+def _write_report_csv(frame: pd.DataFrame, path: Path, timestamp: str) -> Tuple[Path, str]:
+    try:
+        frame.to_csv(path, index=False)
+        return path, ""
+    except PermissionError:
+        fallback = path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
+        frame.to_csv(fallback, index=False)
+        return fallback, f"Could not overwrite locked CSV {path}; wrote {fallback} instead."
 
 
 def build_new_member_cohort_report(
@@ -615,7 +637,7 @@ def build_new_member_cohort_report(
         all_cohorts=all_cohorts,
     )
     write_report_tables(database, timeline, outcomes, review, summary)
-    report_dir = write_report_csvs(output_dir, selected_semesters, timeline, outcomes, review, summary)
+    report_dir, csv_paths, csv_warnings = write_report_csvs(output_dir, selected_semesters, timeline, outcomes, review, summary)
     return NewMemberCohortReportResult(
         database_path=database,
         output_dir=report_dir,
@@ -625,6 +647,8 @@ def build_new_member_cohort_report(
         outcome_rows=len(outcomes),
         review_rows=len(review),
         summary_rows=len(summary),
+        csv_paths=csv_paths,
+        csv_warnings=csv_warnings,
     )
 
 
@@ -657,6 +681,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Outcome rows: {result.outcome_rows}")
     print(f"Manual form review rows: {result.review_rows}")
     print(f"Summary rows: {result.summary_rows}")
+    for warning in result.csv_warnings:
+        print(f"WARNING: {warning}")
     return 0
 
 

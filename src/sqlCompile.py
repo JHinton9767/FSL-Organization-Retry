@@ -447,6 +447,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"New-member cohort report written to: {report.output_dir}")
         print(f"Manual status file: {report.manual_status_path}")
         print(f"Manual form review rows: {report.review_rows}")
+        for warning in report.csv_warnings:
+            print(f"WARNING: {warning}")
     return 0
 
 

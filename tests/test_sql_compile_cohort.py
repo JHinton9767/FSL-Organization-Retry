@@ -8,6 +8,7 @@ from src.sqlCompile_cohort import (
     MANUAL_STATUS_COLUMNS,
     build_new_member_cohort_report,
     build_new_member_cohort_tables,
+    write_report_csvs,
 )
 
 
@@ -101,6 +102,33 @@ def test_new_member_cohort_report_writes_sqlite_tables_and_csvs(tmp_path: Path) 
 
     assert review_count == 1
     assert summary_count > 0
+
+
+def test_report_csv_writer_uses_timestamped_fallback_when_csv_is_locked(tmp_path: Path, monkeypatch) -> None:
+    frame = pd.DataFrame([{"value": "x"}])
+    original_to_csv = pd.DataFrame.to_csv
+
+    def flaky_to_csv(self, path_or_buf=None, *args, **kwargs):
+        if Path(path_or_buf).name == "new_member_rate_summary.csv":
+            raise PermissionError("locked")
+        return original_to_csv(self, path_or_buf, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "to_csv", flaky_to_csv)
+
+    output_dir, csv_paths, warnings = write_report_csvs(
+        tmp_path,
+        ["Fall 2025"],
+        timeline=frame,
+        outcomes=frame,
+        review=frame,
+        summary=frame,
+    )
+
+    assert output_dir == tmp_path / "fall_2025"
+    assert csv_paths["timeline"] == output_dir / "new_member_timeline.csv"
+    assert csv_paths["summary"].name.startswith("new_member_rate_summary_")
+    assert csv_paths["summary"].exists()
+    assert warnings
 
 
 def test_new_member_cohort_tables_can_build_all_semesters() -> None:
