@@ -396,6 +396,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="SQLite database path to write.")
     parser.add_argument("--table", default=TABLE_NAME, help="SQLite table name to replace.")
+    parser.add_argument(
+        "--cohort-semester",
+        action="append",
+        dest="cohort_semesters",
+        default=None,
+        help='After compiling, build a Status N cohort report for this semester, for example "Fall 2025". Repeat for multiple cohorts.',
+    )
+    parser.add_argument(
+        "--all-new-member-cohorts",
+        "--all-semesters",
+        dest="all_new_member_cohorts",
+        action="store_true",
+        help="After compiling, build cohort reports for every semester with Status N rows.",
+    )
+    parser.add_argument("--manual-status-file", default=None, help="CSV of manually researched status rows for cohort reports.")
+    parser.add_argument("--cohort-output-dir", default=None, help="Folder where cohort report CSVs are written.")
     return parser.parse_args(argv)
 
 
@@ -413,6 +429,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Excel source files scanned: {result.source_file_count}")
     if result.issue_count:
         print(f"Sheets/files skipped with issues: {result.issue_count}")
+    if args.cohort_semesters or args.all_new_member_cohorts:
+        from src.sqlCompile_cohort import (
+            DEFAULT_COHORT_OUTPUT_DIR,
+            DEFAULT_MANUAL_STATUS_PATH,
+            build_new_member_cohort_report,
+        )
+
+        report = build_new_member_cohort_report(
+            database_path=result.output_path,
+            cohort_semesters=args.cohort_semesters,
+            all_cohorts=args.all_new_member_cohorts,
+            manual_status_file=args.manual_status_file or DEFAULT_MANUAL_STATUS_PATH,
+            output_dir=args.cohort_output_dir or DEFAULT_COHORT_OUTPUT_DIR,
+            table_name=args.table,
+        )
+        print(f"New-member cohort report written to: {report.output_dir}")
+        print(f"Manual status file: {report.manual_status_path}")
+        print(f"Manual form review rows: {report.review_rows}")
     return 0
 
 
