@@ -35,7 +35,7 @@ When a chapter appears in earlier roster coverage but not in a later roster pass
 Chapter Kicked
 ```
 
-Those students are removed from the manual checker and counted as known non-graduate exits. Students who disappear individually while their chapter continues still go to manual review.
+Those students are counted as known non-graduate exits and appear in the dashboard Manual Checker under the `Chapter Kicked` last-known outcome bucket. Students who disappear individually while their chapter continues still go to manual review.
 
 ## 2. Build a new-member cohort report
 
@@ -84,7 +84,7 @@ new_member_form_review
 new_member_rate_summary
 ```
 
-## 3. Review disappeared students
+## 3. Review last-known student outcomes
 
 Open:
 
@@ -94,7 +94,7 @@ output\sqlCompile\cohorts\fall_2025\new_member_form_review.csv
 
 These are students whose last known status is `A`, which means they disappeared without a resolved final status.
 
-The dashboard also has a **Manual Checker** tab for the same queue. It supports searching, cohort/chapter filtering, row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
+The dashboard also has a **Manual Checker** tab for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
 
 If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker tab or run:
 

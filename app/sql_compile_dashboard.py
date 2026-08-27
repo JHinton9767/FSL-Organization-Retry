@@ -19,9 +19,9 @@ from src.sqlCompile_cohort import (
     write_manual_status_rows,
 )
 from src.sqlCompile_dashboard import (
+    LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
-    ODD_RECORD_COLUMNS,
     SQL_COMPILE_ALL_TIME_LABEL,
     build_dashboard_rate_table,
     build_manual_checker_queue,
@@ -116,9 +116,18 @@ def _unique_nonempty_options(frame: pd.DataFrame, column: str) -> list[str]:
     return sorted(value for value in values.unique().tolist() if value)
 
 
-def _manual_checker_signature(review_template: pd.DataFrame) -> tuple[tuple[str, ...], ...]:
-    if review_template.empty:
-        return ()
+def _manual_checker_outcome_options(queue: pd.DataFrame) -> list[str]:
+    if queue.empty or "Last Known Outcome Bucket" not in queue.columns:
+        return []
+    present = set(queue["Last Known Outcome Bucket"].fillna("").astype(str).str.strip())
+    ordered = [outcome for outcome in PERSISTENCE_OUTCOME_ORDER if outcome in present]
+    extras = sorted(value for value in present if value and value not in PERSISTENCE_OUTCOME_ORDER)
+    return [*ordered, *extras]
+
+
+def _manual_checker_signature(checker_template: pd.DataFrame) -> tuple[object, ...]:
+    if checker_template.empty:
+        return (0, (), 0)
     columns = [
         column
         for column in [
@@ -128,13 +137,17 @@ def _manual_checker_signature(review_template: pd.DataFrame) -> tuple[tuple[str,
             "Last Known Semester",
             "Last Known Chapter",
             "Last Known Status",
+            "Last Known Outcome Bucket",
+            "Needs Manual Form Review",
+            "Manual Status Applied",
         ]
-        if column in review_template.columns
+        if column in checker_template.columns
     ]
     if not columns:
-        return tuple((str(index),) for index in review_template.index.tolist())
-    prepared = review_template.loc[:, columns].fillna("").astype(str)
-    return tuple(tuple(row) for row in prepared.to_numpy().tolist())
+        return (len(checker_template), tuple(str(index) for index in checker_template.index.tolist()), 0)
+    prepared = checker_template.loc[:, columns].fillna("").astype(str)
+    signature_hash = int(pd.util.hash_pandas_object(prepared, index=False).sum())
+    return (len(prepared), tuple(columns), signature_hash)
 
 
 def _with_manual_checker_row_ids(queue: pd.DataFrame) -> pd.DataFrame:
@@ -152,10 +165,10 @@ def _with_manual_checker_row_ids(queue: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _ensure_manual_checker_state(review_template: pd.DataFrame) -> pd.DataFrame:
-    signature = _manual_checker_signature(review_template)
+def _ensure_manual_checker_state(checker_template: pd.DataFrame) -> pd.DataFrame:
+    signature = _manual_checker_signature(checker_template)
     if st.session_state.get(MANUAL_CHECKER_SIGNATURE_KEY) != signature:
-        queue = _with_manual_checker_row_ids(build_manual_checker_queue(review_template))
+        queue = _with_manual_checker_row_ids(build_manual_checker_queue(checker_template))
         st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
         st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = signature
 
@@ -167,7 +180,7 @@ def _ensure_manual_checker_state(review_template: pd.DataFrame) -> pd.DataFrame:
     if MANUAL_CHECKER_ROW_ID not in queue.columns:
         queue = _with_manual_checker_row_ids(queue)
     queue[MANUAL_CHECKER_SELECT_COLUMN] = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
-    for column in [*ODD_RECORD_COLUMNS, MANUAL_CHECKER_ROW_ID]:
+    for column in [*LAST_KNOWN_STATUS_COLUMNS, MANUAL_CHECKER_ROW_ID]:
         queue[column] = queue[column].fillna("").astype(str).str.strip()
     queue = queue.loc[:, [*MANUAL_CHECKER_COLUMNS, MANUAL_CHECKER_ROW_ID]].reset_index(drop=True)
     st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
@@ -212,7 +225,9 @@ def _filter_manual_checker_rows(
     cohort_filter: list[str],
     chapter_filter: list[str],
     last_semester_filter: list[str],
+    outcome_filter: list[str],
     entry_status_filter: list[str],
+    needs_review_only: bool,
     unfinished_only: bool,
 ) -> pd.DataFrame:
     if queue.empty:
@@ -227,20 +242,27 @@ def _filter_manual_checker_rows(
             "Last Known Semester",
             "Last Known Chapter",
             "Last Known Status",
+            "Last Known Outcome Bucket",
+            "Needs Manual Form Review",
+            "Manual Status Applied",
             "Semester",
             "Chapter",
             "Status",
             "Notes",
         ]
-        haystack = queue[search_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+        available_search_columns = [column for column in search_columns if column in queue.columns]
+        haystack = queue[available_search_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
         mask &= haystack.str.contains(search_text.strip().lower(), regex=False, na=False)
     for column, selected in [
         ("Cohort Semester", cohort_filter),
         ("Cohort Chapter", chapter_filter),
         ("Last Known Semester", last_semester_filter),
+        ("Last Known Outcome Bucket", outcome_filter),
     ]:
-        if selected:
+        if selected and column in queue.columns:
             mask &= queue[column].isin(selected)
+    if needs_review_only and "Needs Manual Form Review" in queue.columns:
+        mask &= queue["Needs Manual Form Review"].fillna("").astype(str).str.strip().str.lower().isin({"yes", "true", "1", "y"})
     if entry_status_filter:
         normalized = queue["Status"].fillna("").astype(str).str.strip()
         selected_statuses = set(entry_status_filter)
@@ -438,31 +460,33 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Path, manual_rows: pd.DataFrame) -> None:
+def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: Path, manual_rows: pd.DataFrame) -> None:
     st.subheader("Manual Checker")
-    st.caption("Work the odd-record queue here. Select rows, fill the verified outcome, and save completed decisions to the manual status CSV.")
+    st.caption("Review all selected students by last-known status. Filter by P&G bucket, fill verified corrections, and save completed decisions to the manual status CSV.")
 
     _render_legacy_manual_importer(manual_status_file)
 
-    queue = _ensure_manual_checker_state(review_template)
+    queue = _ensure_manual_checker_state(checker_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
 
     if queue.empty:
-        st.success("No odd records are currently waiting for manual form review.")
+        st.success("No student status records are available for the current cohort selection.")
         if not saved_for_queue.empty:
             with st.expander(f"Saved manual decisions for this selection ({len(saved_for_queue):,})", expanded=False):
                 st.dataframe(saved_for_queue, use_container_width=True, hide_index=True)
         return
 
-    filter_cols = st.columns([1.4, 1, 1, 1])
+    filter_cols = st.columns([1.4, 1, 1, 1, 1])
     with filter_cols[0]:
-        search_text = st.text_input("Search queue", placeholder="Student ID, chapter, semester, status, note", key="sql_compile_manual_checker_search")
+        search_text = st.text_input("Search queue", placeholder="Student ID, chapter, semester, status, outcome, note", key="sql_compile_manual_checker_search")
     with filter_cols[1]:
         cohort_filter = st.multiselect("Cohort", options=_unique_nonempty_options(queue, "Cohort Semester"), key="sql_compile_manual_checker_cohort_filter")
     with filter_cols[2]:
         chapter_filter = st.multiselect("Chapter", options=_unique_nonempty_options(queue, "Cohort Chapter"), key="sql_compile_manual_checker_chapter_filter")
     with filter_cols[3]:
         last_semester_filter = st.multiselect("Last seen", options=_unique_nonempty_options(queue, "Last Known Semester"), key="sql_compile_manual_checker_last_seen_filter")
+    with filter_cols[4]:
+        outcome_filter = st.multiselect("Last outcome", options=_manual_checker_outcome_options(queue), key="sql_compile_manual_checker_outcome_filter")
 
     detail_filter_cols = st.columns([1, 1, 2])
     with detail_filter_cols[0]:
@@ -472,8 +496,9 @@ def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Pa
             key="sql_compile_manual_checker_status_filter",
         )
     with detail_filter_cols[1]:
-        unfinished_only = st.checkbox("Only unfinished", value=False, key="sql_compile_manual_checker_unfinished_only")
+        needs_review_only = st.checkbox("Only needs review", value=False, key="sql_compile_manual_checker_needs_review_only")
     with detail_filter_cols[2]:
+        unfinished_only = st.checkbox("Only unfinished", value=False, key="sql_compile_manual_checker_unfinished_only")
         st.caption(f"Manual file: `{manual_status_file}`")
 
     visible_queue = _filter_manual_checker_rows(
@@ -482,13 +507,15 @@ def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Pa
         cohort_filter=cohort_filter,
         chapter_filter=chapter_filter,
         last_semester_filter=last_semester_filter,
+        outcome_filter=outcome_filter,
         entry_status_filter=entry_status_filter,
+        needs_review_only=needs_review_only,
         unfinished_only=unfinished_only,
     )
-    st.caption(f"Showing {len(visible_queue):,} of {len(queue):,} odd record(s).")
+    st.caption(f"Showing {len(visible_queue):,} of {len(queue):,} student status record(s).")
 
     if visible_queue.empty:
-        st.warning("No odd records match the current filters.")
+        st.warning("No student status records match the current filters.")
     else:
         editor_height = min(820, max(320, 92 + (len(visible_queue) * 35)))
         edited = st.data_editor(
@@ -503,11 +530,18 @@ def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Pa
                     "Status",
                     options=STATUS_OPTIONS,
                 ),
+                "Last Known Outcome Bucket": st.column_config.TextColumn("Last Outcome"),
+                "Needs Manual Form Review": st.column_config.TextColumn("Needs Review"),
+                "Manual Status Applied": st.column_config.TextColumn("Manual Applied"),
                 "Semester": st.column_config.TextColumn("Correct Semester"),
                 "Chapter": st.column_config.TextColumn("Correct Chapter"),
                 "Notes": st.column_config.TextColumn("Notes"),
             },
-            disabled=["Cohort Semester", "Cohort Chapter", "Student ID", "Last Known Semester", "Last Known Chapter", "Last Known Status"],
+            disabled=[
+                column
+                for column in LAST_KNOWN_STATUS_COLUMNS
+                if column not in {"Semester", "Chapter", "Status", "Notes"}
+            ],
             key=MANUAL_CHECKER_EDITOR_KEY,
         )
         queue = _merge_manual_checker_edits(queue, edited)
@@ -725,7 +759,7 @@ def main() -> None:
     selected_cohorts, selected_label = _cohort_filter(cohort_options)
     rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table.iloc[0:0].copy()
     outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
-    review_template = all_tables.manual_entry_template.loc[all_tables.manual_entry_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_entry_template.empty else all_tables.manual_entry_template.iloc[0:0].copy()
+    checker_template = all_tables.manual_checker_template.loc[all_tables.manual_checker_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_checker_template.empty else all_tables.manual_checker_template.iloc[0:0].copy()
     distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()
     milestone_dashboard = build_sql_compile_milestone_dashboard(
         all_tables.timeline,
@@ -775,7 +809,7 @@ def main() -> None:
 
     with checker_tab:
         _render_manual_checker(
-            review_template.loc[:, ODD_RECORD_COLUMNS] if not review_template.empty else review_template,
+            checker_template.loc[:, LAST_KNOWN_STATUS_COLUMNS] if not checker_template.empty else checker_template,
             manual_status_file,
             all_tables.manual_rows,
         )

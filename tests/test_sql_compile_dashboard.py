@@ -1,8 +1,10 @@
 import pandas as pd
 
 from src.sqlCompile_dashboard import (
+    LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
     build_dashboard_rate_table,
+    build_last_known_status_template,
     build_manual_checker_queue,
     build_manual_entry_template,
     build_outcome_distribution,
@@ -124,6 +126,57 @@ def test_dashboard_manual_checker_queue_adds_selection_without_affecting_manual_
             "Notes": "Chapter removed before next roster.",
         }
     ]
+
+
+def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2025",
+                "Cohort Chapter": "Alpha Sigma Phi",
+                "Student ID": "A1",
+                "Last Known Semester": "Spring 2026",
+                "Last Known Chapter": "Alpha Sigma Phi",
+                "Last Known Status": "A",
+                "Last Known Status Code": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2025",
+                "Cohort Chapter": "Beta Theta Pi",
+                "Student ID": "A2",
+                "Last Known Semester": "Fall 2026",
+                "Last Known Chapter": "Beta Theta Pi",
+                "Last Known Status": "CK",
+                "Last Known Status Code": "CK",
+                "Final Outcome Bucket": "Chapter Kicked",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2025",
+                "Cohort Chapter": "Delta Tau Delta",
+                "Student ID": "A3",
+                "Last Known Semester": "Spring 2027",
+                "Last Known Chapter": "Delta Tau Delta",
+                "Last Known Status": "G",
+                "Last Known Status Code": "G",
+                "Final Outcome Bucket": "Graduated",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "Yes",
+            },
+        ]
+    )
+
+    template = build_last_known_status_template(outcomes)
+
+    assert template.columns.tolist() == LAST_KNOWN_STATUS_COLUMNS
+    assert template.set_index("Student ID").loc["A1", "Last Known Outcome Bucket"] == "Unknown"
+    assert template.set_index("Student ID").loc["A2", "Last Known Outcome Bucket"] == "Chapter Kicked"
+    assert template.set_index("Student ID").loc["A3", "Last Known Outcome Bucket"] == "Graduated"
+    assert template.set_index("Student ID").loc["A3", "Manual Status Applied"] == "Yes"
 
 
 def test_dashboard_outcome_distribution_counts_by_cohort() -> None:

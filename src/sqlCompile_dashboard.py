@@ -71,8 +71,23 @@ ODD_RECORD_COLUMNS = [
     "Status",
     "Notes",
 ]
+LAST_KNOWN_STATUS_COLUMNS = [
+    "Cohort Semester",
+    "Cohort Chapter",
+    "Student ID",
+    "Last Known Semester",
+    "Last Known Chapter",
+    "Last Known Status",
+    "Last Known Outcome Bucket",
+    "Needs Manual Form Review",
+    "Manual Status Applied",
+    "Semester",
+    "Chapter",
+    "Status",
+    "Notes",
+]
 MANUAL_CHECKER_SELECT_COLUMN = "Select"
-MANUAL_CHECKER_COLUMNS = [MANUAL_CHECKER_SELECT_COLUMN, *ODD_RECORD_COLUMNS]
+MANUAL_CHECKER_COLUMNS = [MANUAL_CHECKER_SELECT_COLUMN, *LAST_KNOWN_STATUS_COLUMNS]
 KNOWN_NON_GRADUATE_BUCKETS = {
     "Chapter Kicked",
     "Dropped/Inactive",
@@ -94,6 +109,7 @@ class SqlCompileDashboardTables:
     rate_table: pd.DataFrame
     outcome_distribution: pd.DataFrame
     manual_entry_template: pd.DataFrame
+    manual_checker_template: pd.DataFrame
     manual_rows: pd.DataFrame
     selected_semesters: list[str]
 
@@ -322,8 +338,61 @@ def build_manual_entry_template(review: pd.DataFrame) -> pd.DataFrame:
     return result.loc[:, ODD_RECORD_COLUMNS]
 
 
-def build_manual_checker_queue(review: pd.DataFrame) -> pd.DataFrame:
-    template = build_manual_entry_template(review)
+def _manual_checker_outcome_bucket(row: pd.Series) -> str:
+    needs_review = str(row.get("Needs Manual Form Review", "") or "").strip().lower()
+    if needs_review in {"yes", "true", "1", "y"}:
+        return "Unknown"
+
+    final_bucket = str(row.get("Final Outcome Bucket", "") or "").strip()
+    if final_bucket in {
+        "Needs Manual Form Review",
+        "New Member / No Later Status",
+        "Hold",
+        "Other / Unmapped",
+    }:
+        return "Unknown"
+    if final_bucket == "Active / Still On Roster":
+        return "Active"
+
+    mapped = persistence_outcome_from_status(final_bucket)
+    if mapped != "Unknown":
+        return mapped
+
+    status_code = normalize_status_code(row.get("Last Known Status Code", "") or row.get("Last Known Status", ""))
+    return persistence_outcome_from_status(status_code)
+
+
+def build_last_known_status_template(outcomes: pd.DataFrame) -> pd.DataFrame:
+    if outcomes.empty:
+        return pd.DataFrame(columns=LAST_KNOWN_STATUS_COLUMNS)
+
+    outcome_bucket_series = (
+        outcomes["Last Known Outcome Bucket"]
+        if "Last Known Outcome Bucket" in outcomes.columns
+        else outcomes.apply(_manual_checker_outcome_bucket, axis=1)
+    )
+    result = pd.DataFrame(
+        {
+            "Cohort Semester": outcomes.get("Cohort Semester", pd.Series("", index=outcomes.index)),
+            "Cohort Chapter": outcomes.get("Cohort Chapter", pd.Series("", index=outcomes.index)),
+            "Student ID": outcomes.get("Student ID", pd.Series("", index=outcomes.index)),
+            "Last Known Semester": outcomes.get("Last Known Semester", pd.Series("", index=outcomes.index)),
+            "Last Known Chapter": outcomes.get("Last Known Chapter", pd.Series("", index=outcomes.index)),
+            "Last Known Status": outcomes.get("Last Known Status", pd.Series("", index=outcomes.index)),
+            "Last Known Outcome Bucket": outcome_bucket_series,
+            "Needs Manual Form Review": outcomes.get("Needs Manual Form Review", pd.Series("", index=outcomes.index)),
+            "Manual Status Applied": outcomes.get("Manual Status Applied", pd.Series("", index=outcomes.index)),
+            "Semester": "",
+            "Chapter": outcomes.get("Last Known Chapter", pd.Series("", index=outcomes.index)),
+            "Status": "",
+            "Notes": "",
+        }
+    )
+    return result.loc[:, LAST_KNOWN_STATUS_COLUMNS]
+
+
+def build_manual_checker_queue(source: pd.DataFrame) -> pd.DataFrame:
+    template = build_last_known_status_template(source)
     if template.empty:
         return pd.DataFrame(columns=MANUAL_CHECKER_COLUMNS)
     result = template.copy()
@@ -375,6 +444,7 @@ def load_dashboard_tables(
         rate_table=build_dashboard_rate_table(outcomes),
         outcome_distribution=build_outcome_distribution(outcomes),
         manual_entry_template=build_manual_entry_template(review),
+        manual_checker_template=build_last_known_status_template(outcomes),
         manual_rows=manual_rows,
         selected_semesters=selected_semesters,
     )
