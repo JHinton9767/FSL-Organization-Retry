@@ -140,7 +140,7 @@ output\sqlCompile\cohorts\fall_2025\new_member_rate_summary.csv
 
 Rates use the resolved denominator, meaning students still in `new_member_form_review.csv` are excluded from rate calculations until a manual status row is added.
 
-The dashboard milestone bars use the full selected cohort population as the denominator for every bar. Outcome buckets carry forward, so a student resolved as resigned, dropped, graduated, chapter kicked, etc. remains in that bucket in later milestone bars unless a later terminal outcome supersedes it. The 6 Year bar is the final selected-population view.
+The dashboard milestone bars use milestone eligibility. The 1 Year bar includes every selected new-member cohort. Later bars include only cohorts old enough to be measured at that milestone, so recent joiners are not counted in 6 Year results. Outcome buckets carry forward, so a student resolved as resigned, dropped, graduated, chapter kicked, etc. remains in that bucket in later eligible milestone bars unless a later terminal outcome supersedes it.
 
 ## 6. Open the new dashboard
 

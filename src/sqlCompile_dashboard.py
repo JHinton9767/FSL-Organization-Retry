@@ -238,14 +238,16 @@ def build_sql_compile_milestone_dashboard(
     capped_max_years = max(0, min(int(max_years), 6))
 
     for offset in range(0, capped_max_years + 1):
-        measured = cohort_students.copy()
+        measured = cohort_students.loc[
+            cohort_students["Cohort Semester"].map(lambda value: _milestone_is_measurable(value, offset, latest_sort))
+        ].copy()
         if measured.empty:
             continue
 
         counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
         for _, student in measured.iterrows():
             target_sort = _milestone_target_sort(student["Cohort Semester"], offset)
-            if latest_sort and target_sort < 999999 and target_sort > latest_sort:
+            if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
             outcome = _checkpoint_outcome(
                 timeline_work,
@@ -293,8 +295,8 @@ def build_sql_compile_milestone_dashboard(
             "distinction": "ALL",
             "max_milestone": last_milestone,
             "note": (
-                "Milestone bars use a fixed selected-cohort denominator. Outcome buckets carry forward across later "
-                "checkpoints; checkpoints beyond loaded roster coverage use the latest loaded roster term."
+                "The 1 Year milestone includes every selected new-member cohort. Later milestones include only cohorts "
+                "old enough to be measured, and resolved outcome buckets carry forward across later checkpoints."
             ),
         },
     }
@@ -418,14 +420,27 @@ def _milestone_label(offset: int, selection_label: str) -> str:
 
 
 def _milestone_target_sort(cohort_semester: object, offset: int) -> int:
+    from src.build_canonical_pipeline import parse_term_code, sort_term_code
+
     cohort_sort = _cohort_sort(cohort_semester)
-    if cohort_sort >= 999999:
+    if int(offset) <= 0 or cohort_sort >= 999999:
         return cohort_sort
+
+    code, _, year, season = parse_term_code(cohort_semester)
+    if not code or pd.isna(year):
+        return cohort_sort + (int(offset) * 10)
+
+    season_text = str(season or "").strip().lower()
+    year_value = int(year)
+    if season_text == "fall":
+        return sort_term_code(f"{year_value + int(offset)}SP")
+    if season_text == "spring":
+        return sort_term_code(f"{year_value + int(offset)}SP")
     return cohort_sort + (int(offset) * 10)
 
 
 def _milestone_is_measurable(cohort_semester: object, offset: int, latest_sort: int) -> bool:
-    if offset == 0:
+    if offset in {0, 1}:
         return True
     target_sort = _milestone_target_sort(cohort_semester, offset)
     return target_sort < 999999 and latest_sort >= target_sort
