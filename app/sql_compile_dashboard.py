@@ -15,12 +15,16 @@ from src.sqlCompile_cohort import (
     MANUAL_STATUS_COLUMNS,
     append_manual_status_rows,
     build_new_member_cohort_report,
+    completed_manual_status_rows,
     write_manual_status_rows,
 )
 from src.sqlCompile_dashboard import (
+    MANUAL_CHECKER_COLUMNS,
+    MANUAL_CHECKER_SELECT_COLUMN,
     ODD_RECORD_COLUMNS,
     SQL_COMPILE_ALL_TIME_LABEL,
     build_dashboard_rate_table,
+    build_manual_checker_queue,
     build_sql_compile_milestone_dashboard,
     load_dashboard_tables,
     odd_record_editor_to_manual_rows,
@@ -34,6 +38,13 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+STATUS_OPTIONS = ["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"]
+MANUAL_CHECKER_ROW_ID = "_manual_checker_row_id"
+MANUAL_CHECKER_STATE_KEY = "sql_compile_manual_checker_rows"
+MANUAL_CHECKER_SIGNATURE_KEY = "sql_compile_manual_checker_signature"
+MANUAL_CHECKER_EDITOR_KEY = "sql_compile_manual_checker_editor"
 
 
 def _format_display_frame(
@@ -91,6 +102,181 @@ def _format_percent(value: object) -> str:
     if value is None or pd.isna(value):
         return "n/a"
     return f"{float(value):.1%}"
+
+
+def _unique_nonempty_options(frame: pd.DataFrame, column: str) -> list[str]:
+    if frame.empty or column not in frame.columns:
+        return []
+    values = frame[column].fillna("").astype(str).str.strip()
+    return sorted(value for value in values.unique().tolist() if value)
+
+
+def _manual_checker_signature(review_template: pd.DataFrame) -> tuple[tuple[str, ...], ...]:
+    if review_template.empty:
+        return ()
+    columns = [
+        column
+        for column in [
+            "Cohort Semester",
+            "Cohort Chapter",
+            "Student ID",
+            "Last Known Semester",
+            "Last Known Chapter",
+            "Last Known Status",
+        ]
+        if column in review_template.columns
+    ]
+    if not columns:
+        return tuple((str(index),) for index in review_template.index.tolist())
+    prepared = review_template.loc[:, columns].fillna("").astype(str)
+    return tuple(tuple(row) for row in prepared.to_numpy().tolist())
+
+
+def _with_manual_checker_row_ids(queue: pd.DataFrame) -> pd.DataFrame:
+    result = queue.copy()
+    if result.empty:
+        result[MANUAL_CHECKER_ROW_ID] = pd.Series(dtype="object")
+        return result
+
+    id_columns = ["Cohort Semester", "Cohort Chapter", "Student ID", "Last Known Semester", "Last Known Chapter"]
+    row_ids: list[str] = []
+    for position, row in result.reset_index(drop=True).iterrows():
+        identity = "|".join(str(row.get(column, "")).strip() for column in id_columns)
+        row_ids.append(f"{position}|{identity}")
+    result[MANUAL_CHECKER_ROW_ID] = row_ids
+    return result
+
+
+def _ensure_manual_checker_state(review_template: pd.DataFrame) -> pd.DataFrame:
+    signature = _manual_checker_signature(review_template)
+    if st.session_state.get(MANUAL_CHECKER_SIGNATURE_KEY) != signature:
+        queue = _with_manual_checker_row_ids(build_manual_checker_queue(review_template))
+        st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+        st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = signature
+
+    stored = st.session_state.get(MANUAL_CHECKER_STATE_KEY, pd.DataFrame(columns=[*MANUAL_CHECKER_COLUMNS, MANUAL_CHECKER_ROW_ID]))
+    queue = stored.copy() if isinstance(stored, pd.DataFrame) else pd.DataFrame(stored)
+    for column in MANUAL_CHECKER_COLUMNS:
+        if column not in queue.columns:
+            queue[column] = False if column == MANUAL_CHECKER_SELECT_COLUMN else ""
+    if MANUAL_CHECKER_ROW_ID not in queue.columns:
+        queue = _with_manual_checker_row_ids(queue)
+    queue[MANUAL_CHECKER_SELECT_COLUMN] = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+    for column in [*ODD_RECORD_COLUMNS, MANUAL_CHECKER_ROW_ID]:
+        queue[column] = queue[column].fillna("").astype(str).str.strip()
+    queue = queue.loc[:, [*MANUAL_CHECKER_COLUMNS, MANUAL_CHECKER_ROW_ID]].reset_index(drop=True)
+    st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+    return queue
+
+
+def _strip_manual_checker_internal_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    return frame.drop(columns=[MANUAL_CHECKER_ROW_ID], errors="ignore").copy()
+
+
+def _manual_checker_display_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    display = frame.loc[:, MANUAL_CHECKER_COLUMNS].copy()
+    display.index = frame[MANUAL_CHECKER_ROW_ID].fillna("").astype(str)
+    display.index.name = MANUAL_CHECKER_ROW_ID
+    return display
+
+
+def _merge_manual_checker_edits(queue: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
+    if edited.empty:
+        return queue
+
+    edited_work = edited.copy()
+    if MANUAL_CHECKER_ROW_ID not in edited_work.columns:
+        edited_work[MANUAL_CHECKER_ROW_ID] = edited_work.index.astype(str)
+    update_columns = [MANUAL_CHECKER_SELECT_COLUMN, "Semester", "Chapter", "Status", "Notes"]
+    result = queue.copy().set_index(MANUAL_CHECKER_ROW_ID, drop=False)
+    updates = edited_work.set_index(MANUAL_CHECKER_ROW_ID, drop=False)
+    shared_ids = result.index.intersection(updates.index)
+    for column in update_columns:
+        if column in updates.columns:
+            result.loc[shared_ids, column] = updates.loc[shared_ids, column]
+    result[MANUAL_CHECKER_SELECT_COLUMN] = result[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+    for column in ["Semester", "Chapter", "Status", "Notes"]:
+        result[column] = result[column].fillna("").astype(str).str.strip()
+    return result.reset_index(drop=True)
+
+
+def _filter_manual_checker_rows(
+    queue: pd.DataFrame,
+    *,
+    search_text: str,
+    cohort_filter: list[str],
+    chapter_filter: list[str],
+    last_semester_filter: list[str],
+    entry_status_filter: list[str],
+    unfinished_only: bool,
+) -> pd.DataFrame:
+    if queue.empty:
+        return queue
+
+    mask = pd.Series(True, index=queue.index)
+    if search_text.strip():
+        search_columns = [
+            "Cohort Semester",
+            "Cohort Chapter",
+            "Student ID",
+            "Last Known Semester",
+            "Last Known Chapter",
+            "Last Known Status",
+            "Semester",
+            "Chapter",
+            "Status",
+            "Notes",
+        ]
+        haystack = queue[search_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+        mask &= haystack.str.contains(search_text.strip().lower(), regex=False, na=False)
+    for column, selected in [
+        ("Cohort Semester", cohort_filter),
+        ("Cohort Chapter", chapter_filter),
+        ("Last Known Semester", last_semester_filter),
+    ]:
+        if selected:
+            mask &= queue[column].isin(selected)
+    if entry_status_filter:
+        normalized = queue["Status"].fillna("").astype(str).str.strip()
+        selected_statuses = set(entry_status_filter)
+        status_mask = pd.Series(False, index=queue.index)
+        if "Blank" in selected_statuses:
+            status_mask |= normalized.eq("")
+        selected_statuses.discard("Blank")
+        if selected_statuses:
+            status_mask |= normalized.isin(selected_statuses)
+        mask &= status_mask
+    if unfinished_only:
+        mask &= queue["Status"].fillna("").astype(str).str.strip().eq("")
+    return queue.loc[mask].copy()
+
+
+def _completed_manual_checker_rows(queue: pd.DataFrame) -> pd.DataFrame:
+    manual_rows = odd_record_editor_to_manual_rows(_strip_manual_checker_internal_columns(queue))
+    return completed_manual_status_rows(manual_rows)
+
+
+def _saved_manual_rows_for_queue(manual_rows: pd.DataFrame, queue: pd.DataFrame) -> pd.DataFrame:
+    if manual_rows.empty or queue.empty:
+        return pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
+    keys = set(
+        tuple(row)
+        for row in queue.loc[:, ["Cohort Semester", "Cohort Chapter", "Student ID"]]
+        .fillna("")
+        .astype(str)
+        .to_numpy()
+        .tolist()
+    )
+    prepared = manual_rows.copy()
+    for column in ["Cohort Semester", "Cohort Chapter", "Student ID"]:
+        if column not in prepared.columns:
+            prepared[column] = ""
+        prepared[column] = prepared[column].fillna("").astype(str).str.strip()
+    mask = prepared.apply(
+        lambda row: (row["Cohort Semester"], row["Cohort Chapter"], row["Student ID"]) in keys,
+        axis=1,
+    )
+    return prepared.loc[mask, MANUAL_STATUS_COLUMNS].reset_index(drop=True)
 
 
 def _selected_cohorts(rate_table: pd.DataFrame) -> list[str]:
@@ -183,50 +369,232 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Path) -> None:
+def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Path, manual_rows: pd.DataFrame) -> None:
     st.subheader("Manual Checker")
-    st.caption("These are students whose latest compiled status is `A` and whose chapter did not disappear as a whole. Fill in the verified form result, save it, then refresh the dashboard.")
+    st.caption("Work the odd-record queue here. Select rows, fill the verified outcome, and save completed decisions to the manual status CSV.")
 
-    if review_template.empty:
+    queue = _ensure_manual_checker_state(review_template)
+    saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
+
+    if queue.empty:
         st.success("No odd records are currently waiting for manual form review.")
+        if not saved_for_queue.empty:
+            with st.expander(f"Saved manual decisions for this selection ({len(saved_for_queue):,})", expanded=False):
+                st.dataframe(saved_for_queue, use_container_width=True, hide_index=True)
+        return
+
+    filter_cols = st.columns([1.4, 1, 1, 1])
+    with filter_cols[0]:
+        search_text = st.text_input("Search queue", placeholder="Student ID, chapter, semester, status, note", key="sql_compile_manual_checker_search")
+    with filter_cols[1]:
+        cohort_filter = st.multiselect("Cohort", options=_unique_nonempty_options(queue, "Cohort Semester"), key="sql_compile_manual_checker_cohort_filter")
+    with filter_cols[2]:
+        chapter_filter = st.multiselect("Chapter", options=_unique_nonempty_options(queue, "Cohort Chapter"), key="sql_compile_manual_checker_chapter_filter")
+    with filter_cols[3]:
+        last_semester_filter = st.multiselect("Last seen", options=_unique_nonempty_options(queue, "Last Known Semester"), key="sql_compile_manual_checker_last_seen_filter")
+
+    detail_filter_cols = st.columns([1, 1, 2])
+    with detail_filter_cols[0]:
+        entry_status_filter = st.multiselect(
+            "Entered status",
+            options=["Blank", *[option for option in STATUS_OPTIONS if option]],
+            key="sql_compile_manual_checker_status_filter",
+        )
+    with detail_filter_cols[1]:
+        unfinished_only = st.checkbox("Only unfinished", value=False, key="sql_compile_manual_checker_unfinished_only")
+    with detail_filter_cols[2]:
+        st.caption(f"Manual file: `{manual_status_file}`")
+
+    visible_queue = _filter_manual_checker_rows(
+        queue,
+        search_text=search_text,
+        cohort_filter=cohort_filter,
+        chapter_filter=chapter_filter,
+        last_semester_filter=last_semester_filter,
+        entry_status_filter=entry_status_filter,
+        unfinished_only=unfinished_only,
+    )
+    st.caption(f"Showing {len(visible_queue):,} of {len(queue):,} odd record(s).")
+
+    if visible_queue.empty:
+        st.warning("No odd records match the current filters.")
     else:
+        editor_height = min(820, max(320, 92 + (len(visible_queue) * 35)))
         edited = st.data_editor(
-            review_template,
+            _manual_checker_display_frame(visible_queue),
             use_container_width=True,
             hide_index=True,
-            num_rows="dynamic",
+            height=editor_height,
+            num_rows="fixed",
             column_config={
+                MANUAL_CHECKER_SELECT_COLUMN: st.column_config.CheckboxColumn("Select"),
                 "Status": st.column_config.SelectboxColumn(
                     "Status",
-                    options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"],
+                    options=STATUS_OPTIONS,
                 ),
                 "Semester": st.column_config.TextColumn("Correct Semester"),
+                "Chapter": st.column_config.TextColumn("Correct Chapter"),
                 "Notes": st.column_config.TextColumn("Notes"),
             },
             disabled=["Cohort Semester", "Cohort Chapter", "Student ID", "Last Known Semester", "Last Known Chapter", "Last Known Status"],
-            key="sql_compile_odd_record_editor",
+            key=MANUAL_CHECKER_EDITOR_KEY,
         )
-        save_cols = st.columns([1, 2])
-        with save_cols[0]:
-            if st.button("Save Completed Manual Rows", use_container_width=True):
-                manual_rows = odd_record_editor_to_manual_rows(edited)
-                try:
-                    path, saved = append_manual_status_rows(manual_rows, manual_status_file)
-                    if saved:
-                        st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
-                        st.rerun()
-                    else:
-                        st.warning("Fill in at least Student ID, Semester, and Status before saving.")
-                except OSError as exc:
-                    st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
-        with save_cols[1]:
-            st.download_button(
-                "Download Odd Records CSV",
-                data=dataframe_to_csv_bytes(review_template),
-                file_name="new_member_form_review.csv",
-                mime="text/csv",
-                use_container_width=True,
+        queue = _merge_manual_checker_edits(queue, edited)
+        st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+
+    selected_mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+    selected_queue = queue.loc[selected_mask].copy()
+    completed_rows = _completed_manual_checker_rows(queue)
+    completed_selected_rows = _completed_manual_checker_rows(selected_queue)
+
+    metric_cols = st.columns(5)
+    with metric_cols[0]:
+        st.metric("Queue records", f"{len(queue):,}")
+    with metric_cols[1]:
+        st.metric("Visible records", f"{len(visible_queue):,}")
+    with metric_cols[2]:
+        st.metric("Selected", f"{len(selected_queue):,}")
+    with metric_cols[3]:
+        st.metric("Ready to save", f"{len(completed_rows):,}")
+    with metric_cols[4]:
+        st.metric("Saved for queue", f"{len(saved_for_queue):,}")
+
+    selection_cols = st.columns(4)
+    visible_ids = set(visible_queue[MANUAL_CHECKER_ROW_ID].tolist()) if not visible_queue.empty else set()
+    with selection_cols[0]:
+        if st.button("Select Visible", use_container_width=True, disabled=not visible_ids):
+            queue.loc[queue[MANUAL_CHECKER_ROW_ID].isin(visible_ids), MANUAL_CHECKER_SELECT_COLUMN] = True
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with selection_cols[1]:
+        if st.button("Select Unfinished", use_container_width=True, disabled=not visible_ids):
+            unfinished_visible = (
+                queue[MANUAL_CHECKER_ROW_ID].isin(visible_ids)
+                & queue["Status"].fillna("").astype(str).str.strip().eq("")
             )
+            queue.loc[unfinished_visible, MANUAL_CHECKER_SELECT_COLUMN] = True
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with selection_cols[2]:
+        if st.button("Clear Selection", use_container_width=True, disabled=selected_queue.empty):
+            queue[MANUAL_CHECKER_SELECT_COLUMN] = False
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with selection_cols[3]:
+        st.download_button(
+            "Download Selected",
+            data=dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(selected_queue)),
+            file_name="sql_compile_manual_queue_selected.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=selected_queue.empty,
+        )
+
+    batch_cols = st.columns([0.8, 1, 1, 1.8])
+    with batch_cols[0]:
+        batch_status = st.selectbox("Batch status", options=STATUS_OPTIONS, key="sql_compile_manual_checker_batch_status")
+    with batch_cols[1]:
+        batch_semester = st.text_input("Batch semester", key="sql_compile_manual_checker_batch_semester")
+    with batch_cols[2]:
+        batch_chapter = st.text_input("Batch chapter", key="sql_compile_manual_checker_batch_chapter")
+    with batch_cols[3]:
+        batch_notes = st.text_input("Batch notes", key="sql_compile_manual_checker_batch_notes")
+
+    action_cols = st.columns(5)
+    with action_cols[0]:
+        if st.button("Apply to Selected", type="primary", use_container_width=True, disabled=selected_queue.empty):
+            mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+            if batch_status:
+                queue.loc[mask, "Status"] = batch_status
+            if batch_semester.strip():
+                queue.loc[mask, "Semester"] = batch_semester.strip()
+            if batch_chapter.strip():
+                queue.loc[mask, "Chapter"] = batch_chapter.strip()
+            if batch_notes.strip():
+                queue.loc[mask, "Notes"] = batch_notes.strip()
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with action_cols[1]:
+        if st.button("Use Last Seen", use_container_width=True, disabled=selected_queue.empty):
+            mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+            blank_semester = queue["Semester"].fillna("").astype(str).str.strip().eq("")
+            blank_chapter = queue["Chapter"].fillna("").astype(str).str.strip().eq("")
+            queue.loc[mask & blank_semester, "Semester"] = queue.loc[mask & blank_semester, "Last Known Semester"]
+            queue.loc[mask & blank_chapter, "Chapter"] = queue.loc[mask & blank_chapter, "Last Known Chapter"]
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with action_cols[2]:
+        if st.button("Clear Selected", use_container_width=True, disabled=selected_queue.empty):
+            mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
+            queue.loc[mask, ["Semester", "Status", "Notes"]] = ""
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.rerun()
+    with action_cols[3]:
+        if st.button("Save Selected", use_container_width=True, disabled=completed_selected_rows.empty):
+            try:
+                path, saved = append_manual_status_rows(completed_selected_rows, manual_status_file)
+                if saved:
+                    st.success(f"Saved {saved:,} selected manual row(s) to {path}.")
+                    st.rerun()
+                else:
+                    st.warning("Fill in at least Student ID, Semester, and Status before saving.")
+            except OSError as exc:
+                st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
+    with action_cols[4]:
+        if st.button("Save All Ready", use_container_width=True, disabled=completed_rows.empty):
+            try:
+                path, saved = append_manual_status_rows(completed_rows, manual_status_file)
+                if saved:
+                    st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
+                    st.rerun()
+                else:
+                    st.warning("Fill in at least Student ID, Semester, and Status before saving.")
+            except OSError as exc:
+                st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
+
+    utility_cols = st.columns(4)
+    with utility_cols[0]:
+        if st.button("Reset Checker Edits", use_container_width=True):
+            st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = None
+            st.rerun()
+    with utility_cols[1]:
+        st.download_button(
+            "Download Visible Queue",
+            data=dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(visible_queue)),
+            file_name="sql_compile_manual_queue_visible.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with utility_cols[2]:
+        st.download_button(
+            "Download Ready Rows",
+            data=dataframe_to_csv_bytes(completed_rows),
+            file_name="sql_compile_manual_rows_ready.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=completed_rows.empty,
+        )
+    with utility_cols[3]:
+        st.download_button(
+            "Download Saved Rows",
+            data=dataframe_to_csv_bytes(saved_for_queue),
+            file_name="sql_compile_manual_rows_saved_for_queue.csv",
+            mime="text/csv",
+            use_container_width=True,
+            disabled=saved_for_queue.empty,
+        )
+
+    with st.expander(f"Ready manual rows preview ({len(completed_rows):,})", expanded=not completed_rows.empty):
+        if completed_rows.empty:
+            st.caption("No completed manual rows yet.")
+        else:
+            st.dataframe(completed_rows, use_container_width=True, hide_index=True)
+
+    with st.expander(f"Saved manual decisions for this selection ({len(saved_for_queue):,})", expanded=False):
+        if saved_for_queue.empty:
+            st.caption("No saved manual decisions are currently tied to this queue.")
+        else:
+            st.dataframe(saved_for_queue, use_container_width=True, hide_index=True)
 
 
 def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Path) -> None:
@@ -240,7 +608,7 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
         column_config={
             "Status": st.column_config.SelectboxColumn(
                 "Status",
-                options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"],
+                options=STATUS_OPTIONS,
             ),
         },
         key="sql_compile_manual_rows_editor",
@@ -335,7 +703,11 @@ def main() -> None:
             st.dataframe(outcomes, use_container_width=True, hide_index=True)
 
     with checker_tab:
-        _render_manual_checker(review_template.loc[:, ODD_RECORD_COLUMNS] if not review_template.empty else review_template, manual_status_file)
+        _render_manual_checker(
+            review_template.loc[:, ODD_RECORD_COLUMNS] if not review_template.empty else review_template,
+            manual_status_file,
+            all_tables.manual_rows,
+        )
 
     with manual_rows_tab:
         _render_manual_rows_editor(all_tables.manual_rows, manual_status_file)

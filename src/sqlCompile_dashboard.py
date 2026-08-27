@@ -71,6 +71,8 @@ ODD_RECORD_COLUMNS = [
     "Status",
     "Notes",
 ]
+MANUAL_CHECKER_SELECT_COLUMN = "Select"
+MANUAL_CHECKER_COLUMNS = [MANUAL_CHECKER_SELECT_COLUMN, *ODD_RECORD_COLUMNS]
 KNOWN_NON_GRADUATE_BUCKETS = {
     "Chapter Kicked",
     "Dropped/Inactive",
@@ -309,6 +311,15 @@ def build_manual_entry_template(review: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return result.loc[:, ODD_RECORD_COLUMNS]
+
+
+def build_manual_checker_queue(review: pd.DataFrame) -> pd.DataFrame:
+    template = build_manual_entry_template(review)
+    if template.empty:
+        return pd.DataFrame(columns=MANUAL_CHECKER_COLUMNS)
+    result = template.copy()
+    result.insert(0, MANUAL_CHECKER_SELECT_COLUMN, False)
+    return result.loc[:, MANUAL_CHECKER_COLUMNS]
 
 
 def odd_record_editor_to_manual_rows(edited: pd.DataFrame) -> pd.DataFrame:

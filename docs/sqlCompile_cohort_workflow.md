@@ -94,6 +94,8 @@ output\sqlCompile\cohorts\fall_2025\new_member_form_review.csv
 
 These are students whose last known status is `A`, which means they disappeared without a resolved final status.
 
+The dashboard also has a **Manual Checker** tab for the same queue. It supports searching, cohort/chapter filtering, row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
+
 ## 4. Add manually researched form rows
 
 Add verified form/status rows to:

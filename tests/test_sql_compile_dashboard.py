@@ -1,7 +1,9 @@
 import pandas as pd
 
 from src.sqlCompile_dashboard import (
+    MANUAL_CHECKER_SELECT_COLUMN,
     build_dashboard_rate_table,
+    build_manual_checker_queue,
     build_manual_entry_template,
     build_outcome_distribution,
     build_sql_compile_milestone_dashboard,
@@ -80,6 +82,46 @@ def test_dashboard_manual_entry_template_round_trips_to_manual_rows() -> None:
             "Student ID": "A01234567",
             "Status": "RS",
             "Notes": "Form found.",
+        }
+    ]
+
+
+def test_dashboard_manual_checker_queue_adds_selection_without_affecting_manual_rows() -> None:
+    review = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2025",
+                "Cohort Chapter": "Alpha Sigma Phi",
+                "Student ID": "A01234567",
+                "Last Known Semester": "Spring 2026",
+                "Last Known Chapter": "Alpha Sigma Phi",
+                "Last Known Status": "A",
+            }
+        ]
+    )
+
+    queue = build_manual_checker_queue(review)
+
+    assert queue.columns[0] == MANUAL_CHECKER_SELECT_COLUMN
+    assert not bool(queue.loc[0, MANUAL_CHECKER_SELECT_COLUMN])
+
+    queue.loc[0, MANUAL_CHECKER_SELECT_COLUMN] = True
+    queue.loc[0, "Semester"] = "Fall 2026"
+    queue.loc[0, "Status"] = "CK"
+    queue.loc[0, "Notes"] = "Chapter removed before next roster."
+
+    manual_rows = odd_record_editor_to_manual_rows(queue)
+
+    assert MANUAL_CHECKER_SELECT_COLUMN not in manual_rows.columns
+    assert manual_rows.to_dict("records") == [
+        {
+            "Cohort Semester": "Fall 2025",
+            "Cohort Chapter": "Alpha Sigma Phi",
+            "Semester": "Fall 2026",
+            "Chapter": "Alpha Sigma Phi",
+            "Student ID": "A01234567",
+            "Status": "CK",
+            "Notes": "Chapter removed before next roster.",
         }
     ]
 
