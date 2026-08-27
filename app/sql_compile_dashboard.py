@@ -185,7 +185,7 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
 
 def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Path) -> None:
     st.subheader("Manual Checker")
-    st.caption("These are students whose latest compiled status is `A`. Fill in the verified form result, save it, then refresh the dashboard.")
+    st.caption("These are students whose latest compiled status is `A` and whose chapter did not disappear as a whole. Fill in the verified form result, save it, then refresh the dashboard.")
 
     if review_template.empty:
         st.success("No odd records are currently waiting for manual form review.")
@@ -198,7 +198,7 @@ def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Pa
             column_config={
                 "Status": st.column_config.SelectboxColumn(
                     "Status",
-                    options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "A", "N"],
+                    options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"],
                 ),
                 "Semester": st.column_config.TextColumn("Correct Semester"),
                 "Notes": st.column_config.TextColumn("Notes"),
@@ -240,7 +240,7 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
         column_config={
             "Status": st.column_config.SelectboxColumn(
                 "Status",
-                options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "A", "N"],
+                options=["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"],
             ),
         },
         key="sql_compile_manual_rows_editor",

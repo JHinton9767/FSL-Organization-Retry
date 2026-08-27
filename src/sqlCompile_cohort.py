@@ -13,7 +13,15 @@ import pandas as pd
 from src.build_canonical_pipeline import parse_term_code, sort_term_code
 from src.path_config import ROOT
 from src.shared_utils import clean_text
-from src.sqlCompile import DEFAULT_OUTPUT_PATH, OUTPUT_COLUMNS, TABLE_NAME, _quote_identifier, _resolve_path
+from src.sqlCompile import (
+    DEFAULT_OUTPUT_PATH,
+    OUTPUT_COLUMNS,
+    ROSTER_INVENTORY_COLUMNS,
+    ROSTER_INVENTORY_TABLE,
+    TABLE_NAME,
+    _quote_identifier,
+    _resolve_path,
+)
 
 
 MANUAL_STATUS_COLUMNS = [
@@ -40,8 +48,12 @@ KNOWN_NON_GRADUATE_EXIT_BUCKETS = {
     "Revoked",
     "Suspended",
     "Transfer",
+    "Chapter Kicked",
 }
 OTHER_UNRESOLVED_BUCKETS = {"Hold", "New Member / No Later Status", "Other / Unmapped"}
+CHAPTER_KICKED_STATUS_CODE = "CK"
+CHAPTER_KICKED_OUTCOME = "Chapter Kicked"
+CHAPTER_DISAPPEARANCE_SOURCE = "chapter_disappearance"
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,8 @@ def normalize_status_code(value: object) -> str:
         return "G"
     if compact in {"T", "TRANSFER", "TRANSFERRED"}:
         return "T"
+    if compact in {"CK", "KICKED", "CHAPTERKICKED", "CHAPTERKICKEDOFF", "ORGANIZATIONKICKED"}:
+        return CHAPTER_KICKED_STATUS_CODE
     if compact in {"S", "SUSPEND", "SUSPENDED"}:
         return "S"
     if compact in {"D", "DROP", "DROPPED", "I", "INACTIVE", "REMOVE", "REMOVED"}:
@@ -109,6 +123,8 @@ def normalize_status_code(value: object) -> str:
 def outcome_bucket(status_code: str, needs_manual_review: bool) -> str:
     if needs_manual_review:
         return "Needs Manual Form Review"
+    if status_code == CHAPTER_KICKED_STATUS_CODE:
+        return CHAPTER_KICKED_OUTCOME
     if status_code == "G":
         return "Graduated"
     if status_code == "A":
@@ -202,6 +218,25 @@ def read_sql_compile_table(database_path: str | Path = DEFAULT_OUTPUT_PATH, tabl
     return _ensure_columns(frame, OUTPUT_COLUMNS)
 
 
+def read_roster_inventory_table(
+    database_path: str | Path = DEFAULT_OUTPUT_PATH,
+    table_name: str = ROSTER_INVENTORY_TABLE,
+) -> pd.DataFrame:
+    database = _resolve_path(database_path)
+    if not database.exists():
+        return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
+
+    with sqlite3.connect(database) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
+        frame = pd.read_sql_query(f"SELECT * FROM {_quote_identifier(table_name)}", connection)
+    return _ensure_roster_inventory_columns(frame)
+
+
 def _prepared_compile_rows(frame: pd.DataFrame) -> pd.DataFrame:
     prepared = _ensure_columns(frame, OUTPUT_COLUMNS)
     prepared["_semester_normalized"] = prepared["Semester"].map(_normalize_semester)
@@ -223,7 +258,35 @@ def _prepared_manual_rows(frame: pd.DataFrame) -> pd.DataFrame:
     prepared["_term_sort"] = prepared["_semester_normalized"].map(_semester_sort)
     prepared["_status_code"] = prepared["Status"].map(normalize_status_code)
     prepared["_source"] = "manual_status"
-    prepared["_manual_priority"] = 1
+    prepared["_manual_priority"] = 2
+    return prepared
+
+
+def _ensure_roster_inventory_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    for column in ROSTER_INVENTORY_COLUMNS:
+        if column not in result.columns:
+            result[column] = ""
+    for column in ["Semester", "Chapter", "Roster Pass", "Roster Month", "Source File", "Source Sheet"]:
+        result[column] = result[column].fillna("").astype(str).map(clean_text)
+    result["Roster Pass Priority"] = pd.to_numeric(result["Roster Pass Priority"], errors="coerce").fillna(0)
+    result["Roster Month Priority"] = pd.to_numeric(result["Roster Month Priority"], errors="coerce").fillna(0).astype(int)
+    result["Student Rows"] = pd.to_numeric(result["Student Rows"], errors="coerce").fillna(0).astype(int)
+    return result.loc[:, ROSTER_INVENTORY_COLUMNS]
+
+
+def _prepared_roster_inventory(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=[*ROSTER_INVENTORY_COLUMNS, "_semester_normalized", "_term_sort", "_chapter_key"])
+    prepared = _ensure_roster_inventory_columns(frame)
+    prepared["_semester_normalized"] = prepared["Semester"].map(_normalize_semester)
+    prepared["_term_sort"] = prepared["_semester_normalized"].map(_semester_sort)
+    prepared["_chapter_key"] = prepared["Chapter"].map(_normalize_chapter_key)
+    prepared = prepared.loc[
+        prepared["_chapter_key"].ne("")
+        & prepared["Chapter"].ne("Unknown")
+        & prepared["_term_sort"].lt(999999)
+    ].copy()
     return prepared
 
 
@@ -259,6 +322,7 @@ def _manual_rows_for_cohort(manual: pd.DataFrame, cohort_label: str, cohort_stud
 def _timeline_rows_for_cohort(
     compiled: pd.DataFrame,
     manual: pd.DataFrame,
+    roster_inventory: pd.DataFrame,
     cohort_label: str,
     cohort_source_rows: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -292,6 +356,14 @@ def _timeline_rows_for_cohort(
     else:
         manual_timeline = pd.DataFrame(columns=base_timeline.columns)
 
+    chapter_disappearance_timeline = _chapter_disappearance_rows_for_cohort(
+        base_timeline,
+        manual_timeline,
+        roster_inventory,
+        cohort_students,
+        cohort_sort,
+    )
+
     common_columns = [
         "Cohort Semester",
         "Cohort Chapter",
@@ -309,6 +381,7 @@ def _timeline_rows_for_cohort(
     combined = pd.concat(
         [
             _ensure_missing_columns(base_timeline, common_columns),
+            _ensure_missing_columns(chapter_disappearance_timeline, common_columns),
             _ensure_missing_columns(manual_timeline, common_columns),
         ],
         ignore_index=True,
@@ -336,6 +409,145 @@ def _ensure_missing_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.D
         if column not in result.columns:
             result[column] = ""
     return result.loc[:, list(columns)]
+
+
+def _chapter_disappearance_events(roster_inventory: pd.DataFrame) -> Dict[str, dict]:
+    if roster_inventory.empty:
+        return {}
+
+    inventory = roster_inventory.loc[
+        roster_inventory["_chapter_key"].ne("") & roster_inventory["_term_sort"].lt(999999)
+    ].copy()
+    if inventory.empty:
+        return {}
+
+    term_labels = (
+        inventory.sort_values(["_term_sort", "Semester"])
+        .drop_duplicates(subset=["_term_sort"], keep="last")
+        .set_index("_term_sort")["Semester"]
+        .to_dict()
+    )
+    term_latest_pass = inventory.groupby("_term_sort")["Roster Pass Priority"].max().to_dict()
+    global_latest_sort = int(inventory["_term_sort"].max())
+    ordered_terms = sorted(int(value) for value in term_labels if int(value) < 999999)
+    events: Dict[str, dict] = {}
+
+    for chapter_key, group in inventory.groupby("_chapter_key", dropna=False):
+        if not str(chapter_key).strip():
+            continue
+        last_sort = int(group["_term_sort"].max())
+        last_group = group.loc[group["_term_sort"].eq(last_sort)].copy()
+        if last_group.empty:
+            continue
+        last_group = last_group.sort_values(["Roster Pass Priority", "Roster Month Priority", "Chapter"], na_position="last")
+        chapter_latest_pass = float(last_group["Roster Pass Priority"].max())
+        term_latest = float(term_latest_pass.get(last_sort, chapter_latest_pass))
+        chapter_name = clean_text(last_group.iloc[-1]["Chapter"])
+        last_semester = clean_text(last_group.iloc[-1]["Semester"])
+
+        if chapter_latest_pass < term_latest:
+            events[str(chapter_key)] = {
+                "chapter": chapter_name,
+                "last_roster_sort": last_sort,
+                "disappearance_sort": last_sort,
+                "disappearance_semester": last_semester,
+                "reason": f"{chapter_name} appeared before the latest roster pass for {last_semester} but was absent from the latest pass.",
+            }
+            continue
+
+        if last_sort < global_latest_sort:
+            future_terms = [term_sort for term_sort in ordered_terms if term_sort > last_sort]
+            disappearance_sort = future_terms[0] if future_terms else global_latest_sort
+            events[str(chapter_key)] = {
+                "chapter": chapter_name,
+                "last_roster_sort": last_sort,
+                "disappearance_sort": disappearance_sort,
+                "disappearance_semester": clean_text(term_labels.get(disappearance_sort, "")) or last_semester,
+                "reason": f"{chapter_name} had no roster after {last_semester} while later roster terms existed.",
+            }
+
+    return events
+
+
+def _chapter_disappearance_rows_for_cohort(
+    base_timeline: pd.DataFrame,
+    manual_timeline: pd.DataFrame,
+    roster_inventory: pd.DataFrame,
+    cohort_students: pd.DataFrame,
+    cohort_sort: int,
+) -> pd.DataFrame:
+    common_columns = [
+        "Cohort Semester",
+        "Cohort Chapter",
+        "Semester",
+        "Chapter",
+        "Student ID",
+        "Status",
+        "Notes",
+        "_semester_normalized",
+        "_term_sort",
+        "_status_code",
+        "_source",
+        "_manual_priority",
+    ]
+    if base_timeline.empty or roster_inventory.empty:
+        return pd.DataFrame(columns=common_columns)
+
+    events = _chapter_disappearance_events(roster_inventory)
+    if not events:
+        return pd.DataFrame(columns=common_columns)
+
+    manual_student_ids = set()
+    if not manual_timeline.empty and "Student ID" in manual_timeline.columns:
+        manual_student_ids = set(manual_timeline["Student ID"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().tolist())
+
+    base = base_timeline.copy()
+    base["_term_sort"] = pd.to_numeric(base["_term_sort"], errors="coerce").fillna(999999).astype(int)
+    base = base.loc[base["_term_sort"].ge(cohort_sort)].copy()
+    if base.empty:
+        return pd.DataFrame(columns=common_columns)
+
+    base["_chapter_key"] = base["Chapter"].map(_normalize_chapter_key)
+    latest_rows = (
+        base.sort_values(["Student ID", "_term_sort", "_manual_priority", "Semester"], na_position="last")
+        .drop_duplicates(subset=["Student ID"], keep="last")
+        .copy()
+    )
+    cohort_chapter_lookup = dict(zip(cohort_students["Student ID"], cohort_students["Cohort Chapter"]))
+    rows: List[dict] = []
+    for _, latest in latest_rows.iterrows():
+        student_id = clean_text(latest.get("Student ID", ""))
+        if not student_id or student_id in manual_student_ids:
+            continue
+        latest_status_code = clean_text(latest.get("_status_code", ""))
+        if latest_status_code not in {"A", "N"}:
+            continue
+        chapter_key = clean_text(latest.get("_chapter_key", ""))
+        event = events.get(chapter_key)
+        if not event:
+            continue
+        if int(latest.get("_term_sort", 999999)) != int(event["last_roster_sort"]):
+            continue
+
+        disappearance_semester = clean_text(event.get("disappearance_semester", "")) or clean_text(latest.get("Semester", ""))
+        rows.append(
+            {
+                "Cohort Semester": clean_text(latest.get("Cohort Semester", "")),
+                "Cohort Chapter": clean_text(cohort_chapter_lookup.get(student_id, latest.get("Cohort Chapter", ""))),
+                "Semester": disappearance_semester,
+                "Chapter": clean_text(latest.get("Chapter", "")),
+                "Student ID": student_id,
+                "Status": CHAPTER_KICKED_OUTCOME,
+                "Notes": clean_text(event.get("reason", "")),
+                "_semester_normalized": _normalize_semester(disappearance_semester),
+                "_term_sort": int(event["disappearance_sort"]),
+                "_status_code": CHAPTER_KICKED_STATUS_CODE,
+                "_source": CHAPTER_DISAPPEARANCE_SOURCE,
+                "_manual_priority": 1,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=common_columns)
 
 
 def _timeline_output_columns() -> List[str]:
@@ -500,11 +712,13 @@ def _build_summary_rows(outcomes: pd.DataFrame) -> pd.DataFrame:
 def build_new_member_cohort_tables(
     compiled_rows: pd.DataFrame,
     manual_rows: pd.DataFrame,
+    roster_inventory: Optional[pd.DataFrame] = None,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     compiled = _prepared_compile_rows(compiled_rows)
     manual = _prepared_manual_rows(manual_rows)
+    inventory = _prepared_roster_inventory(roster_inventory)
     selected_semesters = _selected_cohort_semesters(compiled, cohort_semesters, all_cohorts)
 
     timeline_frames: List[pd.DataFrame] = []
@@ -517,7 +731,7 @@ def build_new_member_cohort_tables(
         ].copy()
         if cohort_rows.empty:
             continue
-        timeline = _timeline_rows_for_cohort(compiled, manual, cohort_label, cohort_rows)
+        timeline = _timeline_rows_for_cohort(compiled, manual, inventory, cohort_label, cohort_rows)
         outcomes = _build_outcomes_for_cohort(cohort_label, cohort_rows, timeline)
         review = _build_review_rows(outcomes)
         timeline_frames.append(timeline)
@@ -629,10 +843,12 @@ def build_new_member_cohort_report(
     database = _resolve_path(database_path)
     manual_path = ensure_manual_status_file(manual_status_file)
     compiled_rows = read_sql_compile_table(database, table_name=table_name)
+    roster_inventory = read_roster_inventory_table(database)
     manual_rows = read_manual_status_rows(manual_path)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         manual_rows,
+        roster_inventory=roster_inventory,
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
     )

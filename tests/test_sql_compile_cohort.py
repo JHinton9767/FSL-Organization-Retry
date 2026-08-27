@@ -3,13 +3,17 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.sqlCompile import write_sqlite
+from src.sqlCompile import ROSTER_INVENTORY_COLUMNS, write_sqlite
 from src.sqlCompile_cohort import (
     MANUAL_STATUS_COLUMNS,
     build_new_member_cohort_report,
     build_new_member_cohort_tables,
     write_report_csvs,
 )
+
+
+def _inventory(rows: list[dict[str, object]]) -> pd.DataFrame:
+    return pd.DataFrame(rows, columns=ROSTER_INVENTORY_COLUMNS)
 
 
 def test_new_member_cohort_flags_last_active_rows_for_manual_review() -> None:
@@ -102,6 +106,76 @@ def test_new_member_cohort_report_writes_sqlite_tables_and_csvs(tmp_path: Path) 
 
     assert review_count == 1
     assert summary_count > 0
+
+
+def test_new_member_cohort_marks_students_lost_with_disappeared_chapter() -> None:
+    compiled = pd.DataFrame(
+        [
+            {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A1", "Status": "N"},
+            {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A2", "Status": "N"},
+            {"Semester": "Fall 2025", "Chapter": "Beta Theta Pi", "Student ID": "B1", "Status": "N"},
+            {"Semester": "Spring 2026", "Chapter": "Alpha Sigma Phi", "Student ID": "A1", "Status": "A"},
+            {"Semester": "Spring 2026", "Chapter": "Alpha Sigma Phi", "Student ID": "A2", "Status": "A"},
+            {"Semester": "Spring 2026", "Chapter": "Beta Theta Pi", "Student ID": "B1", "Status": "A"},
+            {"Semester": "Fall 2026", "Chapter": "Beta Theta Pi", "Student ID": "B1", "Status": "A"},
+        ]
+    )
+    inventory = _inventory(
+        [
+            {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Fall 2025/Final/Alpha.xlsx", "Source Sheet": "Roster", "Student Rows": 2},
+            {"Semester": "Fall 2025", "Chapter": "Beta Theta Pi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Fall 2025/Final/Beta.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+            {"Semester": "Spring 2026", "Chapter": "Alpha Sigma Phi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Spring 2026/Final/Alpha.xlsx", "Source Sheet": "Roster", "Student Rows": 2},
+            {"Semester": "Spring 2026", "Chapter": "Beta Theta Pi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Spring 2026/Final/Beta.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+            {"Semester": "Fall 2026", "Chapter": "Beta Theta Pi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Fall 2026/Final/Beta.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+        ]
+    )
+
+    timeline, outcomes, review, summary, _ = build_new_member_cohort_tables(
+        compiled,
+        pd.DataFrame(columns=MANUAL_STATUS_COLUMNS),
+        roster_inventory=inventory,
+        cohort_semesters=["Fall 2025"],
+    )
+
+    indexed = outcomes.set_index("Student ID")
+    assert indexed.loc["A1", "Final Outcome Bucket"] == "Chapter Kicked"
+    assert indexed.loc["A2", "Final Outcome Bucket"] == "Chapter Kicked"
+    assert indexed.loc["A1", "Needs Manual Form Review"] == "No"
+    assert indexed.loc["B1", "Needs Manual Form Review"] == "Yes"
+    assert review["Student ID"].tolist() == ["B1"]
+    assert set(timeline.loc[timeline["Status Code"].eq("CK"), "Student ID"]) == {"A1", "A2"}
+
+    summary_lookup = summary.set_index(["Metric", "Outcome Bucket"])
+    assert summary_lookup.loc[("Outcome Bucket Rate", "Chapter Kicked"), "Student Count"] == 2
+    assert summary_lookup.loc[("Known Non-Graduate Exit Rate", "Known Non-Graduate Exit"), "Student Count"] == 2
+
+
+def test_new_member_cohort_marks_midsemester_chapter_disappearance_from_roster_passes() -> None:
+    compiled = pd.DataFrame(
+        [
+            {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A1", "Status": "N"},
+            {"Semester": "Fall 2025", "Chapter": "Beta Theta Pi", "Student ID": "B1", "Status": "N"},
+        ]
+    )
+    inventory = _inventory(
+        [
+            {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Roster Pass": "Initial", "Roster Pass Priority": 1, "Source File": "Fall 2025/Initial/Alpha.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+            {"Semester": "Fall 2025", "Chapter": "Beta Theta Pi", "Roster Pass": "Initial", "Roster Pass Priority": 1, "Source File": "Fall 2025/Initial/Beta.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+            {"Semester": "Fall 2025", "Chapter": "Beta Theta Pi", "Roster Pass": "Final", "Roster Pass Priority": 3, "Source File": "Fall 2025/Final/Beta.xlsx", "Source Sheet": "Roster", "Student Rows": 1},
+        ]
+    )
+
+    _, outcomes, review, _, _ = build_new_member_cohort_tables(
+        compiled,
+        pd.DataFrame(columns=MANUAL_STATUS_COLUMNS),
+        roster_inventory=inventory,
+        cohort_semesters=["Fall 2025"],
+    )
+
+    indexed = outcomes.set_index("Student ID")
+    assert indexed.loc["A1", "Final Outcome Bucket"] == "Chapter Kicked"
+    assert indexed.loc["B1", "Final Outcome Bucket"] == "New Member / No Later Status"
+    assert review.empty
 
 
 def test_report_csv_writer_uses_timestamped_fallback_when_csv_is_locked(tmp_path: Path, monkeypatch) -> None:

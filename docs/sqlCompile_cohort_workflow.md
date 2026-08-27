@@ -27,6 +27,16 @@ When the same student appears in multiple rosters for the same semester, `sqlCom
 - If the only conflict is `A` versus `N`, `N` wins.
 - If statuses are in the same class, roster pass order is used as the tie-breaker: Initial first, Updated/Revised after, Final last.
 
+Fresh `sqlCompile` runs also write a side table named `sqlCompile_roster_inventory`. The main `sqlCompile` table still keeps only the four columns above, but the inventory table lets cohort reports detect chapter-wide roster disappearance.
+
+When a chapter appears in earlier roster coverage but not in a later roster pass or later semester while other chapter rosters continue, active/new-member students whose last roster row was with that chapter are resolved as:
+
+```text
+Chapter Kicked
+```
+
+Those students are removed from the manual checker and counted as known non-graduate exits. Students who disappear individually while their chapter continues still go to manual review.
+
 ## 2. Build a new-member cohort report
 
 Use the semester where the students were listed as `Status = N`.

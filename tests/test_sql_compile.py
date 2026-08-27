@@ -3,7 +3,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from src.sqlCompile import OUTPUT_COLUMNS, build_sql_compile_frame, sqlCompile
+from src.sqlCompile import OUTPUT_COLUMNS, ROSTER_INVENTORY_TABLE, build_sql_compile_frame, sqlCompile
 
 
 def _write_roster(path: Path, title: str, rows: list[list[str]]) -> None:
@@ -111,6 +111,8 @@ def test_sql_compile_writes_sqlite_table_with_requested_columns(tmp_path: Path) 
     with sqlite3.connect(output) as connection:
         columns = [row[1] for row in connection.execute('PRAGMA table_info("sqlCompile")')]
         rows = connection.execute('SELECT "Semester", "Chapter", "Student ID", "Status" FROM "sqlCompile"').fetchall()
+        inventory_rows = connection.execute(f'SELECT COUNT(*) FROM "{ROSTER_INVENTORY_TABLE}"').fetchone()[0]
 
     assert columns == OUTPUT_COLUMNS
     assert rows == [("Fall 2025", "Alpha Sigma Phi", "A01234567", "RS")]
+    assert inventory_rows == 1

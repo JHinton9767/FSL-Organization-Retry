@@ -56,7 +56,7 @@ def persistence_outcome_from_status(value: object) -> str:
         return "Dropped/Resigned"
     if upper in {"T", "TRANSFER", "TRANSFERRED", "TRANSFERRED / LEFT INSTITUTION"} or "TRANSFER" in upper:
         return "Transfer"
-    if upper in {"CHAPTER KICKED", "KICKED"} or ("CHAPTER" in upper and "KICK" in upper):
+    if upper in {"CK", "CHAPTER KICKED", "KICKED"} or ("CHAPTER" in upper and "KICK" in upper):
         return CHAPTER_KICKED_OUTCOME
     if upper in {"G", "GRAD", "GRADUATED", "GRADUATED CONFIRMED"}:
         return "Graduated"

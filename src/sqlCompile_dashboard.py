@@ -13,6 +13,7 @@ from src.sqlCompile_cohort import (
     build_new_member_cohort_tables,
     normalize_status_code,
     read_manual_status_rows,
+    read_roster_inventory_table,
     read_sql_compile_table,
 )
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
@@ -71,6 +72,7 @@ ODD_RECORD_COLUMNS = [
     "Notes",
 ]
 KNOWN_NON_GRADUATE_BUCKETS = {
+    "Chapter Kicked",
     "Dropped/Inactive",
     "Early Alumni",
     "Resigned",
@@ -336,10 +338,12 @@ def load_dashboard_tables(
     all_cohorts: bool = True,
 ) -> SqlCompileDashboardTables:
     compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
+    roster_inventory = read_roster_inventory_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         manual_rows,
+        roster_inventory=roster_inventory,
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
     )

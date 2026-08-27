@@ -39,6 +39,18 @@ from src.shared_utils import clean_text
 
 TABLE_NAME = "sqlCompile"
 OUTPUT_COLUMNS = ["Semester", "Chapter", "Student ID", "Status"]
+ROSTER_INVENTORY_TABLE = "sqlCompile_roster_inventory"
+ROSTER_INVENTORY_COLUMNS = [
+    "Semester",
+    "Chapter",
+    "Roster Pass",
+    "Roster Pass Priority",
+    "Roster Month",
+    "Roster Month Priority",
+    "Source File",
+    "Source Sheet",
+    "Student Rows",
+]
 DEFAULT_OUTPUT_PATH = ROOT / "output" / "sqlCompile" / "sqlCompile.sqlite"
 SKIPPED_DIRECTORY_NAMES = {
     ".git",
@@ -323,6 +335,66 @@ def resolve_semester_statuses(rows: pd.DataFrame) -> pd.DataFrame:
     return final.loc[:, OUTPUT_COLUMNS].reset_index(drop=True)
 
 
+def build_roster_inventory(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
+
+    required_columns = [
+        "Semester",
+        "Chapter",
+        "Student ID",
+        "_roster_file_version",
+        "_source_version_priority",
+        "_roster_file_month",
+        "_source_month_priority",
+        "_source_file",
+        "_source_sheet",
+    ]
+    work = rows.copy()
+    for column in required_columns:
+        if column not in work.columns:
+            work[column] = ""
+    for column in ["Semester", "Chapter", "Student ID", "_roster_file_version", "_roster_file_month", "_source_file", "_source_sheet"]:
+        work[column] = work[column].fillna("").astype(str).map(clean_text)
+    work["_source_version_priority"] = pd.to_numeric(work["_source_version_priority"], errors="coerce").fillna(0)
+    work["_source_month_priority"] = pd.to_numeric(work["_source_month_priority"], errors="coerce").fillna(0).astype(int)
+    work = work.loc[work["Semester"].ne("") & work["Chapter"].ne("") & work["Chapter"].ne("Unknown")].copy()
+    if work.empty:
+        return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
+
+    grouped = (
+        work.groupby(
+            [
+                "Semester",
+                "Chapter",
+                "_roster_file_version",
+                "_source_version_priority",
+                "_roster_file_month",
+                "_source_month_priority",
+                "_source_file",
+                "_source_sheet",
+            ],
+            dropna=False,
+        )["Student ID"]
+        .nunique()
+        .reset_index(name="Student Rows")
+    )
+    result = grouped.rename(
+        columns={
+            "_roster_file_version": "Roster Pass",
+            "_source_version_priority": "Roster Pass Priority",
+            "_roster_file_month": "Roster Month",
+            "_source_month_priority": "Roster Month Priority",
+            "_source_file": "Source File",
+            "_source_sheet": "Source Sheet",
+        }
+    )
+    result["Roster Pass"] = result["Roster Pass"].replace("", "Regular")
+    result = result.loc[:, ROSTER_INVENTORY_COLUMNS].copy()
+    result["_sort"] = result["Semester"].map(lambda value: sort_term_code(parse_term_code(value)[0]) if parse_term_code(value)[0] else 999999)
+    return result.sort_values(["_sort", "Semester", "Chapter", "Roster Pass Priority", "Source File", "Source Sheet"]).drop(columns=["_sort"]).reset_index(drop=True)
+
+
 def build_sql_compile_frame(roots: Sequence[str | Path]) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
     source_rows, issues, source_file_count = load_sql_compile_rows(roots)
     return resolve_semester_statuses(source_rows), issues, source_file_count
@@ -332,7 +404,13 @@ def _quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def write_sqlite(frame: pd.DataFrame, output_path: str | Path, table_name: str = TABLE_NAME) -> Path:
+def write_sqlite(
+    frame: pd.DataFrame,
+    output_path: str | Path,
+    table_name: str = TABLE_NAME,
+    roster_inventory: Optional[pd.DataFrame] = None,
+    roster_inventory_table_name: str = ROSTER_INVENTORY_TABLE,
+) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     table_identifier = _quote_identifier(table_name)
@@ -358,6 +436,22 @@ def write_sqlite(frame: pd.DataFrame, output_path: str | Path, table_name: str =
             f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{table_name}_student_semester')} "
             f"ON {table_identifier} ({_quote_identifier('Student ID')}, {_quote_identifier('Semester')})"
         )
+        if roster_inventory is not None:
+            inventory = roster_inventory.copy()
+            for column in ROSTER_INVENTORY_COLUMNS:
+                if column not in inventory.columns:
+                    inventory[column] = ""
+            inventory.loc[:, ROSTER_INVENTORY_COLUMNS].to_sql(
+                roster_inventory_table_name,
+                connection,
+                if_exists="replace",
+                index=False,
+            )
+            inventory_identifier = _quote_identifier(roster_inventory_table_name)
+            connection.execute(
+                f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{roster_inventory_table_name}_chapter_semester')} "
+                f"ON {inventory_identifier} ({_quote_identifier('Chapter')}, {_quote_identifier('Semester')})"
+            )
         connection.commit()
 
     return destination
@@ -370,8 +464,10 @@ def sqlCompile(
     table_name: str = TABLE_NAME,
 ) -> SqlCompileResult:
     roots = list(input_roots) if input_roots else default_input_roots(config_path)
-    frame, issues, source_file_count = build_sql_compile_frame(roots)
-    destination = write_sqlite(frame, output_path, table_name=table_name)
+    source_rows, issues, source_file_count = load_sql_compile_rows(roots)
+    frame = resolve_semester_statuses(source_rows)
+    roster_inventory = build_roster_inventory(source_rows)
+    destination = write_sqlite(frame, output_path, table_name=table_name, roster_inventory=roster_inventory)
     return SqlCompileResult(
         output_path=destination,
         table_name=table_name,
