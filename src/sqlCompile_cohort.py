@@ -33,7 +33,14 @@ MANUAL_STATUS_COLUMNS = [
     "Status",
     "Notes",
 ]
+ZERO_MEMBER_PERIOD_COLUMNS = [
+    "Chapter",
+    "Start Semester",
+    "End Semester",
+    "Notes",
+]
 DEFAULT_MANUAL_STATUS_PATH = ROOT / "config" / "sqlCompile_manual_status.csv"
+DEFAULT_ZERO_MEMBER_PERIODS_PATH = ROOT / "config" / "sqlCompile_zero_member_periods.csv"
 DEFAULT_COHORT_OUTPUT_DIR = ROOT / "output" / "sqlCompile" / "cohorts"
 REPORT_TABLES = {
     "timeline": "new_member_timeline",
@@ -177,6 +184,17 @@ def read_manual_status_rows(path: str | Path = DEFAULT_MANUAL_STATUS_PATH, creat
     return _ensure_columns(frame, MANUAL_STATUS_COLUMNS)
 
 
+def read_zero_member_periods(path: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH) -> pd.DataFrame:
+    zero_member_path = _resolve_path(path)
+    if not zero_member_path.exists():
+        return pd.DataFrame(columns=ZERO_MEMBER_PERIOD_COLUMNS)
+    try:
+        frame = pd.read_csv(zero_member_path, dtype=str).fillna("")
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=ZERO_MEMBER_PERIOD_COLUMNS)
+    return _ensure_columns(frame, ZERO_MEMBER_PERIOD_COLUMNS)
+
+
 def write_manual_status_rows(frame: pd.DataFrame, path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> Path:
     destination = _resolve_path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -290,6 +308,24 @@ def _prepared_roster_inventory(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
     return prepared
 
 
+def _prepared_zero_member_periods(frame: Optional[pd.DataFrame]) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=[*ZERO_MEMBER_PERIOD_COLUMNS, "_chapter_key", "_start_sort", "_end_sort"])
+    prepared = _ensure_columns(frame, ZERO_MEMBER_PERIOD_COLUMNS)
+    prepared["_chapter_key"] = prepared["Chapter"].map(_normalize_chapter_key)
+    prepared["_start_sort"] = prepared["Start Semester"].map(_semester_sort)
+    prepared["_end_sort"] = prepared["End Semester"].map(_semester_sort)
+    prepared.loc[prepared["_end_sort"].ge(999999), "_end_sort"] = prepared.loc[
+        prepared["_end_sort"].ge(999999), "_start_sort"
+    ]
+    prepared = prepared.loc[
+        prepared["_chapter_key"].ne("")
+        & prepared["_start_sort"].lt(999999)
+        & prepared["_end_sort"].ge(prepared["_start_sort"])
+    ].copy()
+    return prepared.loc[:, [*ZERO_MEMBER_PERIOD_COLUMNS, "_chapter_key", "_start_sort", "_end_sort"]]
+
+
 def _selected_cohort_semesters(prepared: pd.DataFrame, cohort_semesters: Optional[Sequence[str]], all_cohorts: bool) -> List[str]:
     if cohort_semesters:
         return [_normalize_semester(value) for value in cohort_semesters]
@@ -323,6 +359,7 @@ def _timeline_rows_for_cohort(
     compiled: pd.DataFrame,
     manual: pd.DataFrame,
     roster_inventory: pd.DataFrame,
+    zero_member_periods: pd.DataFrame,
     cohort_label: str,
     cohort_source_rows: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -360,6 +397,7 @@ def _timeline_rows_for_cohort(
         base_timeline,
         manual_timeline,
         roster_inventory,
+        zero_member_periods,
         cohort_students,
         cohort_sort,
     )
@@ -411,7 +449,40 @@ def _ensure_missing_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.D
     return result.loc[:, list(columns)]
 
 
-def _chapter_disappearance_events(roster_inventory: pd.DataFrame) -> Dict[str, dict]:
+def _zero_member_period_covers_gap(
+    zero_member_periods: pd.DataFrame,
+    chapter_key: object,
+    gap_start_sort: int,
+    gap_end_sort: int,
+) -> bool:
+    if zero_member_periods.empty:
+        return False
+    key = clean_text(chapter_key)
+    if not key:
+        return False
+    periods = zero_member_periods.loc[zero_member_periods["_chapter_key"].eq(key)]
+    if periods.empty:
+        return False
+    return bool(
+        (
+            periods["_start_sort"].le(int(gap_start_sort))
+            & periods["_end_sort"].ge(int(gap_end_sort))
+        ).any()
+    )
+
+
+def _latest_chapter_roster_row(group: pd.DataFrame, term_sort: int) -> dict:
+    term_rows = group.loc[group["_term_sort"].eq(int(term_sort))].copy()
+    if term_rows.empty:
+        return {}
+    term_rows = term_rows.sort_values(["Roster Pass Priority", "Roster Month Priority", "Chapter"], na_position="last")
+    return term_rows.iloc[-1].to_dict()
+
+
+def _chapter_disappearance_events(
+    roster_inventory: pd.DataFrame,
+    zero_member_periods: Optional[pd.DataFrame] = None,
+) -> Dict[str, List[dict]]:
     if roster_inventory.empty:
         return {}
 
@@ -430,41 +501,90 @@ def _chapter_disappearance_events(roster_inventory: pd.DataFrame) -> Dict[str, d
     term_latest_pass = inventory.groupby("_term_sort")["Roster Pass Priority"].max().to_dict()
     global_latest_sort = int(inventory["_term_sort"].max())
     ordered_terms = sorted(int(value) for value in term_labels if int(value) < 999999)
-    events: Dict[str, dict] = {}
+    zero_member = _prepared_zero_member_periods(zero_member_periods)
+    events: Dict[str, List[dict]] = {}
+
+    def add_event(chapter_key: object, event: dict, gap_start_sort: int, gap_end_sort: int) -> None:
+        if _zero_member_period_covers_gap(zero_member, chapter_key, gap_start_sort, gap_end_sort):
+            return
+        events.setdefault(str(chapter_key), []).append(event)
 
     for chapter_key, group in inventory.groupby("_chapter_key", dropna=False):
         if not str(chapter_key).strip():
             continue
-        last_sort = int(group["_term_sort"].max())
-        last_group = group.loc[group["_term_sort"].eq(last_sort)].copy()
-        if last_group.empty:
+        present_sorts = sorted({int(value) for value in group["_term_sort"].dropna().tolist() if int(value) < 999999})
+        if not present_sorts:
             continue
-        last_group = last_group.sort_values(["Roster Pass Priority", "Roster Month Priority", "Chapter"], na_position="last")
-        chapter_latest_pass = float(last_group["Roster Pass Priority"].max())
+
+        for previous_sort, next_sort in zip(present_sorts, present_sorts[1:]):
+            missing_terms = [term_sort for term_sort in ordered_terms if previous_sort < term_sort < next_sort]
+            if not missing_terms:
+                continue
+            last_row = _latest_chapter_roster_row(group, previous_sort)
+            if not last_row:
+                continue
+            chapter_name = clean_text(last_row.get("Chapter", ""))
+            last_semester = clean_text(last_row.get("Semester", ""))
+            disappearance_sort = int(missing_terms[0])
+            missing_end_sort = int(missing_terms[-1])
+            disappearance_semester = clean_text(term_labels.get(disappearance_sort, "")) or last_semester
+            missing_end_semester = clean_text(term_labels.get(missing_end_sort, "")) or disappearance_semester
+            returned_semester = clean_text(term_labels.get(next_sort, "")) or clean_text(_latest_chapter_roster_row(group, next_sort).get("Semester", ""))
+            add_event(
+                chapter_key,
+                {
+                    "chapter": chapter_name,
+                    "last_roster_sort": previous_sort,
+                    "disappearance_sort": disappearance_sort,
+                    "disappearance_semester": disappearance_semester,
+                    "reason": (
+                        f"{chapter_name} had no roster from {disappearance_semester} through "
+                        f"{missing_end_semester} before returning in {returned_semester}."
+                    ),
+                },
+                disappearance_sort,
+                missing_end_sort,
+            )
+
+        last_sort = int(present_sorts[-1])
+        last_row = _latest_chapter_roster_row(group, last_sort)
+        if not last_row:
+            continue
+        chapter_latest_pass = float(group.loc[group["_term_sort"].eq(last_sort), "Roster Pass Priority"].max())
         term_latest = float(term_latest_pass.get(last_sort, chapter_latest_pass))
-        chapter_name = clean_text(last_group.iloc[-1]["Chapter"])
-        last_semester = clean_text(last_group.iloc[-1]["Semester"])
+        chapter_name = clean_text(last_row.get("Chapter", ""))
+        last_semester = clean_text(last_row.get("Semester", ""))
 
         if chapter_latest_pass < term_latest:
-            events[str(chapter_key)] = {
-                "chapter": chapter_name,
-                "last_roster_sort": last_sort,
-                "disappearance_sort": last_sort,
-                "disappearance_semester": last_semester,
-                "reason": f"{chapter_name} appeared before the latest roster pass for {last_semester} but was absent from the latest pass.",
-            }
+            add_event(
+                chapter_key,
+                {
+                    "chapter": chapter_name,
+                    "last_roster_sort": last_sort,
+                    "disappearance_sort": last_sort,
+                    "disappearance_semester": last_semester,
+                    "reason": f"{chapter_name} appeared before the latest roster pass for {last_semester} but was absent from the latest pass.",
+                },
+                last_sort,
+                last_sort,
+            )
             continue
 
         if last_sort < global_latest_sort:
             future_terms = [term_sort for term_sort in ordered_terms if term_sort > last_sort]
             disappearance_sort = future_terms[0] if future_terms else global_latest_sort
-            events[str(chapter_key)] = {
-                "chapter": chapter_name,
-                "last_roster_sort": last_sort,
-                "disappearance_sort": disappearance_sort,
-                "disappearance_semester": clean_text(term_labels.get(disappearance_sort, "")) or last_semester,
-                "reason": f"{chapter_name} had no roster after {last_semester} while later roster terms existed.",
-            }
+            add_event(
+                chapter_key,
+                {
+                    "chapter": chapter_name,
+                    "last_roster_sort": last_sort,
+                    "disappearance_sort": disappearance_sort,
+                    "disappearance_semester": clean_text(term_labels.get(disappearance_sort, "")) or last_semester,
+                    "reason": f"{chapter_name} had no roster after {last_semester} while later roster terms existed.",
+                },
+                disappearance_sort,
+                global_latest_sort,
+            )
 
     return events
 
@@ -473,6 +593,7 @@ def _chapter_disappearance_rows_for_cohort(
     base_timeline: pd.DataFrame,
     manual_timeline: pd.DataFrame,
     roster_inventory: pd.DataFrame,
+    zero_member_periods: pd.DataFrame,
     cohort_students: pd.DataFrame,
     cohort_sort: int,
 ) -> pd.DataFrame:
@@ -493,7 +614,7 @@ def _chapter_disappearance_rows_for_cohort(
     if base_timeline.empty or roster_inventory.empty:
         return pd.DataFrame(columns=common_columns)
 
-    events = _chapter_disappearance_events(roster_inventory)
+    events = _chapter_disappearance_events(roster_inventory, zero_member_periods)
     if not events:
         return pd.DataFrame(columns=common_columns)
 
@@ -523,11 +644,14 @@ def _chapter_disappearance_rows_for_cohort(
         if latest_status_code not in {"A", "N"}:
             continue
         chapter_key = clean_text(latest.get("_chapter_key", ""))
-        event = events.get(chapter_key)
-        if not event:
+        matching_events = [
+            event
+            for event in events.get(chapter_key, [])
+            if int(latest.get("_term_sort", 999999)) == int(event["last_roster_sort"])
+        ]
+        if not matching_events:
             continue
-        if int(latest.get("_term_sort", 999999)) != int(event["last_roster_sort"]):
-            continue
+        event = matching_events[0]
 
         disappearance_semester = clean_text(event.get("disappearance_semester", "")) or clean_text(latest.get("Semester", ""))
         rows.append(
@@ -713,12 +837,16 @@ def build_new_member_cohort_tables(
     compiled_rows: pd.DataFrame,
     manual_rows: pd.DataFrame,
     roster_inventory: Optional[pd.DataFrame] = None,
+    zero_member_periods: Optional[pd.DataFrame] = None,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     compiled = _prepared_compile_rows(compiled_rows)
     manual = _prepared_manual_rows(manual_rows)
     inventory = _prepared_roster_inventory(roster_inventory)
+    zero_member = _prepared_zero_member_periods(
+        read_zero_member_periods() if zero_member_periods is None else zero_member_periods
+    )
     selected_semesters = _selected_cohort_semesters(compiled, cohort_semesters, all_cohorts)
 
     timeline_frames: List[pd.DataFrame] = []
@@ -731,7 +859,7 @@ def build_new_member_cohort_tables(
         ].copy()
         if cohort_rows.empty:
             continue
-        timeline = _timeline_rows_for_cohort(compiled, manual, inventory, cohort_label, cohort_rows)
+        timeline = _timeline_rows_for_cohort(compiled, manual, inventory, zero_member, cohort_label, cohort_rows)
         outcomes = _build_outcomes_for_cohort(cohort_label, cohort_rows, timeline)
         review = _build_review_rows(outcomes)
         timeline_frames.append(timeline)

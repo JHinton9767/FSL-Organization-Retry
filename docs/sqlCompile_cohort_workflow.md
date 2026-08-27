@@ -37,6 +37,14 @@ Chapter Kicked
 
 Those students are counted as known non-graduate exits and appear in the dashboard Manual Checker under the `Chapter Kicked` last-known outcome bucket. Students who disappear individually while their chapter continues still go to manual review.
 
+If a chapter was still recognized but had zero active members, add that period to:
+
+```text
+config\sqlCompile_zero_member_periods.csv
+```
+
+Those rows prevent roster-gap inference from marking the chapter as `Chapter Kicked`. The current file includes Alpha Kappa Alpha for `Spring 2018` through `Fall 2018`.
+
 ## 2. Build a new-member cohort report
 
 Use the semester where the students were listed as `Status = N`.
