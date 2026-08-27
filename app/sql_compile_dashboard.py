@@ -29,6 +29,11 @@ from src.sqlCompile_dashboard import (
     load_dashboard_tables,
     odd_record_editor_to_manual_rows,
 )
+from src.sqlCompile_legacy_manual import (
+    LEGACY_MANUAL_FILE_NAMES,
+    import_legacy_manual_decisions,
+    load_legacy_manual_decision_rows,
+)
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 
 
@@ -279,6 +284,70 @@ def _saved_manual_rows_for_queue(manual_rows: pd.DataFrame, queue: pd.DataFrame)
     return prepared.loc[mask, MANUAL_STATUS_COLUMNS].reset_index(drop=True)
 
 
+def _render_legacy_manual_importer(manual_status_file: Path) -> None:
+    with st.expander("Reuse Legacy Manual Decisions", expanded=False):
+        legacy_path_text = st.text_input(
+            "Legacy dashboard config folder or file",
+            value="config",
+            key="sql_compile_legacy_manual_path",
+        )
+        legacy_path = Path(legacy_path_text).expanduser()
+        try:
+            loaded = load_legacy_manual_decision_rows(legacy_path)
+        except Exception as exc:
+            st.error(f"Could not read legacy manual decisions: {exc}")
+            return
+
+        total_source_rows = sum(loaded.source_counts.values())
+        total_converted_rows = len(loaded.rows)
+        import_cols = st.columns(3)
+        with import_cols[0]:
+            st.metric("Legacy source rows", f"{total_source_rows:,}")
+        with import_cols[1]:
+            st.metric("Importable rows", f"{total_converted_rows:,}")
+        with import_cols[2]:
+            st.metric("Destination rows file", manual_status_file.name)
+
+        source_summary = pd.DataFrame(
+            [
+                {
+                    "Legacy Source": source_name,
+                    "Source Rows": loaded.source_counts.get(source_name, 0),
+                    "Importable Rows": loaded.converted_counts.get(source_name, 0),
+                    "Skipped / Not Status Rows": loaded.skipped_counts.get(source_name, 0),
+                    "Looked For": "; ".join(str(path) for path in loaded.searched_paths.get(source_name, [])),
+                }
+                for source_name in LEGACY_MANUAL_FILE_NAMES
+            ]
+        )
+        st.dataframe(source_summary, use_container_width=True, hide_index=True, height=250)
+
+        if loaded.rows.empty:
+            st.info("No completed legacy outcome decisions were found at that path.")
+            return
+
+        st.dataframe(loaded.rows.head(250), use_container_width=True, hide_index=True, height=300)
+        import_action_cols = st.columns([1, 1, 2])
+        with import_action_cols[0]:
+            if st.button("Append Legacy Decisions", type="primary", use_container_width=True):
+                try:
+                    result = import_legacy_manual_decisions(legacy_path, manual_status_file)
+                    st.success(f"Imported {result.saved_rows:,} legacy manual row(s) into {result.manual_status_path}.")
+                    st.rerun()
+                except OSError as exc:
+                    st.error(f"Could not append legacy decisions. Close the manual CSV if it is open, then try again. Details: {exc}")
+        with import_action_cols[1]:
+            st.download_button(
+                "Download Import Preview",
+                data=dataframe_to_csv_bytes(loaded.rows),
+                file_name="sql_compile_legacy_manual_import_preview.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        with import_action_cols[2]:
+            st.caption("Roster exclusions are intentionally not imported because the sqlCompile manual file stores outcomes, not source-row exclusions.")
+
+
 def _selected_cohorts(rate_table: pd.DataFrame) -> list[str]:
     options = rate_table["Cohort Semester"].dropna().astype(str).tolist() if "Cohort Semester" in rate_table.columns else []
     options = [option for option in options if option]
@@ -372,6 +441,8 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
 def _render_manual_checker(review_template: pd.DataFrame, manual_status_file: Path, manual_rows: pd.DataFrame) -> None:
     st.subheader("Manual Checker")
     st.caption("Work the odd-record queue here. Select rows, fill the verified outcome, and save completed decisions to the manual status CSV.")
+
+    _render_legacy_manual_importer(manual_status_file)
 
     queue = _ensure_manual_checker_state(review_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
