@@ -238,15 +238,22 @@ def build_sql_compile_milestone_dashboard(
     capped_max_years = max(0, min(int(max_years), 6))
 
     for offset in range(0, capped_max_years + 1):
-        measured = cohort_students.loc[
-            cohort_students["Cohort Semester"].map(lambda value: _milestone_is_measurable(value, offset, latest_sort))
-        ].copy()
+        measured = cohort_students.copy()
         if measured.empty:
             continue
 
         counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
         for _, student in measured.iterrows():
-            outcome = _checkpoint_outcome(timeline_work, student["Cohort Semester"], student["Student ID"], offset)
+            target_sort = _milestone_target_sort(student["Cohort Semester"], offset)
+            if latest_sort and target_sort < 999999 and target_sort > latest_sort:
+                target_sort = latest_sort
+            outcome = _checkpoint_outcome(
+                timeline_work,
+                student["Cohort Semester"],
+                student["Student ID"],
+                offset,
+                target_sort=target_sort,
+            )
             counts[outcome] = int(counts.get(outcome, 0)) + 1
 
         denominator = int(len(measured))
@@ -286,8 +293,8 @@ def build_sql_compile_milestone_dashboard(
             "distinction": "ALL",
             "max_milestone": last_milestone,
             "note": (
-                "Milestone outcomes use the latest sqlCompile roster/manual status at or before each checkpoint. "
-                "Cohorts are included in a checkpoint only when the loaded roster timeline has reached that checkpoint."
+                "Milestone bars use a fixed selected-cohort denominator. Outcome buckets carry forward across later "
+                "checkpoints; checkpoints beyond loaded roster coverage use the latest loaded roster term."
             ),
         },
     }
@@ -424,11 +431,18 @@ def _milestone_is_measurable(cohort_semester: object, offset: int, latest_sort: 
     return target_sort < 999999 and latest_sort >= target_sort
 
 
-def _checkpoint_outcome(timeline: pd.DataFrame, cohort_semester: str, student_id: str, offset: int) -> str:
+def _checkpoint_outcome(
+    timeline: pd.DataFrame,
+    cohort_semester: str,
+    student_id: str,
+    offset: int,
+    *,
+    target_sort: int | None = None,
+) -> str:
     if timeline.empty:
         return "Active" if offset == 0 else "Unknown"
 
-    target_sort = _milestone_target_sort(cohort_semester, offset)
+    checkpoint_sort = target_sort if target_sort is not None else _milestone_target_sort(cohort_semester, offset)
     student_rows = timeline.loc[
         timeline["Cohort Semester"].eq(str(cohort_semester).strip())
         & timeline["Student ID"].eq(str(student_id).strip())
@@ -437,16 +451,21 @@ def _checkpoint_outcome(timeline: pd.DataFrame, cohort_semester: str, student_id
         return "Active" if offset == 0 else "Unknown"
 
     student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
-    before_or_at = student_rows.loc[pd.to_numeric(student_rows["_term_sort"], errors="coerce").le(target_sort)].copy()
+    row_sorts = pd.to_numeric(student_rows["_term_sort"], errors="coerce")
+    before_or_at = student_rows.loc[row_sorts.le(checkpoint_sort)].copy()
     if before_or_at.empty:
         return "Active" if offset == 0 else "Unknown"
 
-    latest_status = str(before_or_at.iloc[-1].get("_status_code", "") or "").strip()
-    latest_outcome = persistence_outcome_from_status(latest_status)
+    before_or_at["_outcome"] = before_or_at["_status_code"].map(persistence_outcome_from_status)
+    terminal = before_or_at.loc[~before_or_at["_outcome"].isin(["Active", "Unknown"])].copy()
+    if not terminal.empty:
+        return str(terminal.iloc[-1]["_outcome"])
+
+    latest_outcome = str(before_or_at.iloc[-1].get("_outcome", "") or "Unknown").strip() or "Unknown"
     if offset == 0 or latest_outcome != "Active":
         return latest_outcome
 
-    at_or_after = student_rows.loc[pd.to_numeric(student_rows["_term_sort"], errors="coerce").ge(target_sort)]
+    at_or_after = student_rows.loc[row_sorts.ge(checkpoint_sort)]
     return "Active" if not at_or_after.empty else "Unknown"
 
 

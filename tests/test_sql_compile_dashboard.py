@@ -149,6 +149,7 @@ def test_dashboard_milestones_support_grouped_semesters_and_status_mapping() -> 
             {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2024", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2021", "Status Code": "RS", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2022", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Spring 2021", "Student ID": "A3", "Semester": "Spring 2021", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Spring 2021", "Student ID": "A3", "Semester": "Spring 2022", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
         ]
@@ -171,12 +172,18 @@ def test_dashboard_milestones_support_grouped_semesters_and_status_mapping() -> 
     chart = dashboard["chart_frame"]
 
     assert dashboard["meta"]["students"] == 3
+    assert table["Measured Students"].tolist() == [3] * 7
     assert table.loc["Cohort Year", "Active Count"] == 3
     assert table.loc["1 Year", "Active Count"] == 2
     assert table.loc["1 Year", "Dropped/Resigned Count"] == 1
     assert table.loc["2 Year", "Active Count"] == 1
     assert table.loc["2 Year", "Unknown Count"] == 1
-    assert table.loc["4 Year", "Measured Students"] == 2
+    assert table.loc["4 Year", "Measured Students"] == 3
     assert table.loc["4 Year", "Graduated Count"] == 1
     assert table.loc["4 Year", "Dropped/Resigned Count"] == 1
-    assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(4), "Denominator"].iloc[0] == 2
+    assert table.loc["4 Year", "Unknown Count"] == 1
+    assert table.loc["6 Year", "Measured Students"] == 3
+    assert table.loc["6 Year", "Graduated Count"] == 1
+    assert table.loc["6 Year", "Dropped/Resigned Count"] == 1
+    assert table.loc["6 Year", "Unknown Count"] == 1
+    assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(4), "Denominator"].iloc[0] == 3

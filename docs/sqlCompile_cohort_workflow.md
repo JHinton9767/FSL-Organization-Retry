@@ -140,6 +140,8 @@ output\sqlCompile\cohorts\fall_2025\new_member_rate_summary.csv
 
 Rates use the resolved denominator, meaning students still in `new_member_form_review.csv` are excluded from rate calculations until a manual status row is added.
 
+The dashboard milestone bars use the full selected cohort population as the denominator for every bar. Outcome buckets carry forward, so a student resolved as resigned, dropped, graduated, chapter kicked, etc. remains in that bucket in later milestone bars unless a later terminal outcome supersedes it. The 6 Year bar is the final selected-population view.
+
 ## 6. Open the new dashboard
 
 The smaller sqlCompile dashboard shows only persistence rates, graduation rates, outcome mix, and the manual checker.
