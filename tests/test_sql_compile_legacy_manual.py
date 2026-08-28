@@ -93,6 +93,39 @@ def test_load_legacy_manual_decision_rows_converts_old_registry_files(tmp_path: 
     assert loaded.converted_counts["manual_review_actions"] == 1
 
 
+def test_load_legacy_manual_decision_rows_auto_detects_manual_check_exports(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    pd.DataFrame(
+        {
+            "Student ID": ["A00000006", "A00000007"],
+            "Chapter": ["Zeta Tau Alpha", "Theta Chi"],
+            "Join Term": ["Fall 2021", "Spring 2022"],
+            "Last Observed Org Term": ["Spring 2022", "Fall 2022"],
+            "Latest Outcome Bucket": ["Unknown", "Unknown"],
+            "Review Status": ["Corrected", "Needs Review"],
+            "Has Manual Correction": ["Yes", ""],
+            "Review Notes": ["Saved as Early Alumni.", ""],
+        }
+    ).to_csv(config_dir / "Manual checks form.csv", index=False)
+
+    loaded = load_legacy_manual_decision_rows(tmp_path)
+
+    assert loaded.rows.to_dict("records") == [
+        {
+            "Cohort Semester": "Fall 2021",
+            "Cohort Chapter": "Zeta Tau Alpha",
+            "Semester": "Spring 2022",
+            "Chapter": "Zeta Tau Alpha",
+            "Student ID": "A00000006",
+            "Status": "AL",
+            "Notes": "Imported from legacy Manual checks form.csv. Saved as Early Alumni.",
+        }
+    ]
+    assert loaded.source_counts["manual_review_actions"] == 2
+    assert loaded.converted_counts["manual_review_actions"] == 1
+
+
 def test_import_legacy_manual_decisions_appends_to_sql_compile_manual_file(tmp_path: Path) -> None:
     pd.DataFrame(
         {

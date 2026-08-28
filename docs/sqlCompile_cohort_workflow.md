@@ -104,13 +104,19 @@ These are students whose last known status is `A`, which means they disappeared 
 
 The dashboard also has a **Manual Checker** tab for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, paged row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
 
-If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker tab or run:
+If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker tab or run a preview first:
 
 ```powershell
-uv run --with-requirements requirements.txt python import_legacy_manual_to_sql_compile.py --legacy-path config
+uv run --with-requirements requirements.txt python import_legacy_manual_to_sql_compile.py --legacy-path . --preview-output output\sqlCompile\legacy_manual_import_preview.csv --dry-run
 ```
 
-Point `--legacy-path` at the old dashboard's config folder or at one legacy CSV/XLSX file. The importer reads completed outcome-style decisions from `manual_roster_corrections.csv`, `graduation_evidence.csv`, `outcome_overrides.csv`, `manual_adjustments.csv`, `manual_review_queue.csv`, and `manual_review_actions.csv` or `manual_review_actions.pending_*.csv`.
+Point `--legacy-path` at the old dashboard project root, its `config` folder, the canonical output folder, or one exported manual-check CSV/XLSX file. The importer reads completed outcome-style decisions from `manual_roster_corrections.csv`, `graduation_evidence.csv`, `outcome_overrides.csv`, `manual_adjustments.csv`, `manual_review_queue.csv`, and `manual_review_actions.csv` or `manual_review_actions.pending_*.csv`. It can also auto-detect exported files with names like `Manual checks form.csv`.
+
+After the preview count looks right, append the translated rows into the new sqlCompile manual status file:
+
+```powershell
+uv run --with-requirements requirements.txt python import_legacy_manual_to_sql_compile.py --legacy-path . --manual-status-file config\sqlCompile_manual_status.csv
+```
 
 ## 4. Add manually researched form rows
 

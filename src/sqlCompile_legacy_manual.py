@@ -28,6 +28,18 @@ LEGACY_MANUAL_FILE_NAMES = {
     "manual_review_queue": "manual_review_queue.csv",
     "manual_review_actions": "manual_review_actions.csv",
 }
+AUTO_SOURCE_NAME = "auto"
+LEGACY_FILE_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xls"}
+LEGACY_FILE_NAME_HINTS = {
+    "manualreview",
+    "manualcheck",
+    "manualchecker",
+    "manualrosterchange",
+    "manualrostercorrection",
+    "outcomeoverride",
+    "graduationevidence",
+    "manualadjustment",
+}
 SQL_STATUS_CODES = {"A", "N", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK"}
 OUTCOME_FIELD_NAMES = {
     "final_outcome_bucket",
@@ -316,18 +328,100 @@ def _source_name_from_path(path: Path) -> str:
     return ""
 
 
+def _source_hint_from_path(path: Path) -> str:
+    source_name = _source_name_from_path(path)
+    if source_name:
+        return source_name
+    stem = _normalized_column_name(path.stem)
+    if path.suffix.lower() not in LEGACY_FILE_EXTENSIONS:
+        return ""
+    if "graduationevidence" in stem:
+        return "graduation_evidence"
+    if "outcomeoverride" in stem:
+        return "outcome_overrides"
+    if "manualadjustment" in stem:
+        return "manual_adjustments"
+    if "manualrostercorrection" in stem or "manualrosterchange" in stem:
+        return "manual_roster_corrections"
+    if any(hint in stem for hint in LEGACY_FILE_NAME_HINTS):
+        return AUTO_SOURCE_NAME
+    return ""
+
+
+def _infer_source_name_from_columns(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return ""
+    columns = {_normalized_column_name(column) for column in frame.columns}
+    if {"reviewstatus", "hasmanualcorrection"} & columns or "queuereason" in columns or "reviewkey" in columns:
+        return "manual_review_actions"
+    if "graduationterm" in columns:
+        return "graduation_evidence"
+    if {"fieldtooverride", "adjustedvalue"}.issubset(columns):
+        return "manual_adjustments"
+    if "finalstatus" in columns and {"correctedorganizationname", "excludefromrostercalculations"} & columns:
+        return "manual_roster_corrections"
+    if "finalstatus" in columns or "outcomebucket" in columns:
+        return "outcome_overrides"
+    return ""
+
+
+def _legacy_search_directories(base: Path) -> list[Path]:
+    if base.is_file():
+        return []
+    candidates = [
+        base,
+        base / "config",
+        base / "output" / "canonical" / "latest",
+    ]
+    run_root = base / "output" / "canonical"
+    if run_root.exists():
+        candidates.extend(sorted(run_root.glob("run_*"), key=lambda path: path.stat().st_mtime if path.exists() else 0, reverse=True))
+
+    seen: set[Path] = set()
+    directories: list[Path] = []
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        directories.append(candidate)
+    return directories
+
+
 def _legacy_source_paths(legacy_path: str | Path) -> dict[str, list[Path]]:
     base = Path(legacy_path)
     if base.is_file():
-        source_name = _source_name_from_path(base)
-        return {source_name: [base]} if source_name else {}
+        source_name = _source_hint_from_path(base) or AUTO_SOURCE_NAME
+        return {source_name: [base]}
 
-    paths: dict[str, list[Path]] = {}
-    for source_name, file_name in LEGACY_MANUAL_FILE_NAMES.items():
-        candidates = [base / file_name]
-        if source_name == "manual_review_actions":
-            candidates.extend(sorted(base.glob("manual_review_actions.pending_*.csv")))
-        paths[source_name] = candidates
+    paths: dict[str, list[Path]] = {source_name: [] for source_name in LEGACY_MANUAL_FILE_NAMES}
+    paths[AUTO_SOURCE_NAME] = []
+    seen: set[Path] = set()
+    for directory in _legacy_search_directories(base):
+        for source_name, file_name in LEGACY_MANUAL_FILE_NAMES.items():
+            candidates = [directory / file_name]
+            if source_name == "manual_review_actions":
+                candidates.extend(sorted(directory.glob("manual_review_actions.pending_*.csv")))
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                paths[source_name].append(candidate)
+
+        for candidate in directory.iterdir():
+            if not candidate.is_file():
+                continue
+            source_name = _source_hint_from_path(candidate)
+            if not source_name:
+                continue
+            resolved = candidate.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.setdefault(source_name, []).append(candidate)
     return paths
 
 
@@ -349,22 +443,34 @@ def _read_legacy_file(path: Path) -> pd.DataFrame:
 
 
 def load_legacy_manual_decision_rows(legacy_path: str | Path = ROOT / "config") -> LegacyManualDecisionLoad:
-    searched_paths = _legacy_source_paths(legacy_path)
+    discovered_paths = _legacy_source_paths(legacy_path)
+    searched_paths = {
+        source_name: list(paths)
+        for source_name, paths in discovered_paths.items()
+        if source_name != AUTO_SOURCE_NAME
+    }
     converted_frames: list[pd.DataFrame] = []
-    source_counts: dict[str, int] = {}
-    converted_counts: dict[str, int] = {}
+    source_counts: dict[str, int] = {source_name: 0 for source_name in LEGACY_MANUAL_FILE_NAMES}
+    converted_counts: dict[str, int] = {source_name: 0 for source_name in LEGACY_MANUAL_FILE_NAMES}
 
-    for source_name, paths in searched_paths.items():
-        converter = CONVERTERS.get(source_name)
-        if converter is None:
-            continue
-        loaded_frames = [_read_legacy_file(path) for path in paths]
-        frame = pd.concat([item for item in loaded_frames if not item.empty], ignore_index=True) if any(not item.empty for item in loaded_frames) else pd.DataFrame()
-        source_counts[source_name] = int(len(frame))
-        converted = converter(frame, LEGACY_MANUAL_FILE_NAMES.get(source_name, source_name)) if not frame.empty else pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
-        converted_counts[source_name] = int(len(converted))
-        if not converted.empty:
-            converted_frames.append(converted)
+    for source_name, paths in discovered_paths.items():
+        for path in paths:
+            frame = _read_legacy_file(path)
+            if frame.empty:
+                continue
+            actual_source_name = source_name if source_name != AUTO_SOURCE_NAME else _infer_source_name_from_columns(frame)
+            converter = CONVERTERS.get(actual_source_name)
+            if converter is None:
+                continue
+            if source_name == AUTO_SOURCE_NAME:
+                searched_paths.setdefault(actual_source_name, [])
+                if path not in searched_paths[actual_source_name]:
+                    searched_paths[actual_source_name].append(path)
+            source_counts[actual_source_name] = source_counts.get(actual_source_name, 0) + int(len(frame))
+            converted = converter(frame, path.name)
+            converted_counts[actual_source_name] = converted_counts.get(actual_source_name, 0) + int(len(converted))
+            if not converted.empty:
+                converted_frames.append(converted)
 
     combined = pd.concat(converted_frames, ignore_index=True) if converted_frames else pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
     return LegacyManualDecisionLoad(
@@ -390,8 +496,9 @@ def import_legacy_manual_decisions(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import finished legacy dashboard manual decisions into sqlCompile manual status rows.")
-    parser.add_argument("--legacy-path", default=str(ROOT / "config"), help="Legacy config folder or one legacy CSV/XLSX file.")
+    parser.add_argument("--legacy-path", default=str(ROOT), help="Legacy project root, config folder, canonical output folder, or one legacy CSV/XLSX file.")
     parser.add_argument("--manual-status-file", default=str(DEFAULT_MANUAL_STATUS_PATH), help="Destination sqlCompile manual status CSV.")
+    parser.add_argument("--preview-output", default="", help="Optional CSV path where importable rows should be written for review.")
     parser.add_argument("--dry-run", action="store_true", help="Preview importable rows without appending them.")
     args = parser.parse_args(argv)
 
@@ -399,10 +506,18 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Legacy path scanned: {Path(args.legacy_path)}")
     print(f"Importable sqlCompile manual rows: {len(loaded.rows):,}")
     for source_name in LEGACY_MANUAL_FILE_NAMES:
+        checked = len(loaded.searched_paths.get(source_name, []))
         print(
             f"{source_name}: {loaded.converted_counts.get(source_name, 0):,} converted "
-            f"from {loaded.source_counts.get(source_name, 0):,} source row(s)"
+            f"from {loaded.source_counts.get(source_name, 0):,} source row(s) across {checked:,} checked file(s)"
         )
+    if args.preview_output:
+        preview_path = Path(args.preview_output).expanduser()
+        if not preview_path.is_absolute():
+            preview_path = Path.cwd() / preview_path
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        loaded.rows.to_csv(preview_path, index=False)
+        print(f"Preview rows written to: {preview_path}")
     if args.dry_run:
         return 0
 

@@ -107,6 +107,28 @@ def _path_text(value: str | Path) -> str:
     return str(Path(value))
 
 
+def _mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+@st.cache_data(show_spinner="Loading sqlCompile dashboard data...")
+def _cached_load_dashboard_tables(
+    database_path_text: str,
+    database_mtime_ns: int,
+    manual_status_file_text: str,
+    manual_status_mtime_ns: int,
+):
+    del database_mtime_ns, manual_status_mtime_ns
+    return load_dashboard_tables(
+        database_path=Path(database_path_text),
+        manual_status_file=Path(manual_status_file_text),
+        all_cohorts=True,
+    )
+
+
 def _format_percent(value: object) -> str:
     if value is None or pd.isna(value):
         return "n/a"
@@ -339,11 +361,22 @@ def _saved_manual_rows_for_queue(manual_rows: pd.DataFrame, queue: pd.DataFrame)
 def _render_legacy_manual_importer(manual_status_file: Path) -> None:
     with st.expander("Reuse Legacy Manual Decisions", expanded=False):
         legacy_path_text = st.text_input(
-            "Legacy dashboard config folder or file",
-            value="config",
+            "Legacy dashboard project root, config folder, or file",
+            value=".",
             key="sql_compile_legacy_manual_path",
         )
         legacy_path = Path(legacy_path_text).expanduser()
+        import_action_cols = st.columns([1, 1, 2])
+        with import_action_cols[0]:
+            preview_requested = st.button("Preview Legacy Decisions", use_container_width=True)
+        with import_action_cols[1]:
+            import_requested = st.button("Append Legacy Decisions", type="primary", use_container_width=True)
+        with import_action_cols[2]:
+            st.caption("Point this at the old dashboard project root, its config folder, or one exported manual-check CSV/XLSX.")
+
+        if not preview_requested and not import_requested:
+            return
+
         try:
             loaded = load_legacy_manual_decision_rows(legacy_path)
         except Exception as exc:
@@ -379,25 +412,21 @@ def _render_legacy_manual_importer(manual_status_file: Path) -> None:
             return
 
         st.dataframe(loaded.rows.head(250), use_container_width=True, hide_index=True, height=300)
-        import_action_cols = st.columns([1, 1, 2])
-        with import_action_cols[0]:
-            if st.button("Append Legacy Decisions", type="primary", use_container_width=True):
-                try:
-                    result = import_legacy_manual_decisions(legacy_path, manual_status_file)
-                    st.success(f"Imported {result.saved_rows:,} legacy manual row(s) into {result.manual_status_path}.")
-                    st.rerun()
-                except OSError as exc:
-                    st.error(f"Could not append legacy decisions. Close the manual CSV if it is open, then try again. Details: {exc}")
-        with import_action_cols[1]:
-            st.download_button(
-                "Download Import Preview",
-                data=dataframe_to_csv_bytes(loaded.rows),
-                file_name="sql_compile_legacy_manual_import_preview.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with import_action_cols[2]:
-            st.caption("Roster exclusions are intentionally not imported because the sqlCompile manual file stores outcomes, not source-row exclusions.")
+        if import_requested:
+            try:
+                result = import_legacy_manual_decisions(legacy_path, manual_status_file)
+                st.success(f"Imported {result.saved_rows:,} legacy manual row(s) into {result.manual_status_path}.")
+                st.rerun()
+            except OSError as exc:
+                st.error(f"Could not append legacy decisions. Close the manual CSV if it is open, then try again. Details: {exc}")
+        st.download_button(
+            "Download Import Preview",
+            data=dataframe_to_csv_bytes(loaded.rows),
+            file_name="sql_compile_legacy_manual_import_preview.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        st.caption("Roster exclusions are intentionally not imported because the sqlCompile manual file stores outcomes, not source-row exclusions.")
 
 
 def _selected_cohorts(rate_table: pd.DataFrame) -> list[str]:
@@ -821,7 +850,12 @@ def main() -> None:
         return
 
     try:
-        all_tables = load_dashboard_tables(database_path=database_path, manual_status_file=manual_status_file, all_cohorts=True)
+        all_tables = _cached_load_dashboard_tables(
+            str(database_path.resolve()),
+            _mtime_ns(database_path),
+            str(manual_status_file.resolve()),
+            _mtime_ns(manual_status_file),
+        )
     except Exception as exc:
         st.error(f"Could not load sqlCompile dashboard data: {exc}")
         return
