@@ -14,6 +14,7 @@ from src.sqlCompile_cohort import (
     normalize_status_code,
     read_manual_status_rows,
     read_roster_inventory_table,
+    read_student_name_table,
     read_sql_compile_table,
 )
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
@@ -63,6 +64,7 @@ ODD_RECORD_COLUMNS = [
     "Cohort Semester",
     "Cohort Chapter",
     "Student ID",
+    "Student Name",
     "Last Known Semester",
     "Last Known Chapter",
     "Last Known Status",
@@ -75,6 +77,7 @@ LAST_KNOWN_STATUS_COLUMNS = [
     "Cohort Semester",
     "Cohort Chapter",
     "Student ID",
+    "Student Name",
     "Last Known Semester",
     "Last Known Chapter",
     "Last Known Status",
@@ -184,6 +187,37 @@ def build_outcome_distribution(outcomes: pd.DataFrame) -> pd.DataFrame:
     result = pd.DataFrame(rows, columns=OUTCOME_DISTRIBUTION_COLUMNS)
     result["_sort"] = result["Cohort Semester"].map(_cohort_sort)
     return result.sort_values(["_sort", "Final Outcome Bucket"], na_position="last").drop(columns=["_sort"]).reset_index(drop=True)
+
+
+def attach_student_names(frame: pd.DataFrame, student_names: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    if result.empty:
+        if "Student Name" not in result.columns:
+            result["Student Name"] = pd.Series(dtype="object")
+        return result
+    if "Student Name" not in result.columns:
+        result["Student Name"] = ""
+    if student_names.empty or "Student ID" not in result.columns:
+        return result
+
+    names = student_names.copy()
+    for column in ["Student ID", "Student Name"]:
+        if column not in names.columns:
+            names[column] = ""
+        names[column] = names[column].fillna("").astype(str).str.strip()
+    names = names.loc[names["Student ID"].ne("") & names["Student Name"].ne("")].drop_duplicates(
+        subset=["Student ID"],
+        keep="last",
+    )
+    if names.empty:
+        return result
+
+    name_lookup = names.set_index("Student ID")["Student Name"]
+    student_id = result["Student ID"].fillna("").astype(str).str.strip()
+    mapped = student_id.map(name_lookup).fillna("")
+    current = result["Student Name"].fillna("").astype(str).str.strip()
+    result["Student Name"] = current.where(current.ne(""), mapped)
+    return result
 
 
 def build_sql_compile_milestone_dashboard(
@@ -341,6 +375,7 @@ def build_manual_entry_template(review: pd.DataFrame) -> pd.DataFrame:
             "Cohort Semester": review.get("Cohort Semester", pd.Series("", index=review.index)),
             "Cohort Chapter": review.get("Cohort Chapter", pd.Series("", index=review.index)),
             "Student ID": review.get("Student ID", pd.Series("", index=review.index)),
+            "Student Name": review.get("Student Name", pd.Series("", index=review.index)),
             "Last Known Semester": review.get("Last Known Semester", pd.Series("", index=review.index)),
             "Last Known Chapter": review.get("Last Known Chapter", pd.Series("", index=review.index)),
             "Last Known Status": review.get("Last Known Status", pd.Series("", index=review.index)),
@@ -391,6 +426,7 @@ def build_last_known_status_template(outcomes: pd.DataFrame) -> pd.DataFrame:
             "Cohort Semester": outcomes.get("Cohort Semester", pd.Series("", index=outcomes.index)),
             "Cohort Chapter": outcomes.get("Cohort Chapter", pd.Series("", index=outcomes.index)),
             "Student ID": outcomes.get("Student ID", pd.Series("", index=outcomes.index)),
+            "Student Name": outcomes.get("Student Name", pd.Series("", index=outcomes.index)),
             "Last Known Semester": outcomes.get("Last Known Semester", pd.Series("", index=outcomes.index)),
             "Last Known Chapter": outcomes.get("Last Known Chapter", pd.Series("", index=outcomes.index)),
             "Last Known Status": outcomes.get("Last Known Status", pd.Series("", index=outcomes.index)),
@@ -443,6 +479,7 @@ def load_dashboard_tables(
 ) -> SqlCompileDashboardTables:
     compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
     roster_inventory = read_roster_inventory_table(database_path)
+    student_names = read_student_name_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
@@ -451,6 +488,8 @@ def load_dashboard_tables(
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
     )
+    outcomes = attach_student_names(outcomes, student_names)
+    review = attach_student_names(review, student_names)
     return SqlCompileDashboardTables(
         timeline=timeline,
         outcomes=outcomes,

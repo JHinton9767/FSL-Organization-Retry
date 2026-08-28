@@ -211,6 +211,7 @@ def _manual_checker_signature(checker_template: pd.DataFrame) -> tuple[object, .
             "Cohort Semester",
             "Cohort Chapter",
             "Student ID",
+            "Student Name",
             "Last Known Semester",
             "Last Known Chapter",
             "Last Known Status",
@@ -349,6 +350,7 @@ def _filter_manual_checker_rows(
             "Cohort Semester",
             "Cohort Chapter",
             "Student ID",
+            "Student Name",
             "Last Known Semester",
             "Last Known Chapter",
             "Last Known Status",
@@ -604,7 +606,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
 
     filter_cols = st.columns([1.4, 1, 1, 1, 1])
     with filter_cols[0]:
-        search_text = st.text_input("Search queue", placeholder="Student ID, chapter, semester, status, outcome, note", key="sql_compile_manual_checker_search")
+        search_text = st.text_input("Search queue", placeholder="Student ID, name, chapter, semester, status, outcome, note", key="sql_compile_manual_checker_search")
     with filter_cols[1]:
         cohort_filter = st.multiselect("Cohort", options=_unique_nonempty_options(queue, "Cohort Semester"), key="sql_compile_manual_checker_cohort_filter")
     with filter_cols[2]:
@@ -695,6 +697,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
                     "Last Known Outcome Bucket": st.column_config.TextColumn("Last Outcome"),
                     "Needs Manual Form Review": st.column_config.TextColumn("Needs Review"),
                     "Manual Status Applied": st.column_config.TextColumn("Manual Applied"),
+                    "Student Name": st.column_config.TextColumn("Student Name"),
                     "Semester": st.column_config.TextColumn("Correct Semester"),
                     "Chapter": st.column_config.TextColumn("Correct Chapter"),
                     "Notes": st.column_config.TextColumn("Notes"),

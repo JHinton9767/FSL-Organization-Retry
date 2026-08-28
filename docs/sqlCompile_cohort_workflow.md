@@ -29,6 +29,8 @@ When the same student appears in multiple rosters for the same semester, `sqlCom
 
 Fresh `sqlCompile` runs also write a side table named `sqlCompile_roster_inventory`. The main `sqlCompile` table still keeps only the four columns above, but the inventory table lets cohort reports detect chapter-wide roster disappearance.
 
+Fresh runs also write a side table named `sqlCompile_student_names`. The main `sqlCompile` table still keeps only the four requested columns, but the dashboard Manual Checker uses the name lookup to show `Student Name` after `Student ID`.
+
 When a chapter appears in earlier roster coverage but not in a later roster pass or later semester while other chapter rosters continue, active/new-member students whose last roster row was with that chapter are resolved as:
 
 ```text

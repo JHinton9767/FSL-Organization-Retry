@@ -39,6 +39,8 @@ from src.shared_utils import clean_text
 
 TABLE_NAME = "sqlCompile"
 OUTPUT_COLUMNS = ["Semester", "Chapter", "Student ID", "Status"]
+STUDENT_NAME_TABLE = "sqlCompile_student_names"
+STUDENT_NAME_COLUMNS = ["Student ID", "Student Name"]
 ROSTER_INVENTORY_TABLE = "sqlCompile_roster_inventory"
 ROSTER_INVENTORY_COLUMNS = [
     "Semester",
@@ -205,6 +207,55 @@ def _status_priority(value: object) -> int:
     return 3
 
 
+def _normalized_header(value: object) -> str:
+    text = clean_text(value).lower().replace("_", " ")
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _full_name_column(header_row: Sequence[object], header_map: dict[str, int]) -> Optional[int]:
+    protected_indexes = {
+        index
+        for field, index in header_map.items()
+        if field in {"first_name", "last_name", "banner_id", "email", "status", "semester_joined", "position", "chapter"}
+    }
+    aliases = {"name", "student name", "member name", "full name", "legal name"}
+    for index, header in enumerate(header_row):
+        if index in protected_indexes:
+            continue
+        normalized = _normalized_header(header)
+        if normalized in aliases:
+            return index
+    return None
+
+
+def _format_student_name(first_name: object = "", last_name: object = "", full_name: object = "") -> str:
+    first = clean_text(first_name)
+    last = clean_text(last_name)
+    if first or last:
+        return " ".join(part for part in [first, last] if part)
+
+    full = clean_text(full_name)
+    if not full:
+        return ""
+    if "," in full:
+        left, right = [clean_text(part) for part in full.split(",", 1)]
+        return " ".join(part for part in [right, left] if part)
+    return full
+
+
+def _student_name_from_row(
+    row: Sequence[object],
+    header_map: dict[str, int],
+    header_row: Sequence[object],
+) -> str:
+    first_name = get_cell(row, header_map.get("first_name"))
+    last_name = get_cell(row, header_map.get("last_name"))
+    full_name_index = _full_name_column(header_row, header_map)
+    full_name = get_cell(row, full_name_index) if full_name_index is not None else ""
+    return _format_student_name(first_name, last_name, full_name)
+
+
 def _load_sheet_rows(
     path: Path,
     roots: Sequence[Path],
@@ -230,6 +281,7 @@ def _load_sheet_rows(
     current_chapter = _default_chapter(path, sheet_name, table_rows, header_row_idx)
     roster_file_version, roster_file_version_priority = roster_file_version_details(" ".join(path.parts))
     roster_file_month, roster_file_month_priority = roster_file_month_details(" ".join(path.parts))
+    header_row = table_rows[header_row_idx - 1] if header_row_idx and header_row_idx <= len(table_rows) else ()
     row_results: List[dict] = []
 
     for source_row_index, row in enumerate(table_rows[header_row_idx:], start=header_row_idx + 1):
@@ -260,6 +312,7 @@ def _load_sheet_rows(
                 "Semester": semester,
                 "Chapter": chapter,
                 "Student ID": student_id,
+                "Student Name": _student_name_from_row(row, header_map, header_row),
                 "Status": status,
                 "_term_code": term_code,
                 "_term_sort": term_sort,
@@ -395,6 +448,55 @@ def build_roster_inventory(rows: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values(["_sort", "Semester", "Chapter", "Roster Pass Priority", "Source File", "Source Sheet"]).drop(columns=["_sort"]).reset_index(drop=True)
 
 
+def build_student_name_lookup(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
+
+    work = rows.copy()
+    required_columns = [
+        "Student ID",
+        "Student Name",
+        "_term_sort",
+        "_source_version_priority",
+        "_source_month_priority",
+        "_source_format_priority",
+        "_source_file_index",
+        "_source_row_index",
+    ]
+    for column in required_columns:
+        if column not in work.columns:
+            work[column] = ""
+    for column in ["Student ID", "Student Name"]:
+        work[column] = work[column].fillna("").astype(str).map(clean_text)
+    work = work.loc[work["Student ID"].ne("") & work["Student Name"].ne("")].copy()
+    if work.empty:
+        return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
+
+    work["_term_sort"] = pd.to_numeric(work["_term_sort"], errors="coerce").fillna(0)
+    work["_source_version_priority"] = pd.to_numeric(work["_source_version_priority"], errors="coerce").fillna(0)
+    work["_source_month_priority"] = pd.to_numeric(work["_source_month_priority"], errors="coerce").fillna(0)
+    work["_source_format_priority"] = pd.to_numeric(work["_source_format_priority"], errors="coerce").fillna(0)
+    work["_source_file_index"] = pd.to_numeric(work["_source_file_index"], errors="coerce").fillna(0)
+    work["_source_row_index"] = pd.to_numeric(work["_source_row_index"], errors="coerce").fillna(0)
+    work["_name_count"] = work.groupby(["Student ID", "Student Name"], dropna=False)["Student ID"].transform("size")
+    ordered = work.sort_values(
+        [
+            "Student ID",
+            "_name_count",
+            "_term_sort",
+            "_source_version_priority",
+            "_source_month_priority",
+            "_source_format_priority",
+            "_source_file_index",
+            "_source_row_index",
+        ],
+        ascending=[True, False, False, False, False, False, False, False],
+        na_position="last",
+    )
+    result = ordered.drop_duplicates(subset=["Student ID"], keep="first").loc[:, STUDENT_NAME_COLUMNS].copy()
+    return result.sort_values(["Student Name", "Student ID"], na_position="last").reset_index(drop=True)
+
+
 def build_sql_compile_frame(roots: Sequence[str | Path]) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
     source_rows, issues, source_file_count = load_sql_compile_rows(roots)
     return resolve_semester_statuses(source_rows), issues, source_file_count
@@ -410,6 +512,8 @@ def write_sqlite(
     table_name: str = TABLE_NAME,
     roster_inventory: Optional[pd.DataFrame] = None,
     roster_inventory_table_name: str = ROSTER_INVENTORY_TABLE,
+    student_names: Optional[pd.DataFrame] = None,
+    student_name_table_name: str = STUDENT_NAME_TABLE,
 ) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -452,6 +556,21 @@ def write_sqlite(
                 f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{roster_inventory_table_name}_chapter_semester')} "
                 f"ON {inventory_identifier} ({_quote_identifier('Chapter')}, {_quote_identifier('Semester')})"
             )
+        names = student_names.copy() if student_names is not None else pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
+        for column in STUDENT_NAME_COLUMNS:
+            if column not in names.columns:
+                names[column] = ""
+        names.loc[:, STUDENT_NAME_COLUMNS].to_sql(
+            student_name_table_name,
+            connection,
+            if_exists="replace",
+            index=False,
+        )
+        names_identifier = _quote_identifier(student_name_table_name)
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{student_name_table_name}_student')} "
+            f"ON {names_identifier} ({_quote_identifier('Student ID')})"
+        )
         connection.commit()
 
     return destination
@@ -467,7 +586,14 @@ def sqlCompile(
     source_rows, issues, source_file_count = load_sql_compile_rows(roots)
     frame = resolve_semester_statuses(source_rows)
     roster_inventory = build_roster_inventory(source_rows)
-    destination = write_sqlite(frame, output_path, table_name=table_name, roster_inventory=roster_inventory)
+    student_names = build_student_name_lookup(source_rows)
+    destination = write_sqlite(
+        frame,
+        output_path,
+        table_name=table_name,
+        roster_inventory=roster_inventory,
+        student_names=student_names,
+    )
     return SqlCompileResult(
         output_path=destination,
         table_name=table_name,

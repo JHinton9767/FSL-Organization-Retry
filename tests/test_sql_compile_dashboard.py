@@ -135,6 +135,7 @@ def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None
                 "Cohort Semester": "Fall 2025",
                 "Cohort Chapter": "Alpha Sigma Phi",
                 "Student ID": "A1",
+                "Student Name": "Active Student",
                 "Last Known Semester": "Spring 2026",
                 "Last Known Chapter": "Alpha Sigma Phi",
                 "Last Known Status": "A",
@@ -147,6 +148,7 @@ def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None
                 "Cohort Semester": "Fall 2025",
                 "Cohort Chapter": "Beta Theta Pi",
                 "Student ID": "A2",
+                "Student Name": "Kicked Student",
                 "Last Known Semester": "Fall 2026",
                 "Last Known Chapter": "Beta Theta Pi",
                 "Last Known Status": "CK",
@@ -159,6 +161,7 @@ def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None
                 "Cohort Semester": "Fall 2025",
                 "Cohort Chapter": "Delta Tau Delta",
                 "Student ID": "A3",
+                "Student Name": "Graduated Student",
                 "Last Known Semester": "Spring 2027",
                 "Last Known Chapter": "Delta Tau Delta",
                 "Last Known Status": "G",
@@ -173,6 +176,8 @@ def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None
     template = build_last_known_status_template(outcomes)
 
     assert template.columns.tolist() == LAST_KNOWN_STATUS_COLUMNS
+    assert template.columns.tolist()[3] == "Student Name"
+    assert template.set_index("Student ID").loc["A1", "Student Name"] == "Active Student"
     assert template.set_index("Student ID").loc["A1", "Last Known Outcome Bucket"] == "Unknown"
     assert template.set_index("Student ID").loc["A2", "Last Known Outcome Bucket"] == "Chapter Kicked"
     assert template.set_index("Student ID").loc["A3", "Last Known Outcome Bucket"] == "Graduated"

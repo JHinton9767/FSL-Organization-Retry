@@ -18,6 +18,8 @@ from src.sqlCompile import (
     OUTPUT_COLUMNS,
     ROSTER_INVENTORY_COLUMNS,
     ROSTER_INVENTORY_TABLE,
+    STUDENT_NAME_COLUMNS,
+    STUDENT_NAME_TABLE,
     TABLE_NAME,
     _quote_identifier,
     _resolve_path,
@@ -253,6 +255,25 @@ def read_roster_inventory_table(
             return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
         frame = pd.read_sql_query(f"SELECT * FROM {_quote_identifier(table_name)}", connection)
     return _ensure_roster_inventory_columns(frame)
+
+
+def read_student_name_table(
+    database_path: str | Path = DEFAULT_OUTPUT_PATH,
+    table_name: str = STUDENT_NAME_TABLE,
+) -> pd.DataFrame:
+    database = _resolve_path(database_path)
+    if not database.exists():
+        return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
+
+    with sqlite3.connect(database) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
+        frame = pd.read_sql_query(f"SELECT * FROM {_quote_identifier(table_name)}", connection)
+    return _ensure_columns(frame, STUDENT_NAME_COLUMNS)
 
 
 def _prepared_compile_rows(frame: pd.DataFrame) -> pd.DataFrame:
