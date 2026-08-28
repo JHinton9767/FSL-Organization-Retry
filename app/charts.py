@@ -151,7 +151,14 @@ def box_plot(frame: pd.DataFrame, x: str | None, y: str, color: str | None, titl
     )
 
 
-def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str = "") -> go.Figure:
+def persistence_milestone_chart(
+    frame: pd.DataFrame,
+    title: str,
+    subtitle: str = "",
+    *,
+    xaxis_title: str = "",
+    yaxis_title: str = "Share of eligible cohort",
+) -> go.Figure:
     if frame.empty:
         return empty_figure("No persistence or graduation data is available for the selected cohort.")
 
@@ -165,14 +172,22 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
             continue
-        customdata_columns = ["Count"]
-        hovertemplate = f"{outcome}<br>%{{x}}<br>%{{y:.1%}}<br>n=%{{customdata[0]:,}}<extra></extra>"
-        if "Denominator" in subset.columns:
-            customdata_columns.append("Denominator")
+        if {"Cohort Students", "Eligible Students", "Future Students"}.issubset(subset.columns):
+            customdata_columns = ["Count", "Cohort Students", "Eligible Students", "Future Students"]
             hovertemplate = (
                 f"{outcome}<br>%{{x}}<br>%{{y:.1%}}"
-                "<br>n=%{customdata[0]:,}<br>eligible=%{customdata[1]:,}<extra></extra>"
+                "<br>n=%{customdata[0]:,}<br>cohort=%{customdata[1]:,}"
+                "<br>eligible=%{customdata[2]:,}<br>future=%{customdata[3]:,}<extra></extra>"
             )
+        else:
+            customdata_columns = ["Count"]
+            hovertemplate = f"{outcome}<br>%{{x}}<br>%{{y:.1%}}<br>n=%{{customdata[0]:,}}<extra></extra>"
+            if "Denominator" in subset.columns:
+                customdata_columns.append("Denominator")
+                hovertemplate = (
+                    f"{outcome}<br>%{{x}}<br>%{{y:.1%}}"
+                    "<br>n=%{customdata[0]:,}<br>eligible=%{customdata[1]:,}<extra></extra>"
+                )
         fig.add_bar(
             x=subset["Milestone"],
             y=subset["Share"],
@@ -197,11 +212,13 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
             "font": {"color": "#17213A", "size": 18},
         },
         legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
-        xaxis_title="",
-        yaxis_title="Share of eligible cohort",
+        xaxis_title=xaxis_title,
+        yaxis_title=yaxis_title,
         margin={"l": 24, "r": 24, "t": 90, "b": 120},
         uniformtext={"minsize": 8, "mode": "hide"},
     )
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
     fig.update_xaxes(categoryorder="array", categoryarray=milestone_order)
+    if len(milestone_order) > 10:
+        fig.update_xaxes(tickangle=-35)
     return fig

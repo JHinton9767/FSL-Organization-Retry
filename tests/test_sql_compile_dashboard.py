@@ -3,6 +3,8 @@ import pandas as pd
 from src.sqlCompile_dashboard import (
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
+    PG_CHART_BREAKDOWN_CHAPTER,
+    PG_CHART_BREAKDOWN_SEMESTER,
     build_dashboard_rate_table,
     build_last_known_status_template,
     build_manual_checker_queue,
@@ -243,6 +245,8 @@ def test_dashboard_milestones_use_eligibility_by_year_and_carry_forward_terminal
     assert table.loc["6 Year", "Future Students"] == 1
     assert table.loc["6 Year", "Milestone Status"] == "Partially Future"
     assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Denominator"].iloc[0] == 2
+    assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6), "Count"].iloc[0] == 1
+    assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6), "Cohort Students"].iloc[0] == 3
 
 
 def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> None:
@@ -278,7 +282,7 @@ def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> Non
     )
     table = dashboard["table_frame"].set_index("Milestone")
     chart = dashboard["chart_frame"]
-    detail = dashboard["detail_frame"]
+    chart_table = dashboard["chart_table_frame"]
 
     assert table.loc["1 Year", "Milestone Status"] == "Measured"
     assert table.loc["2 Year", "Milestone Status"] == "Future"
@@ -288,7 +292,7 @@ def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> Non
     assert future_bar["Share"] == 1
     assert future_bar["Count"] == 1
     assert dashboard["meta"]["max_milestone"] == "1 Year"
-    assert detail.loc[detail["Milestone"].eq("6 Year"), "Milestone Status"].iloc[0] == "Future"
+    assert chart_table.loc[chart_table["Milestone"].eq("6 Year"), "Milestone Status"].iloc[0] == "Future"
 
 
 def test_dashboard_milestones_can_filter_to_selected_chapters() -> None:
@@ -314,11 +318,75 @@ def test_dashboard_milestones_can_filter_to_selected_chapters() -> None:
         selected_chapters=["Beta"],
         selection_label="Fall 2020",
     )
-    detail = dashboard["detail_frame"]
+    chart_table = dashboard["chart_table_frame"]
     rates = build_dashboard_rate_table(outcomes, group_columns=["Cohort Semester", "Cohort Chapter"])
 
     assert dashboard["meta"]["students"] == 1
-    assert detail["Cohort Chapter"].unique().tolist() == ["Beta"]
+    assert chart_table["Chart Group"].unique().tolist() == ["Cohort Year", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year"]
     assert dashboard["table_frame"].set_index("Milestone").loc["1 Year", "Graduated Count"] == 1
     assert rates.columns.tolist()[:2] == ["Cohort Semester", "Cohort Chapter"]
     assert set(rates["Cohort Chapter"]) == {"Alpha", "Beta"}
+
+
+def test_dashboard_can_chart_selected_milestone_by_semester_joined() -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Spring 2021", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2025", "Student ID": "A2", "Semester": "Fall 2025", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2025", "Student ID": "A2", "Semester": "Spring 2026", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A1"},
+            {"Cohort Semester": "Fall 2025", "Cohort Chapter": "Beta", "Student ID": "A2"},
+        ]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2020", "Fall 2025"],
+        selection_label="2 Semesters",
+        chart_breakdown=PG_CHART_BREAKDOWN_SEMESTER,
+        chart_milestone_offset=2,
+    )
+    chart = dashboard["chart_frame"]
+    chart_table = dashboard["chart_table_frame"]
+
+    assert chart["Chart Group"].drop_duplicates().tolist() == ["Fall 2020", "Fall 2025"]
+    assert chart.loc[chart["Chart Group"].eq("Fall 2020"), "Outcome"].tolist() == ["Graduated"]
+    assert chart.loc[chart["Chart Group"].eq("Fall 2025"), "Outcome"].tolist() == ["Future"]
+    assert chart_table["Milestone"].unique().tolist() == ["2 Year"]
+
+
+def test_dashboard_can_chart_selected_milestone_by_chapter_joined() -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Spring 2021", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2021", "Status Code": "RS", "Source": "manual_status", "Included In Outcome": "Yes"},
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A1"},
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Beta", "Student ID": "A2"},
+        ]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2020"],
+        selection_label="Fall 2020",
+        chart_breakdown=PG_CHART_BREAKDOWN_CHAPTER,
+        chart_milestone_offset=1,
+    )
+    chart = dashboard["chart_frame"]
+
+    assert chart["Chart Group"].drop_duplicates().tolist() == ["Alpha", "Beta"]
+    assert chart.loc[chart["Chart Group"].eq("Alpha"), "Outcome"].tolist() == ["Graduated"]
+    assert chart.loc[chart["Chart Group"].eq("Beta"), "Outcome"].tolist() == ["Dropped/Resigned"]
