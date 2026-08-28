@@ -102,7 +102,7 @@ output\sqlCompile\cohorts\fall_2025\new_member_form_review.csv
 
 These are students whose last known status is `A`, which means they disappeared without a resolved final status.
 
-The dashboard also has a **Manual Checker** tab for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
+The dashboard also has a **Manual Checker** tab for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, paged row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
 
 If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker tab or run:
 

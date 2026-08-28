@@ -50,6 +50,10 @@ MANUAL_CHECKER_ROW_ID = "_manual_checker_row_id"
 MANUAL_CHECKER_STATE_KEY = "sql_compile_manual_checker_rows"
 MANUAL_CHECKER_SIGNATURE_KEY = "sql_compile_manual_checker_signature"
 MANUAL_CHECKER_EDITOR_KEY = "sql_compile_manual_checker_editor"
+MANUAL_CHECKER_EDITOR_VERSION_KEY = "sql_compile_manual_checker_editor_version"
+MANUAL_CHECKER_PAGE_KEY = "sql_compile_manual_checker_page"
+MANUAL_CHECKER_PAGE_SIZE_OPTIONS = [50, 100, 250, 500]
+MANUAL_CHECKER_DEFAULT_PAGE_SIZE = 100
 
 
 def _format_display_frame(
@@ -171,6 +175,7 @@ def _ensure_manual_checker_state(checker_template: pd.DataFrame) -> pd.DataFrame
         queue = _with_manual_checker_row_ids(build_manual_checker_queue(checker_template))
         st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
         st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = signature
+        _refresh_manual_checker_editor()
 
     stored = st.session_state.get(MANUAL_CHECKER_STATE_KEY, pd.DataFrame(columns=[*MANUAL_CHECKER_COLUMNS, MANUAL_CHECKER_ROW_ID]))
     queue = stored.copy() if isinstance(stored, pd.DataFrame) else pd.DataFrame(stored)
@@ -196,6 +201,31 @@ def _manual_checker_display_frame(frame: pd.DataFrame) -> pd.DataFrame:
     display.index = frame[MANUAL_CHECKER_ROW_ID].fillna("").astype(str)
     display.index.name = MANUAL_CHECKER_ROW_ID
     return display
+
+
+def _manual_checker_page(frame: pd.DataFrame, page_size: int, page_number: int) -> tuple[pd.DataFrame, int, int, int, int]:
+    total_rows = len(frame)
+    page_size = max(int(page_size), 1)
+    total_pages = max(1, (total_rows + page_size - 1) // page_size)
+    current_page = min(max(int(page_number), 1), total_pages)
+    start = (current_page - 1) * page_size
+    end = min(start + page_size, total_rows)
+    return frame.iloc[start:end].copy(), total_pages, current_page, start, end
+
+
+def _manual_checker_editor_key(page_queue: pd.DataFrame) -> str:
+    version = int(st.session_state.get(MANUAL_CHECKER_EDITOR_VERSION_KEY, 0) or 0)
+    if page_queue.empty or MANUAL_CHECKER_ROW_ID not in page_queue.columns:
+        return f"{MANUAL_CHECKER_EDITOR_KEY}_{version}"
+    row_ids = page_queue[MANUAL_CHECKER_ROW_ID].fillna("").astype(str)
+    signature_hash = int(pd.util.hash_pandas_object(row_ids, index=False).sum())
+    return f"{MANUAL_CHECKER_EDITOR_KEY}_{version}_{len(page_queue)}_{signature_hash}"
+
+
+def _refresh_manual_checker_editor() -> None:
+    st.session_state[MANUAL_CHECKER_EDITOR_VERSION_KEY] = int(
+        st.session_state.get(MANUAL_CHECKER_EDITOR_VERSION_KEY, 0) or 0
+    ) + 1
 
 
 def _merge_manual_checker_edits(queue: pd.DataFrame, edited: pd.DataFrame) -> pd.DataFrame:
@@ -501,7 +531,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
         unfinished_only = st.checkbox("Only unfinished", value=False, key="sql_compile_manual_checker_unfinished_only")
         st.caption(f"Manual file: `{manual_status_file}`")
 
-    visible_queue = _filter_manual_checker_rows(
+    filtered_queue = _filter_manual_checker_rows(
         queue,
         search_text=search_text,
         cohort_filter=cohort_filter,
@@ -512,14 +542,48 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
         needs_review_only=needs_review_only,
         unfinished_only=unfinished_only,
     )
-    st.caption(f"Showing {len(visible_queue):,} of {len(queue):,} student status record(s).")
 
-    if visible_queue.empty:
+    pager_cols = st.columns([0.8, 0.8, 2.4])
+    with pager_cols[0]:
+        page_size = st.selectbox(
+            "Rows per page",
+            options=MANUAL_CHECKER_PAGE_SIZE_OPTIONS,
+            index=MANUAL_CHECKER_PAGE_SIZE_OPTIONS.index(MANUAL_CHECKER_DEFAULT_PAGE_SIZE),
+            key="sql_compile_manual_checker_page_size",
+        )
+    total_pages = max(1, (len(filtered_queue) + int(page_size) - 1) // int(page_size))
+    st.session_state[MANUAL_CHECKER_PAGE_KEY] = min(
+        max(int(st.session_state.get(MANUAL_CHECKER_PAGE_KEY, 1) or 1), 1),
+        total_pages,
+    )
+    with pager_cols[1]:
+        page_number = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            step=1,
+            key=MANUAL_CHECKER_PAGE_KEY,
+        )
+    page_queue, total_pages, page_number, page_start, page_end = _manual_checker_page(
+        filtered_queue,
+        int(page_size),
+        int(page_number),
+    )
+    with pager_cols[2]:
+        if filtered_queue.empty:
+            st.caption(f"Showing 0 of {len(queue):,} student status record(s).")
+        else:
+            st.caption(
+                f"Showing rows {page_start + 1:,}-{page_end:,} of {len(filtered_queue):,} filtered "
+                f"record(s), from {len(queue):,} total."
+            )
+
+    if filtered_queue.empty:
         st.warning("No student status records match the current filters.")
     else:
-        editor_height = min(820, max(320, 92 + (len(visible_queue) * 35)))
+        editor_height = min(820, max(320, 92 + (len(page_queue) * 35)))
         edited = st.data_editor(
-            _manual_checker_display_frame(visible_queue),
+            _manual_checker_display_frame(page_queue),
             use_container_width=True,
             hide_index=True,
             height=editor_height,
@@ -542,7 +606,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
                 for column in LAST_KNOWN_STATUS_COLUMNS
                 if column not in {"Semester", "Chapter", "Status", "Notes"}
             ],
-            key=MANUAL_CHECKER_EDITOR_KEY,
+            key=_manual_checker_editor_key(page_queue),
         )
         queue = _merge_manual_checker_edits(queue, edited)
         st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
@@ -556,7 +620,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
     with metric_cols[0]:
         st.metric("Queue records", f"{len(queue):,}")
     with metric_cols[1]:
-        st.metric("Visible records", f"{len(visible_queue):,}")
+        st.metric("Filtered records", f"{len(filtered_queue):,}")
     with metric_cols[2]:
         st.metric("Selected", f"{len(selected_queue):,}")
     with metric_cols[3]:
@@ -565,25 +629,28 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
         st.metric("Saved for queue", f"{len(saved_for_queue):,}")
 
     selection_cols = st.columns(4)
-    visible_ids = set(visible_queue[MANUAL_CHECKER_ROW_ID].tolist()) if not visible_queue.empty else set()
+    page_ids = set(page_queue[MANUAL_CHECKER_ROW_ID].tolist()) if not page_queue.empty else set()
     with selection_cols[0]:
-        if st.button("Select Visible", use_container_width=True, disabled=not visible_ids):
-            queue.loc[queue[MANUAL_CHECKER_ROW_ID].isin(visible_ids), MANUAL_CHECKER_SELECT_COLUMN] = True
+        if st.button("Select Page", use_container_width=True, disabled=not page_ids):
+            queue.loc[queue[MANUAL_CHECKER_ROW_ID].isin(page_ids), MANUAL_CHECKER_SELECT_COLUMN] = True
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with selection_cols[1]:
-        if st.button("Select Unfinished", use_container_width=True, disabled=not visible_ids):
+        if st.button("Select Unfinished Page", use_container_width=True, disabled=not page_ids):
             unfinished_visible = (
-                queue[MANUAL_CHECKER_ROW_ID].isin(visible_ids)
+                queue[MANUAL_CHECKER_ROW_ID].isin(page_ids)
                 & queue["Status"].fillna("").astype(str).str.strip().eq("")
             )
             queue.loc[unfinished_visible, MANUAL_CHECKER_SELECT_COLUMN] = True
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with selection_cols[2]:
         if st.button("Clear Selection", use_container_width=True, disabled=selected_queue.empty):
             queue[MANUAL_CHECKER_SELECT_COLUMN] = False
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with selection_cols[3]:
         st.download_button(
@@ -618,6 +685,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
             if batch_notes.strip():
                 queue.loc[mask, "Notes"] = batch_notes.strip()
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with action_cols[1]:
         if st.button("Use Last Seen", use_container_width=True, disabled=selected_queue.empty):
@@ -627,12 +695,14 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
             queue.loc[mask & blank_semester, "Semester"] = queue.loc[mask & blank_semester, "Last Known Semester"]
             queue.loc[mask & blank_chapter, "Chapter"] = queue.loc[mask & blank_chapter, "Last Known Chapter"]
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with action_cols[2]:
         if st.button("Clear Selected", use_container_width=True, disabled=selected_queue.empty):
             mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
             queue.loc[mask, ["Semester", "Status", "Notes"]] = ""
             st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            _refresh_manual_checker_editor()
             st.rerun()
     with action_cols[3]:
         if st.button("Save Selected", use_container_width=True, disabled=completed_selected_rows.empty):
@@ -661,12 +731,13 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
     with utility_cols[0]:
         if st.button("Reset Checker Edits", use_container_width=True):
             st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = None
+            _refresh_manual_checker_editor()
             st.rerun()
     with utility_cols[1]:
         st.download_button(
-            "Download Visible Queue",
-            data=dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(visible_queue)),
-            file_name="sql_compile_manual_queue_visible.csv",
+            "Download Filtered Queue",
+            data=dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(filtered_queue)),
+            file_name="sql_compile_manual_queue_filtered.csv",
             mime="text/csv",
             use_container_width=True,
         )
