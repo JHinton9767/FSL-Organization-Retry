@@ -231,22 +231,21 @@ def test_dashboard_milestones_use_eligibility_by_year_and_carry_forward_terminal
     chart = dashboard["chart_frame"]
 
     assert dashboard["meta"]["students"] == 3
-    assert table.loc["Cohort Year", "Measured Students"] == 3
-    assert table.loc["1 Year", "Measured Students"] == 3
-    assert table.loc["2 Year", "Measured Students"] == 2
+    assert table.index.tolist() == ["4 Year", "5 Year", "6 Year"]
+    assert table.loc["4 Year", "Measured Students"] == 2
+    assert table.loc["5 Year", "Measured Students"] == 2
     assert table.loc["6 Year", "Measured Students"] == 2
-    assert table.loc["Cohort Year", "Active Count"] == 3
-    assert table.loc["1 Year", "Active Count"] == 3
-    assert table.loc["2 Year", "Active Count"] == 1
-    assert table.loc["2 Year", "Dropped/Resigned Count"] == 1
+    assert table.loc["4 Year", "Active Count"] == 1
+    assert table.loc["4 Year", "Dropped/Resigned Count"] == 1
     assert table.loc["6 Year", "Graduated Count"] == 1
     assert table.loc["6 Year", "Dropped/Resigned Count"] == 1
     assert table.loc["6 Year", "Active Count"] == 0
     assert table.loc["6 Year", "Future Students"] == 1
     assert table.loc["6 Year", "Milestone Status"] == "Partially Future"
     assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Denominator"].iloc[0] == 2
-    assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6), "Count"].iloc[0] == 1
-    assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6), "Cohort Students"].iloc[0] == 3
+    assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Share"].iloc[0] == 1 / 2
+    assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Future Students"].iloc[0] == 1
+    assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6)].empty
 
 
 def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> None:
@@ -284,14 +283,14 @@ def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> Non
     chart = dashboard["chart_frame"]
     chart_table = dashboard["chart_table_frame"]
 
-    assert table.loc["1 Year", "Milestone Status"] == "Measured"
-    assert table.loc["2 Year", "Milestone Status"] == "Future"
-    assert table.loc["2 Year", "Measured Students"] == 0
-    assert table.loc["2 Year", "Future Students"] == 1
-    future_bar = chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(2)].iloc[0]
+    assert table.index.tolist() == ["4 Year", "5 Year", "6 Year"]
+    assert table.loc["4 Year", "Milestone Status"] == "Future"
+    assert table.loc["4 Year", "Measured Students"] == 0
+    assert table.loc["4 Year", "Future Students"] == 1
+    future_bar = chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(4)].iloc[0]
     assert future_bar["Share"] == 1
     assert future_bar["Count"] == 1
-    assert dashboard["meta"]["max_milestone"] == "1 Year"
+    assert dashboard["meta"]["max_milestone"] == ""
     assert chart_table.loc[chart_table["Milestone"].eq("6 Year"), "Milestone Status"].iloc[0] == "Future"
 
 
@@ -301,7 +300,7 @@ def test_dashboard_milestones_can_filter_to_selected_chapters() -> None:
             {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2021", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
-            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2021", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2024", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
         ]
     )
     outcomes = pd.DataFrame(
@@ -322,8 +321,8 @@ def test_dashboard_milestones_can_filter_to_selected_chapters() -> None:
     rates = build_dashboard_rate_table(outcomes, group_columns=["Cohort Semester", "Cohort Chapter"])
 
     assert dashboard["meta"]["students"] == 1
-    assert chart_table["Chart Group"].unique().tolist() == ["Cohort Year", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year"]
-    assert dashboard["table_frame"].set_index("Milestone").loc["1 Year", "Graduated Count"] == 1
+    assert chart_table["Chart Group"].unique().tolist() == ["4 Year", "5 Year", "6 Year"]
+    assert dashboard["table_frame"].set_index("Milestone").loc["4 Year", "Graduated Count"] == 1
     assert rates.columns.tolist()[:2] == ["Cohort Semester", "Cohort Chapter"]
     assert set(rates["Cohort Chapter"]) == {"Alpha", "Beta"}
 
@@ -350,7 +349,7 @@ def test_dashboard_can_chart_selected_milestone_by_semester_joined() -> None:
         selected_semesters=["Fall 2020", "Fall 2025"],
         selection_label="2 Semesters",
         chart_breakdown=PG_CHART_BREAKDOWN_SEMESTER,
-        chart_milestone_offset=2,
+        chart_milestone_offsets=[4],
     )
     chart = dashboard["chart_frame"]
     chart_table = dashboard["chart_table_frame"]
@@ -358,16 +357,16 @@ def test_dashboard_can_chart_selected_milestone_by_semester_joined() -> None:
     assert chart["Chart Group"].drop_duplicates().tolist() == ["Fall 2020", "Fall 2025"]
     assert chart.loc[chart["Chart Group"].eq("Fall 2020"), "Outcome"].tolist() == ["Graduated"]
     assert chart.loc[chart["Chart Group"].eq("Fall 2025"), "Outcome"].tolist() == ["Future"]
-    assert chart_table["Milestone"].unique().tolist() == ["2 Year"]
+    assert chart_table["Milestone"].unique().tolist() == ["4 Year"]
 
 
 def test_dashboard_can_chart_selected_milestone_by_chapter_joined() -> None:
     timeline = pd.DataFrame(
         [
             {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
-            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Spring 2021", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Spring 2024", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
             {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
-            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2021", "Status Code": "RS", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2024", "Status Code": "RS", "Source": "manual_status", "Included In Outcome": "Yes"},
         ]
     )
     outcomes = pd.DataFrame(
@@ -383,7 +382,7 @@ def test_dashboard_can_chart_selected_milestone_by_chapter_joined() -> None:
         selected_semesters=["Fall 2020"],
         selection_label="Fall 2020",
         chart_breakdown=PG_CHART_BREAKDOWN_CHAPTER,
-        chart_milestone_offset=1,
+        chart_milestone_offsets=[4],
     )
     chart = dashboard["chart_frame"]
 

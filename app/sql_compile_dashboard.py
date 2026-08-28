@@ -23,7 +23,7 @@ from src.sqlCompile_dashboard import (
     MANUAL_CHECKER_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
     PG_CHART_BREAKDOWN_CHAPTER,
-    PG_CHART_BREAKDOWN_MILESTONE,
+    PG_CHART_BREAKDOWN_OVERALL,
     PG_CHART_BREAKDOWN_OPTIONS,
     PG_CHART_BREAKDOWN_SEMESTER,
     SQL_COMPILE_ALL_TIME_LABEL,
@@ -64,10 +64,6 @@ MANUAL_CHECKER_PAGE_KEY = "sql_compile_manual_checker_page"
 MANUAL_CHECKER_PAGE_SIZE_OPTIONS = [50, 100, 250, 500]
 MANUAL_CHECKER_DEFAULT_PAGE_SIZE = 100
 PG_MILESTONE_OPTIONS = {
-    "Cohort Year": 0,
-    "1 Year": 1,
-    "2 Year": 2,
-    "3 Year": 3,
     "4 Year": 4,
     "5 Year": 5,
     "6 Year": 6,
@@ -166,7 +162,7 @@ def _session_cached_milestone_dashboard(
     selected_chapters: list[str],
     selected_label: str,
     chart_breakdown: str,
-    chart_milestone_offset: int,
+    chart_milestone_offsets: list[int],
     database_path: Path,
     manual_status_file: Path,
 ) -> dict[str, object]:
@@ -179,7 +175,7 @@ def _session_cached_milestone_dashboard(
         tuple(str(chapter).strip() for chapter in selected_chapters),
         str(selected_label),
         str(chart_breakdown),
-        int(chart_milestone_offset),
+        tuple(int(offset) for offset in chart_milestone_offsets),
     )
     cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
     if not isinstance(cache, dict):
@@ -194,7 +190,7 @@ def _session_cached_milestone_dashboard(
                 selected_chapters=selected_chapters,
                 selection_label=selected_label,
                 chart_breakdown=chart_breakdown,
-                chart_milestone_offset=chart_milestone_offset,
+                chart_milestone_offsets=chart_milestone_offsets,
             )
         while len(cache) > MILESTONE_DASHBOARD_CACHE_LIMIT:
             cache.pop(next(iter(cache)))
@@ -576,22 +572,33 @@ def _chapter_filter(options: list[str]) -> tuple[list[str], str]:
     return selected, f"{len(selected)} Chapters"
 
 
-def _pg_chart_controls() -> tuple[str, int, str]:
+def _pg_chart_controls() -> tuple[str, list[int], str]:
+    st.sidebar.subheader("P&G Chart")
     chart_breakdown = st.sidebar.radio(
-        "P&G chart bars",
+        "Breakdown",
         options=PG_CHART_BREAKDOWN_OPTIONS,
         index=0,
     )
-    milestone_label = "All milestones"
-    milestone_offset = 1
-    if chart_breakdown != PG_CHART_BREAKDOWN_MILESTONE:
-        milestone_label = st.sidebar.selectbox(
-            "P&G milestone",
+    if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL:
+        selected_labels = st.sidebar.multiselect(
+            "Milestones",
             options=list(PG_MILESTONE_OPTIONS),
-            index=1,
+            default=list(PG_MILESTONE_OPTIONS),
         )
-        milestone_offset = PG_MILESTONE_OPTIONS[milestone_label]
-    return chart_breakdown, milestone_offset, milestone_label
+        if not selected_labels:
+            selected_labels = list(PG_MILESTONE_OPTIONS)
+        return (
+            chart_breakdown,
+            [PG_MILESTONE_OPTIONS[label] for label in selected_labels],
+            ", ".join(selected_labels),
+        )
+
+    milestone_label = st.sidebar.selectbox(
+        "Milestone",
+        options=list(PG_MILESTONE_OPTIONS),
+        index=2,
+    )
+    return chart_breakdown, [PG_MILESTONE_OPTIONS[milestone_label]], milestone_label
 
 
 def _filter_by_chapters(frame: pd.DataFrame, selected_chapters: list[str]) -> pd.DataFrame:
@@ -637,7 +644,7 @@ def _render_rate_charts(
         title = f"Persistence and Graduation by Chapter Joined"
         xaxis_title = "Chapter joined"
     else:
-        title = f"Persistence and Graduation for {selected_label}"
+        title = "4/5/6 Year Outcome Rates"
         xaxis_title = "Milestone"
     subtitle = (
         f"{selected_label} | {chapter_label} chapters | {chart_milestone_label} | "
@@ -649,7 +656,7 @@ def _render_rate_charts(
             title=title,
             subtitle=subtitle,
             xaxis_title=xaxis_title,
-            yaxis_title="Share of selected cohort",
+            yaxis_title="Share of eligible students",
         ),
         use_container_width=True,
     )
@@ -1064,12 +1071,12 @@ def main() -> None:
     base_outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
     selected_chapters = _selected_chapters(base_outcomes)
     chapter_label = "ALL"
-    chart_breakdown = PG_CHART_BREAKDOWN_MILESTONE
-    chart_milestone_offset = 1
-    chart_milestone_label = "All milestones"
+    chart_breakdown = PG_CHART_BREAKDOWN_OVERALL
+    chart_milestone_offsets = [4, 5, 6]
+    chart_milestone_label = "4 Year, 5 Year, 6 Year"
     if section == "Persistence & Graduation":
         selected_chapters, chapter_label = _chapter_filter(selected_chapters)
-        chart_breakdown, chart_milestone_offset, chart_milestone_label = _pg_chart_controls()
+        chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
     outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if section == "Persistence & Graduation" else base_outcomes
 
     if st.sidebar.button("Write Report Files", use_container_width=True):
@@ -1109,7 +1116,7 @@ def main() -> None:
             selected_chapters=selected_chapters,
             selected_label=selected_label,
             chart_breakdown=chart_breakdown,
-            chart_milestone_offset=chart_milestone_offset,
+            chart_milestone_offsets=chart_milestone_offsets,
             database_path=database_path,
             manual_status_file=manual_status_file,
         )

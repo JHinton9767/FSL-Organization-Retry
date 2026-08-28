@@ -21,14 +21,16 @@ from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outc
 
 
 FUTURE_MILESTONE_BUCKET = "Future"
-PG_CHART_BREAKDOWN_MILESTONE = "Milestone timeline"
+PG_CHART_BREAKDOWN_OVERALL = "Overall"
+PG_CHART_BREAKDOWN_MILESTONE = PG_CHART_BREAKDOWN_OVERALL
 PG_CHART_BREAKDOWN_SEMESTER = "Semester joined"
 PG_CHART_BREAKDOWN_CHAPTER = "Chapter joined"
 PG_CHART_BREAKDOWN_OPTIONS = [
-    PG_CHART_BREAKDOWN_MILESTONE,
+    PG_CHART_BREAKDOWN_OVERALL,
     PG_CHART_BREAKDOWN_SEMESTER,
     PG_CHART_BREAKDOWN_CHAPTER,
 ]
+PG_GRADUATION_MILESTONE_OFFSETS = (4, 5, 6)
 RATE_COLUMNS = [
     "Cohort Semester",
     "Cohort Students",
@@ -283,16 +285,30 @@ def build_sql_compile_milestone_dashboard(
     selected_chapters: Optional[Sequence[str]] = None,
     selection_label: str = SQL_COMPILE_ALL_TIME_LABEL,
     max_years: int = 6,
-    chart_breakdown: str = PG_CHART_BREAKDOWN_MILESTONE,
-    chart_milestone_offset: int = 1,
+    chart_breakdown: str = PG_CHART_BREAKDOWN_OVERALL,
+    chart_milestone_offset: int = 6,
+    chart_milestone_offsets: Optional[Sequence[int]] = None,
 ) -> dict[str, object]:
     chart_breakdown = _normalize_pg_chart_breakdown(chart_breakdown)
     capped_max_years = max(0, min(int(max_years), 6))
-    selected_offsets = (
-        list(range(0, capped_max_years + 1))
-        if chart_breakdown == PG_CHART_BREAKDOWN_MILESTONE
-        else [max(0, min(int(chart_milestone_offset), capped_max_years))]
+    selected_offsets = _normalize_pg_milestone_offsets(
+        chart_milestone_offsets if chart_milestone_offsets is not None else [chart_milestone_offset],
+        max_years=capped_max_years,
     )
+    if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL and chart_milestone_offsets is None:
+        selected_offsets = _normalize_pg_milestone_offsets(
+            PG_GRADUATION_MILESTONE_OFFSETS,
+            max_years=capped_max_years,
+        )
+    if not selected_offsets:
+        fallback_offsets = PG_GRADUATION_MILESTONE_OFFSETS if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL else (6,)
+        selected_offsets = _normalize_pg_milestone_offsets(
+            fallback_offsets,
+            max_years=capped_max_years,
+        )
+    if chart_breakdown != PG_CHART_BREAKDOWN_OVERALL:
+        selected_offsets = selected_offsets[:1]
+    chart_milestone_label = _milestone_selection_label(selected_offsets)
     filtered_outcomes = _filter_by_selected_semesters(outcomes, selected_semesters)
     filtered_outcomes = _filter_by_selected_chapters(filtered_outcomes, selected_chapters)
     empty = {
@@ -307,7 +323,7 @@ def build_sql_compile_milestone_dashboard(
             "max_milestone": "",
             "note": "No new-member cohort rows matched the current selection.",
             "chart_breakdown": chart_breakdown,
-            "chart_milestone": _milestone_name(selected_offsets[0] if selected_offsets else 0),
+            "chart_milestone": chart_milestone_label,
         },
     }
     if filtered_outcomes.empty:
@@ -435,23 +451,27 @@ def build_sql_compile_milestone_dashboard(
             milestone_name = str(chart_group.get("milestone_name", "") or _milestone_name(offset))
             chart_group_label = str(chart_group.get("label", "") or milestone_name)
             axis_label = (
-                _milestone_label(offset, selection_label, cohort_total)
-                if chart_breakdown == PG_CHART_BREAKDOWN_MILESTONE
+                _milestone_label(offset, selection_label, eligible_students)
+                if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL
                 else chart_group_label
             )
-            chart_sort = offset if chart_breakdown == PG_CHART_BREAKDOWN_MILESTONE else group_index
+            chart_sort = offset if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL else group_index
             chart_counts = chart_group["counts"]
             if not isinstance(chart_counts, dict):
                 chart_counts = {}
-            chart_outcomes = [
-                (outcome, int(chart_counts.get(outcome, 0)))
-                for outcome in PERSISTENCE_OUTCOME_ORDER
-                if int(chart_counts.get(outcome, 0)) > 0
-            ]
-            if future_students_count:
+            if eligible_students:
+                chart_outcomes = [
+                    (outcome, int(chart_counts.get(outcome, 0)))
+                    for outcome in PERSISTENCE_OUTCOME_ORDER
+                    if int(chart_counts.get(outcome, 0)) > 0
+                ]
+            else:
+                chart_outcomes = []
+            if future_students_count and not eligible_students:
                 chart_outcomes.append((FUTURE_MILESTONE_BUCKET, future_students_count))
             for outcome, count in chart_outcomes:
-                share = count / cohort_total if cohort_total else pd.NA
+                share_denominator = eligible_students if outcome != FUTURE_MILESTONE_BUCKET else cohort_total
+                share = count / share_denominator if share_denominator else pd.NA
                 label = f"{outcome}<br>{share:.1%}<br>(n={count:,})" if count and share >= 0.085 else ""
                 if outcome == FUTURE_MILESTONE_BUCKET and future_students_count == cohort_total:
                     label = FUTURE_MILESTONE_BUCKET
@@ -499,12 +519,12 @@ def build_sql_compile_milestone_dashboard(
             "distinction": "ALL",
             "max_milestone": last_milestone,
             "chart_breakdown": chart_breakdown,
-            "chart_milestone": _milestone_name(selected_offsets[0] if selected_offsets else 0),
+            "chart_milestone": chart_milestone_label,
             "note": (
-                "Chart shares use the selected chart group's cohort size. Future is shown in gray for selected "
-                "students whose milestone has not arrived yet, so they are visible without being counted as an "
-                "outcome. Resolved outcome buckets carry forward across later checkpoints. Unknown is unresolved "
-                "and can shrink when later evidence resolves a student into a terminal bucket."
+                "Rates use only students old enough to reach the selected checkpoint. Bars marked Future are "
+                "selected cohorts with no eligible students yet. Partially future groups keep those newer students "
+                "out of the percentage denominator but show the future count in the chart data. Resolved outcome "
+                "buckets carry forward across later checkpoints."
             ),
         },
     }
@@ -679,7 +699,29 @@ def _clean_text(value: object) -> str:
 
 def _normalize_pg_chart_breakdown(value: object) -> str:
     text = str(value or "").strip()
-    return text if text in PG_CHART_BREAKDOWN_OPTIONS else PG_CHART_BREAKDOWN_MILESTONE
+    if text == "Milestone timeline":
+        return PG_CHART_BREAKDOWN_OVERALL
+    return text if text in PG_CHART_BREAKDOWN_OPTIONS else PG_CHART_BREAKDOWN_OVERALL
+
+
+def _normalize_pg_milestone_offsets(values: Sequence[object], *, max_years: int) -> list[int]:
+    allowed = {offset for offset in PG_GRADUATION_MILESTONE_OFFSETS if offset <= int(max_years)}
+    result: list[int] = []
+    for value in values:
+        try:
+            offset = int(value)
+        except (TypeError, ValueError):
+            continue
+        if offset in allowed and offset not in result:
+            result.append(offset)
+    return result
+
+
+def _milestone_selection_label(offsets: Sequence[int]) -> str:
+    labels = [_milestone_name(offset) for offset in offsets]
+    if not labels:
+        return ""
+    return ", ".join(labels)
 
 
 def _chart_group_state(
