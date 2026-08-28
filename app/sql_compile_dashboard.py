@@ -46,6 +46,12 @@ st.set_page_config(
 
 
 STATUS_OPTIONS = ["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"]
+SECTION_OPTIONS = ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
+SECTION_KEY = "sql_compile_dashboard_section"
+DASHBOARD_DATA_REFRESH_KEY = "sql_compile_dashboard_data_refresh_token"
+MILESTONE_DASHBOARD_CACHE_KEY = "sql_compile_milestone_dashboard_cache"
+MILESTONE_DASHBOARD_CACHE_LIMIT = 8
+MANUAL_CHECKER_FILTERED_DOWNLOAD_KEY = "sql_compile_manual_checker_filtered_download"
 MANUAL_CHECKER_ROW_ID = "_manual_checker_row_id"
 MANUAL_CHECKER_STATE_KEY = "sql_compile_manual_checker_rows"
 MANUAL_CHECKER_SIGNATURE_KEY = "sql_compile_manual_checker_signature"
@@ -114,19 +120,64 @@ def _mtime_ns(path: Path) -> int:
         return 0
 
 
+def _dashboard_data_refresh_token() -> int:
+    return int(st.session_state.get(DASHBOARD_DATA_REFRESH_KEY, 0) or 0)
+
+
+def _request_dashboard_data_refresh() -> None:
+    st.session_state[DASHBOARD_DATA_REFRESH_KEY] = _dashboard_data_refresh_token() + 1
+    st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = None
+    st.session_state.pop(MILESTONE_DASHBOARD_CACHE_KEY, None)
+    _refresh_manual_checker_editor()
+
+
 @st.cache_data(show_spinner="Loading sqlCompile dashboard data...")
 def _cached_load_dashboard_tables(
     database_path_text: str,
     database_mtime_ns: int,
     manual_status_file_text: str,
-    manual_status_mtime_ns: int,
+    dashboard_refresh_token: int,
 ):
-    del database_mtime_ns, manual_status_mtime_ns
+    del database_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
         database_path=Path(database_path_text),
         manual_status_file=Path(manual_status_file_text),
         all_cohorts=True,
     )
+
+
+def _session_cached_milestone_dashboard(
+    timeline: pd.DataFrame,
+    outcomes: pd.DataFrame,
+    *,
+    selected_cohorts: list[str],
+    selected_label: str,
+    database_path: Path,
+    manual_status_file: Path,
+) -> dict[str, object]:
+    key = (
+        str(database_path.resolve()),
+        _mtime_ns(database_path),
+        str(manual_status_file.resolve()),
+        _dashboard_data_refresh_token(),
+        tuple(str(cohort).strip() for cohort in selected_cohorts),
+        str(selected_label),
+    )
+    cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
+    if not isinstance(cache, dict):
+        cache = {}
+        st.session_state[MILESTONE_DASHBOARD_CACHE_KEY] = cache
+    if key not in cache:
+        with st.spinner("Calculating P&G milestone chart..."):
+            cache[key] = build_sql_compile_milestone_dashboard(
+                timeline,
+                outcomes,
+                selected_cohorts,
+                selection_label=selected_label,
+            )
+        while len(cache) > MILESTONE_DASHBOARD_CACHE_LIMIT:
+            cache.pop(next(iter(cache)))
+    return cache[key]
 
 
 def _format_percent(value: object) -> str:
@@ -244,6 +295,13 @@ def _manual_checker_editor_key(page_queue: pd.DataFrame) -> str:
     return f"{MANUAL_CHECKER_EDITOR_KEY}_{version}_{len(page_queue)}_{signature_hash}"
 
 
+def _manual_checker_row_id_signature(frame: pd.DataFrame) -> tuple[int, int]:
+    if frame.empty or MANUAL_CHECKER_ROW_ID not in frame.columns:
+        return (0, 0)
+    row_ids = frame[MANUAL_CHECKER_ROW_ID].fillna("").astype(str)
+    return (len(row_ids), int(pd.util.hash_pandas_object(row_ids, index=False).sum()))
+
+
 def _refresh_manual_checker_editor() -> None:
     st.session_state[MANUAL_CHECKER_EDITOR_VERSION_KEY] = int(
         st.session_state.get(MANUAL_CHECKER_EDITOR_VERSION_KEY, 0) or 0
@@ -335,26 +393,31 @@ def _completed_manual_checker_rows(queue: pd.DataFrame) -> pd.DataFrame:
     return completed_manual_status_rows(manual_rows)
 
 
+def _manual_checker_ready_mask(queue: pd.DataFrame) -> pd.Series:
+    if queue.empty:
+        return pd.Series(False, index=queue.index)
+    student_id = queue.get("Student ID", pd.Series("", index=queue.index)).fillna("").astype(str).str.strip()
+    semester = queue.get("Semester", pd.Series("", index=queue.index)).fillna("").astype(str).str.strip()
+    status = queue.get("Status", pd.Series("", index=queue.index)).fillna("").astype(str).str.strip()
+    return student_id.ne("") & semester.ne("") & status.ne("")
+
+
 def _saved_manual_rows_for_queue(manual_rows: pd.DataFrame, queue: pd.DataFrame) -> pd.DataFrame:
     if manual_rows.empty or queue.empty:
         return pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
-    keys = set(
-        tuple(row)
-        for row in queue.loc[:, ["Cohort Semester", "Cohort Chapter", "Student ID"]]
-        .fillna("")
-        .astype(str)
-        .to_numpy()
-        .tolist()
-    )
     prepared = manual_rows.copy()
-    for column in ["Cohort Semester", "Cohort Chapter", "Student ID"]:
+    queue_keys = queue.copy()
+    key_columns = ["Cohort Semester", "Cohort Chapter", "Student ID"]
+    for column in key_columns:
         if column not in prepared.columns:
             prepared[column] = ""
         prepared[column] = prepared[column].fillna("").astype(str).str.strip()
-    mask = prepared.apply(
-        lambda row: (row["Cohort Semester"], row["Cohort Chapter"], row["Student ID"]) in keys,
-        axis=1,
-    )
+        if column not in queue_keys.columns:
+            queue_keys[column] = ""
+        queue_keys[column] = queue_keys[column].fillna("").astype(str).str.strip()
+    keys = queue_keys[key_columns].agg("\x1f".join, axis=1).drop_duplicates()
+    prepared_keys = prepared[key_columns].agg("\x1f".join, axis=1)
+    mask = prepared_keys.isin(set(keys.tolist()))
     return prepared.loc[mask, MANUAL_STATUS_COLUMNS].reset_index(drop=True)
 
 
@@ -415,6 +478,7 @@ def _render_legacy_manual_importer(manual_status_file: Path) -> None:
         if import_requested:
             try:
                 result = import_legacy_manual_decisions(legacy_path, manual_status_file)
+                _request_dashboard_data_refresh()
                 st.success(f"Imported {result.saved_rows:,} legacy manual row(s) into {result.manual_status_path}.")
                 st.rerun()
             except OSError as exc:
@@ -614,41 +678,47 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
         st.warning("No student status records match the current filters.")
     else:
         editor_height = min(820, max(320, 92 + (len(page_queue) * 35)))
-        edited = st.data_editor(
-            _manual_checker_display_frame(page_queue),
-            use_container_width=True,
-            hide_index=True,
-            height=editor_height,
-            num_rows="fixed",
-            column_config={
-                MANUAL_CHECKER_SELECT_COLUMN: st.column_config.CheckboxColumn("Select"),
-                "Status": st.column_config.SelectboxColumn(
-                    "Status",
-                    options=STATUS_OPTIONS,
-                ),
-                "Last Known Outcome Bucket": st.column_config.TextColumn("Last Outcome"),
-                "Needs Manual Form Review": st.column_config.TextColumn("Needs Review"),
-                "Manual Status Applied": st.column_config.TextColumn("Manual Applied"),
-                "Semester": st.column_config.TextColumn("Correct Semester"),
-                "Chapter": st.column_config.TextColumn("Correct Chapter"),
-                "Notes": st.column_config.TextColumn("Notes"),
-            },
-            disabled=[
-                column
-                for column in LAST_KNOWN_STATUS_COLUMNS
-                if column not in {"Semester", "Chapter", "Status", "Notes"}
-            ],
-            key=_manual_checker_editor_key(page_queue),
-        )
-        queue = _merge_manual_checker_edits(queue, edited)
-        st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+        st.caption("Check or edit rows, then update the page once. This keeps individual checkbox clicks from rerunning the full dashboard.")
+        with st.form(f"{_manual_checker_editor_key(page_queue)}_form"):
+            edited = st.data_editor(
+                _manual_checker_display_frame(page_queue),
+                use_container_width=True,
+                hide_index=True,
+                height=editor_height,
+                num_rows="fixed",
+                column_config={
+                    MANUAL_CHECKER_SELECT_COLUMN: st.column_config.CheckboxColumn("Select"),
+                    "Status": st.column_config.SelectboxColumn(
+                        "Status",
+                        options=STATUS_OPTIONS,
+                    ),
+                    "Last Known Outcome Bucket": st.column_config.TextColumn("Last Outcome"),
+                    "Needs Manual Form Review": st.column_config.TextColumn("Needs Review"),
+                    "Manual Status Applied": st.column_config.TextColumn("Manual Applied"),
+                    "Semester": st.column_config.TextColumn("Correct Semester"),
+                    "Chapter": st.column_config.TextColumn("Correct Chapter"),
+                    "Notes": st.column_config.TextColumn("Notes"),
+                },
+                disabled=[
+                    column
+                    for column in LAST_KNOWN_STATUS_COLUMNS
+                    if column not in {"Semester", "Chapter", "Status", "Notes"}
+                ],
+                key=_manual_checker_editor_key(page_queue),
+            )
+            page_update_requested = st.form_submit_button("Update Page Edits", use_container_width=True)
+        if page_update_requested:
+            queue = _merge_manual_checker_edits(queue, edited)
+            st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
+            st.success(f"Updated {len(page_queue):,} visible row(s).")
 
     selected_mask = queue[MANUAL_CHECKER_SELECT_COLUMN].fillna(False).astype(bool)
     selected_queue = queue.loc[selected_mask].copy()
-    completed_rows = _completed_manual_checker_rows(queue)
+    ready_mask = _manual_checker_ready_mask(queue)
+    ready_count = int(ready_mask.sum())
     completed_selected_rows = _completed_manual_checker_rows(selected_queue)
 
-    metric_cols = st.columns(5)
+    metric_cols = st.columns(6)
     with metric_cols[0]:
         st.metric("Queue records", f"{len(queue):,}")
     with metric_cols[1]:
@@ -656,8 +726,10 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
     with metric_cols[2]:
         st.metric("Selected", f"{len(selected_queue):,}")
     with metric_cols[3]:
-        st.metric("Ready to save", f"{len(completed_rows):,}")
+        st.metric("Ready selected", f"{len(completed_selected_rows):,}")
     with metric_cols[4]:
+        st.metric("Ready total", f"{ready_count:,}")
+    with metric_cols[5]:
         st.metric("Saved for queue", f"{len(saved_for_queue):,}")
 
     selection_cols = st.columns(4)
@@ -742,18 +814,19 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
                 path, saved = append_manual_status_rows(completed_selected_rows, manual_status_file)
                 if saved:
                     st.success(f"Saved {saved:,} selected manual row(s) to {path}.")
-                    st.rerun()
+                    st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except OSError as exc:
                 st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
     with action_cols[4]:
-        if st.button("Save All Ready", use_container_width=True, disabled=completed_rows.empty):
+        if st.button("Save All Ready", use_container_width=True, disabled=ready_count == 0):
             try:
+                completed_rows = _completed_manual_checker_rows(queue.loc[ready_mask].copy())
                 path, saved = append_manual_status_rows(completed_rows, manual_status_file)
                 if saved:
                     st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
-                    st.rerun()
+                    st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except OSError as exc:
@@ -766,21 +839,33 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
             _refresh_manual_checker_editor()
             st.rerun()
     with utility_cols[1]:
+        filtered_signature = _manual_checker_row_id_signature(filtered_queue)
+        if st.button("Prepare Filtered CSV", use_container_width=True, disabled=filtered_queue.empty):
+            st.session_state[MANUAL_CHECKER_FILTERED_DOWNLOAD_KEY] = {
+                "signature": filtered_signature,
+                "data": dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(filtered_queue)),
+            }
+            st.success(f"Prepared {len(filtered_queue):,} filtered row(s) for download.")
+        filtered_download = st.session_state.get(MANUAL_CHECKER_FILTERED_DOWNLOAD_KEY, {})
+        filtered_download_data = b""
+        if isinstance(filtered_download, dict) and filtered_download.get("signature") == filtered_signature:
+            filtered_download_data = filtered_download.get("data", b"") or b""
         st.download_button(
             "Download Filtered Queue",
-            data=dataframe_to_csv_bytes(_strip_manual_checker_internal_columns(filtered_queue)),
+            data=filtered_download_data,
             file_name="sql_compile_manual_queue_filtered.csv",
             mime="text/csv",
             use_container_width=True,
+            disabled=not filtered_download_data,
         )
     with utility_cols[2]:
         st.download_button(
-            "Download Ready Rows",
-            data=dataframe_to_csv_bytes(completed_rows),
-            file_name="sql_compile_manual_rows_ready.csv",
+            "Download Ready Selected",
+            data=dataframe_to_csv_bytes(completed_selected_rows),
+            file_name="sql_compile_manual_rows_ready_selected.csv",
             mime="text/csv",
             use_container_width=True,
-            disabled=completed_rows.empty,
+            disabled=completed_selected_rows.empty,
         )
     with utility_cols[3]:
         st.download_button(
@@ -792,11 +877,11 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
             disabled=saved_for_queue.empty,
         )
 
-    with st.expander(f"Ready manual rows preview ({len(completed_rows):,})", expanded=not completed_rows.empty):
-        if completed_rows.empty:
-            st.caption("No completed manual rows yet.")
+    with st.expander(f"Ready selected rows preview ({len(completed_selected_rows):,})", expanded=not completed_selected_rows.empty):
+        if completed_selected_rows.empty:
+            st.caption("No selected completed manual rows yet.")
         else:
-            st.dataframe(completed_rows, use_container_width=True, hide_index=True)
+            st.dataframe(completed_selected_rows, use_container_width=True, hide_index=True)
 
     with st.expander(f"Saved manual decisions for this selection ({len(saved_for_queue):,})", expanded=False):
         if saved_for_queue.empty:
@@ -824,6 +909,7 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
     if st.button("Save Manual CSV", use_container_width=True):
         try:
             path = write_manual_status_rows(edited_manual, manual_status_file)
+            _request_dashboard_data_refresh()
             st.success(f"Saved manual rows to {path}.")
             st.rerun()
         except OSError as exc:
@@ -843,10 +929,15 @@ def main() -> None:
     if st.sidebar.button("Run sqlCompile", use_container_width=True):
         try:
             result = sqlCompile(output_path=database_path)
+            _request_dashboard_data_refresh()
             st.sidebar.success(f"Compiled {result.row_count:,} rows from {result.source_file_count:,} Excel file(s).")
             st.rerun()
         except Exception as exc:
             st.sidebar.error(f"Compile failed: {exc}")
+    if st.sidebar.button("Refresh Dashboard Data", use_container_width=True):
+        _request_dashboard_data_refresh()
+        st.rerun()
+    st.sidebar.caption("Manual saves are cached for speed. Refresh dashboard data when you want saved statuses reflected in rates and flags.")
 
     if not database_path.exists():
         st.error("No sqlCompile SQLite file was found. Run `python sqlCompile.py --all-semesters` first, or use the sidebar button after your roster paths are configured.")
@@ -857,7 +948,7 @@ def main() -> None:
             str(database_path.resolve()),
             _mtime_ns(database_path),
             str(manual_status_file.resolve()),
-            _mtime_ns(manual_status_file),
+            _dashboard_data_refresh_token(),
         )
     except Exception as exc:
         st.error(f"Could not load sqlCompile dashboard data: {exc}")
@@ -865,16 +956,9 @@ def main() -> None:
 
     cohort_options = _selected_cohorts(all_tables.rate_table)
     selected_cohorts, selected_label = _cohort_filter(cohort_options)
+    section = st.radio("Dashboard section", options=SECTION_OPTIONS, horizontal=True, key=SECTION_KEY)
     rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table.iloc[0:0].copy()
     outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
-    checker_template = all_tables.manual_checker_template.loc[all_tables.manual_checker_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_checker_template.empty else all_tables.manual_checker_template.iloc[0:0].copy()
-    distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()
-    milestone_dashboard = build_sql_compile_milestone_dashboard(
-        all_tables.timeline,
-        all_tables.outcomes,
-        selected_cohorts,
-        selection_label=selected_label,
-    )
 
     if st.sidebar.button("Write Report Files", use_container_width=True):
         try:
@@ -889,9 +973,11 @@ def main() -> None:
         except Exception as exc:
             st.sidebar.error(f"Report write failed: {exc}")
 
-    kpi_frame = build_dashboard_rate_table(outcomes)
-    milestone_meta = milestone_dashboard.get("meta", {})
-    cohort_students = int(milestone_meta.get("students", 0) or 0)
+    cohort_students = int(
+        outcomes.loc[:, ["Cohort Semester", "Student ID"]].drop_duplicates().shape[0]
+        if not outcomes.empty and {"Cohort Semester", "Student ID"}.issubset(outcomes.columns)
+        else 0
+    )
 
     kpis = st.columns(4)
     with kpis[0]:
@@ -901,28 +987,35 @@ def main() -> None:
     with kpis[2]:
         st.metric("Council view", "ALL")
     with kpis[3]:
-        st.metric("Latest measurable milestone", str(milestone_meta.get("max_milestone") or "Unknown"))
+        st.metric("Mode", section)
 
-    rates_tab, outcomes_tab, checker_tab, manual_rows_tab = st.tabs(
-        ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
-    )
-
-    with rates_tab:
+    if section == "Persistence & Graduation":
+        milestone_dashboard = _session_cached_milestone_dashboard(
+            all_tables.timeline,
+            all_tables.outcomes,
+            selected_cohorts=selected_cohorts,
+            selected_label=selected_label,
+            database_path=database_path,
+            manual_status_file=manual_status_file,
+        )
+        kpi_frame = build_dashboard_rate_table(outcomes)
         _render_rate_charts(kpi_frame, milestone_dashboard, selected_label)
 
-    with outcomes_tab:
+    elif section == "Outcome Mix":
+        distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()
         _render_outcome_distribution(distribution)
         if not outcomes.empty:
             st.dataframe(outcomes, use_container_width=True, hide_index=True)
 
-    with checker_tab:
+    elif section == "Manual Checker":
+        checker_template = all_tables.manual_checker_template.loc[all_tables.manual_checker_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_checker_template.empty else all_tables.manual_checker_template.iloc[0:0].copy()
         _render_manual_checker(
             checker_template.loc[:, LAST_KNOWN_STATUS_COLUMNS] if not checker_template.empty else checker_template,
             manual_status_file,
             all_tables.manual_rows,
         )
 
-    with manual_rows_tab:
+    else:
         _render_manual_rows_editor(all_tables.manual_rows, manual_status_file)
 
 

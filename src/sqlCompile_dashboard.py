@@ -248,6 +248,15 @@ def build_sql_compile_milestone_dashboard(
     if latest_sort == 0:
         latest_sort = max([_cohort_sort(value) for value in cohort_students["Cohort Semester"].tolist()] or [0])
 
+    timeline_groups: dict[tuple[str, str], pd.DataFrame] = {}
+    if not timeline_work.empty:
+        sort_columns = ["_term_sort", "_manual_priority", "Semester"]
+        for key, group in timeline_work.groupby(["Cohort Semester", "Student ID"], sort=False):
+            timeline_groups[(str(key[0]).strip(), str(key[1]).strip())] = group.sort_values(
+                sort_columns,
+                na_position="last",
+            )
+
     chart_rows: list[dict[str, object]] = []
     table_rows: list[dict[str, object]] = []
     last_milestone = ""
@@ -266,11 +275,15 @@ def build_sql_compile_milestone_dashboard(
             if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
             outcome = _checkpoint_outcome(
-                timeline_work,
+                timeline_groups.get(
+                    (str(student["Cohort Semester"]).strip(), str(student["Student ID"]).strip()),
+                    pd.DataFrame(),
+                ),
                 student["Cohort Semester"],
                 student["Student ID"],
                 offset,
                 target_sort=target_sort,
+                prefiltered=True,
             )
             counts[outcome] = int(counts.get(outcome, 0)) + 1
 
@@ -526,19 +539,24 @@ def _checkpoint_outcome(
     offset: int,
     *,
     target_sort: int | None = None,
+    prefiltered: bool = False,
 ) -> str:
     if timeline.empty:
         return "Active" if offset == 0 else "Unknown"
 
     checkpoint_sort = target_sort if target_sort is not None else _milestone_target_sort(cohort_semester, offset)
-    student_rows = timeline.loc[
-        timeline["Cohort Semester"].eq(str(cohort_semester).strip())
-        & timeline["Student ID"].eq(str(student_id).strip())
-    ].copy()
+    if prefiltered:
+        student_rows = timeline.copy()
+    else:
+        student_rows = timeline.loc[
+            timeline["Cohort Semester"].eq(str(cohort_semester).strip())
+            & timeline["Student ID"].eq(str(student_id).strip())
+        ].copy()
     if student_rows.empty:
         return "Active" if offset == 0 else "Unknown"
 
-    student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
+    if not prefiltered:
+        student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
     row_sorts = pd.to_numeric(student_rows["_term_sort"], errors="coerce")
     before_or_at = student_rows.loc[row_sorts.le(checkpoint_sort)].copy()
     if before_or_at.empty:

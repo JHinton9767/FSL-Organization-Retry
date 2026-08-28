@@ -102,9 +102,11 @@ output\sqlCompile\cohorts\fall_2025\new_member_form_review.csv
 
 These are students whose last known status is `A`, which means they disappeared without a resolved final status.
 
-The dashboard also has a **Manual Checker** tab for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, paged row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed rows, and saving completed decisions directly to the manual status CSV.
+The dashboard also has a **Manual Checker** section for every selected cohort student. It supports searching, cohort/chapter filtering, last-seen semester filtering, P&G last-known outcome bucket filtering, paged row selection, batch status entry, copying the last known semester/chapter into selected rows, previewing completed selected rows, and saving completed decisions directly to the manual status CSV.
 
-If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker tab or run a preview first:
+For speed, the Manual Checker grid is edited inside a form. Check or edit the visible rows, then click **Update Page Edits** once before using **Apply to Selected** or **Save Selected**. Manual saves do not recalculate the full dashboard immediately. Click **Refresh Dashboard Data** when you want saved statuses reflected in the P&G rates and saved/manual flags.
+
+If you already completed manual checks in the older dashboard, use **Reuse Legacy Manual Decisions** in the Manual Checker section or run a preview first:
 
 ```powershell
 uv run --with-requirements requirements.txt python import_legacy_manual_to_sql_compile.py --legacy-path . --preview-output output\sqlCompile\legacy_manual_import_preview.csv --dry-run
