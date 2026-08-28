@@ -468,11 +468,14 @@ def _render_rate_charts(rate_table: pd.DataFrame, milestone_dashboard: dict[str,
     chart_frame = milestone_dashboard.get("chart_frame", pd.DataFrame())
     table_frame = milestone_dashboard.get("table_frame", pd.DataFrame())
     title = f"Persistence and Graduation for {selected_label}"
-    subtitle = "ALL distinction | Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
+    subtitle = "ALL distinction | Share of eligible cohort | Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
     st.plotly_chart(
         persistence_milestone_chart(chart_frame, title=title, subtitle=subtitle),
         use_container_width=True,
     )
+    note = str(milestone_dashboard.get("meta", {}).get("note", "") or "").strip()
+    if note:
+        st.caption(note)
 
     if not table_frame.empty:
         count_columns = ["Measured Students", *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER]]

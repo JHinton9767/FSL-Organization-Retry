@@ -289,7 +289,7 @@ def build_sql_compile_milestone_dashboard(
             table_row[f"{outcome} Count"] = count
             chart_rows.append(
                 {
-                    "Milestone": _milestone_label(offset, selection_label),
+                    "Milestone": _milestone_label(offset, selection_label, denominator),
                     "Milestone Sort": offset,
                     "Outcome": outcome,
                     "Share": share,
@@ -311,8 +311,10 @@ def build_sql_compile_milestone_dashboard(
             "distinction": "ALL",
             "max_milestone": last_milestone,
             "note": (
-                "The 1 Year milestone includes every selected new-member cohort. Later milestones include only cohorts "
-                "old enough to be measured, and resolved outcome buckets carry forward across later checkpoints."
+                "Each milestone uses its own eligible denominator. The 1 Year milestone includes every selected "
+                "new-member cohort. Later milestones include only cohorts old enough to be measured, and resolved "
+                "outcome buckets carry forward across later checkpoints. Unknown is an unresolved checkpoint state, "
+                "so it can shrink when later evidence resolves a student into a terminal bucket."
             ),
         },
     }
@@ -484,9 +486,10 @@ def _milestone_name(offset: int) -> str:
     return "Cohort Year" if offset == 0 else f"{offset} Year"
 
 
-def _milestone_label(offset: int, selection_label: str) -> str:
+def _milestone_label(offset: int, selection_label: str, denominator: int | None = None) -> str:
     label = str(selection_label or SQL_COMPILE_ALL_TIME_LABEL).strip() or SQL_COMPILE_ALL_TIME_LABEL
-    return f"{_milestone_name(offset)}<br>{label}"
+    measured = f"<br>n={int(denominator):,}" if denominator is not None else ""
+    return f"{_milestone_name(offset)}<br>{label}{measured}"
 
 
 def _milestone_target_sort(cohort_semester: object, offset: int) -> int:

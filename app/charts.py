@@ -168,7 +168,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
             customdata_columns.append("Denominator")
             hovertemplate = (
                 f"{outcome}<br>%{{x}}<br>%{{y:.1%}}"
-                "<br>n=%{customdata[0]:,}<br>measured=%{customdata[1]:,}<extra></extra>"
+                "<br>n=%{customdata[0]:,}<br>eligible=%{customdata[1]:,}<extra></extra>"
             )
         fig.add_bar(
             x=subset["Milestone"],
@@ -195,7 +195,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         },
         legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
         xaxis_title="",
-        yaxis_title="Share of cohort",
+        yaxis_title="Share of eligible cohort",
         margin={"l": 24, "r": 24, "t": 90, "b": 120},
         uniformtext={"minsize": 8, "mode": "hide"},
     )
