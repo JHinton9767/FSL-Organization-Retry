@@ -151,6 +151,7 @@ def _session_cached_milestone_dashboard(
     outcomes: pd.DataFrame,
     *,
     selected_cohorts: list[str],
+    selected_chapters: list[str],
     selected_label: str,
     database_path: Path,
     manual_status_file: Path,
@@ -161,6 +162,7 @@ def _session_cached_milestone_dashboard(
         str(manual_status_file.resolve()),
         _dashboard_data_refresh_token(),
         tuple(str(cohort).strip() for cohort in selected_cohorts),
+        tuple(str(chapter).strip() for chapter in selected_chapters),
         str(selected_label),
     )
     cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
@@ -173,6 +175,7 @@ def _session_cached_milestone_dashboard(
                 timeline,
                 outcomes,
                 selected_cohorts,
+                selected_chapters=selected_chapters,
                 selection_label=selected_label,
             )
         while len(cache) > MILESTONE_DASHBOARD_CACHE_LIMIT:
@@ -526,15 +529,90 @@ def _cohort_filter(options: list[str]) -> tuple[list[str], str]:
     return selected, f"{len(selected)} Semesters"
 
 
-def _render_rate_charts(rate_table: pd.DataFrame, milestone_dashboard: dict[str, object], selected_label: str) -> None:
+def _selected_chapters(outcomes: pd.DataFrame) -> list[str]:
+    if outcomes.empty or "Cohort Chapter" not in outcomes.columns:
+        return []
+    values = outcomes["Cohort Chapter"].fillna("").astype(str).str.strip()
+    return sorted(value for value in values.unique().tolist() if value)
+
+
+def _chapter_filter(options: list[str]) -> tuple[list[str], str]:
+    if not options:
+        return [], "No Chapters"
+
+    mode = st.sidebar.radio(
+        "P&G chapter selection",
+        options=["All chapters", "Chapter group"],
+        index=0,
+    )
+    if mode == "All chapters":
+        return options, "ALL"
+
+    selected = st.sidebar.multiselect("P&G chapters", options=options, default=options)
+    if not selected:
+        return [], "No Chapters"
+    if len(selected) == len(options):
+        return selected, "ALL"
+    if len(selected) == 1:
+        return selected, str(selected[0])
+    return selected, f"{len(selected)} Chapters"
+
+
+def _filter_by_chapters(frame: pd.DataFrame, selected_chapters: list[str]) -> pd.DataFrame:
+    if frame.empty or "Cohort Chapter" not in frame.columns:
+        return frame.copy()
+    selected = {str(value).strip() for value in selected_chapters if str(value).strip()}
+    if not selected:
+        return frame.iloc[0:0].copy()
+    return frame.loc[frame["Cohort Chapter"].fillna("").astype(str).str.strip().isin(selected)].copy()
+
+
+def _future_row_style(frame: pd.DataFrame):
+    def style_row(row: pd.Series) -> list[str]:
+        status = str(row.get("Milestone Status", "") or "").strip()
+        if status == "Future":
+            return ["background-color: #E5E7EB; color: #475569;" for _ in row]
+        if status == "Partially Future":
+            return ["background-color: #F8FAFC; color: #17213A;" for _ in row]
+        return ["" for _ in row]
+
+    return frame.style.apply(style_row, axis=1)
+
+
+def _sort_detail_rows(frame: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
+    result = frame.copy()
+    if result.empty:
+        return result
+    result["_row_order"] = range(len(result))
+    if sort_mode == "Chapter then semester":
+        sort_columns = [column for column in ["Cohort Chapter", "_row_order"] if column in result.columns]
+        result = result.sort_values(sort_columns, na_position="last")
+    elif sort_mode == "Milestone then chapter":
+        sort_columns = [column for column in ["Milestone Sort", "Cohort Chapter", "_row_order"] if column in result.columns]
+        result = result.sort_values(sort_columns, na_position="last")
+    return result.drop(columns=["_row_order"], errors="ignore").reset_index(drop=True)
+
+
+def _render_rate_charts(
+    rate_table: pd.DataFrame,
+    milestone_dashboard: dict[str, object],
+    selected_label: str,
+    *,
+    chapter_label: str,
+    chapter_rate_table: pd.DataFrame,
+) -> None:
     if rate_table.empty:
         st.warning("No new-member cohorts were available. Run `python sqlCompile.py --all-semesters` after your roster path is configured.")
         return
 
     chart_frame = milestone_dashboard.get("chart_frame", pd.DataFrame())
     table_frame = milestone_dashboard.get("table_frame", pd.DataFrame())
+    detail_frame = milestone_dashboard.get("detail_frame", pd.DataFrame())
     title = f"Persistence and Graduation for {selected_label}"
-    subtitle = "ALL distinction | Share of eligible cohort | Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
+    subtitle = (
+        f"{chapter_label} chapters | Share of eligible cohort | Roster outcomes first | "
+        "Manual corrections last | Explicit graduation evidence only"
+    )
     st.plotly_chart(
         persistence_milestone_chart(chart_frame, title=title, subtitle=subtitle),
         use_container_width=True,
@@ -544,11 +622,66 @@ def _render_rate_charts(rate_table: pd.DataFrame, milestone_dashboard: dict[str,
         st.caption(note)
 
     if not table_frame.empty:
-        count_columns = ["Measured Students", *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER]]
+        count_columns = [
+            "Measured Students",
+            "Future Students",
+            *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER],
+        ]
+        milestone_display = _format_display_frame(
+            table_frame,
+            percent_cols=PERSISTENCE_OUTCOME_ORDER,
+            integer_cols=count_columns,
+        )
         st.dataframe(
-            _format_display_frame(table_frame, percent_cols=PERSISTENCE_OUTCOME_ORDER, integer_cols=count_columns),
+            _future_row_style(milestone_display),
             use_container_width=True,
             hide_index=True,
+        )
+
+    if isinstance(detail_frame, pd.DataFrame) and not detail_frame.empty:
+        st.subheader("Milestone Rows by Semester and Chapter")
+        sort_mode = st.selectbox(
+            "P&G row sort",
+            options=["Semester then chapter", "Chapter then semester", "Milestone then chapter"],
+            index=0,
+            key="sql_compile_pg_detail_sort",
+        )
+        detail_columns = [
+            column
+            for column in [
+                "Cohort Semester",
+                "Cohort Chapter",
+                "Milestone",
+                "Milestone Status",
+                "Measured Students",
+                "Future Students",
+                *PERSISTENCE_OUTCOME_ORDER,
+                *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER],
+            ]
+            if column in detail_frame.columns
+        ]
+        detail_count_columns = [
+            "Measured Students",
+            "Future Students",
+            *[f"{outcome} Count" for outcome in PERSISTENCE_OUTCOME_ORDER],
+        ]
+        detail_display = _format_display_frame(
+            _sort_detail_rows(detail_frame.loc[:, detail_columns], sort_mode),
+            percent_cols=PERSISTENCE_OUTCOME_ORDER,
+            integer_cols=detail_count_columns,
+        )
+        st.dataframe(
+            _future_row_style(detail_display),
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+        )
+        st.download_button(
+            "Download P&G Detail Rows",
+            data=dataframe_to_csv_bytes(detail_frame.loc[:, detail_columns]),
+            file_name="sql_compile_pg_semester_chapter_rows.csv",
+            mime="text/csv",
+            use_container_width=True,
         )
 
     st.subheader("Resolved Rate Summary")
@@ -569,6 +702,27 @@ def _render_rate_charts(rate_table: pd.DataFrame, milestone_dashboard: dict[str,
         use_container_width=True,
         hide_index=True,
     )
+
+    if not chapter_rate_table.empty:
+        st.subheader("Resolved Rate Summary by Semester and Chapter")
+        st.dataframe(
+            _format_display_frame(
+                chapter_rate_table,
+                percent_cols=["Manual Review Share", "Persistence Rate", "Graduation Rate", "Known Exit Rate"],
+                integer_cols=[
+                    "Cohort Students",
+                    "Resolved Students",
+                    "Needs Manual Review",
+                    "Persisted / Active",
+                    "Graduated",
+                    "Known Non-Graduate Exits",
+                    "Other / Unresolved",
+                ],
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=360,
+        )
 
 
 def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
@@ -960,8 +1114,14 @@ def main() -> None:
     cohort_options = _selected_cohorts(all_tables.rate_table)
     selected_cohorts, selected_label = _cohort_filter(cohort_options)
     section = st.radio("Dashboard section", options=SECTION_OPTIONS, horizontal=True, key=SECTION_KEY)
-    rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table.iloc[0:0].copy()
-    outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
+    base_rate_table = all_tables.rate_table.loc[all_tables.rate_table["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts else all_tables.rate_table.iloc[0:0].copy()
+    base_outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
+    selected_chapters = _selected_chapters(base_outcomes)
+    chapter_label = "ALL"
+    if section == "Persistence & Graduation":
+        selected_chapters, chapter_label = _chapter_filter(selected_chapters)
+    outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if section == "Persistence & Graduation" else base_outcomes
+    rate_table = build_dashboard_rate_table(outcomes) if section == "Persistence & Graduation" else base_rate_table
 
     if st.sidebar.button("Write Report Files", use_container_width=True):
         try:
@@ -990,19 +1150,30 @@ def main() -> None:
     with kpis[2]:
         st.metric("Council view", "ALL")
     with kpis[3]:
-        st.metric("Mode", section)
+        st.metric("Chapter view", chapter_label)
 
     if section == "Persistence & Graduation":
         milestone_dashboard = _session_cached_milestone_dashboard(
             all_tables.timeline,
             all_tables.outcomes,
             selected_cohorts=selected_cohorts,
+            selected_chapters=selected_chapters,
             selected_label=selected_label,
             database_path=database_path,
             manual_status_file=manual_status_file,
         )
         kpi_frame = build_dashboard_rate_table(outcomes)
-        _render_rate_charts(kpi_frame, milestone_dashboard, selected_label)
+        chapter_rate_table = build_dashboard_rate_table(
+            outcomes,
+            group_columns=["Cohort Semester", "Cohort Chapter"],
+        )
+        _render_rate_charts(
+            kpi_frame,
+            milestone_dashboard,
+            selected_label,
+            chapter_label=chapter_label,
+            chapter_rate_table=chapter_rate_table,
+        )
 
     elif section == "Outcome Mix":
         distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()

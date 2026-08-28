@@ -20,6 +20,7 @@ from src.sqlCompile_cohort import (
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
 
+FUTURE_MILESTONE_BUCKET = "Future"
 RATE_COLUMNS = [
     "Cohort Semester",
     "Cohort Students",
@@ -53,7 +54,23 @@ MILESTONE_CHART_COLUMNS = [
 MILESTONE_TABLE_COLUMNS = [
     "Milestone",
     "Term",
+    "Milestone Status",
     "Measured Students",
+    "Future Students",
+    *[
+        column
+        for outcome in PERSISTENCE_OUTCOME_ORDER
+        for column in (outcome, f"{outcome} Count")
+    ],
+]
+MILESTONE_DETAIL_COLUMNS = [
+    "Cohort Semester",
+    "Cohort Chapter",
+    "Milestone",
+    "Milestone Sort",
+    "Milestone Status",
+    "Measured Students",
+    "Future Students",
     *[
         column
         for outcome in PERSISTENCE_OUTCOME_ORDER
@@ -125,12 +142,34 @@ def _count_buckets(frame: pd.DataFrame, buckets: set[str]) -> int:
     return int(frame["Final Outcome Bucket"].isin(buckets).sum()) if "Final Outcome Bucket" in frame.columns else 0
 
 
-def build_dashboard_rate_table(outcomes: pd.DataFrame) -> pd.DataFrame:
+def _rate_columns(group_columns: Sequence[str]) -> list[str]:
+    return [*group_columns, *RATE_COLUMNS[1:]]
+
+
+def build_dashboard_rate_table(
+    outcomes: pd.DataFrame,
+    group_columns: Optional[Sequence[str]] = None,
+) -> pd.DataFrame:
+    grouping = [str(column) for column in (group_columns or ["Cohort Semester"]) if str(column)]
+    if not grouping:
+        grouping = ["Cohort Semester"]
+    columns = _rate_columns(grouping)
     if outcomes.empty:
-        return pd.DataFrame(columns=RATE_COLUMNS)
+        return pd.DataFrame(columns=columns)
+
+    prepared = outcomes.copy()
+    for column in grouping:
+        if column not in prepared.columns:
+            prepared[column] = ""
+        prepared[column] = prepared[column].fillna("").astype(str).str.strip()
+    if "Needs Manual Form Review" not in prepared.columns:
+        prepared["Needs Manual Form Review"] = "No"
 
     rows: list[dict[str, object]] = []
-    for cohort_semester, group in outcomes.groupby("Cohort Semester", dropna=False):
+    groupby_key: str | list[str] = grouping[0] if len(grouping) == 1 else grouping
+    for key, group in prepared.groupby(groupby_key, dropna=False):
+        key_values = (key,) if len(grouping) == 1 else tuple(key)
+        group_values = {column: key_values[index] for index, column in enumerate(grouping)}
         cohort_students = int(len(group))
         manual_review = int(group["Needs Manual Form Review"].eq("Yes").sum())
         resolved = max(cohort_students - manual_review, 0)
@@ -140,7 +179,7 @@ def build_dashboard_rate_table(outcomes: pd.DataFrame) -> pd.DataFrame:
         other = max(resolved - persisted - graduated - known_exits, 0)
         rows.append(
             {
-                "Cohort Semester": cohort_semester,
+                **group_values,
                 "Cohort Students": cohort_students,
                 "Resolved Students": resolved,
                 "Needs Manual Review": manual_review,
@@ -155,11 +194,16 @@ def build_dashboard_rate_table(outcomes: pd.DataFrame) -> pd.DataFrame:
             }
         )
 
-    result = pd.DataFrame(rows, columns=RATE_COLUMNS)
+    result = pd.DataFrame(rows, columns=columns)
     if result.empty:
         return result
-    result["_sort"] = result["Cohort Semester"].map(_cohort_sort)
-    return result.sort_values(["_sort", "Cohort Semester"], na_position="last").drop(columns=["_sort"]).reset_index(drop=True)
+    sort_columns: list[str] = []
+    if "Cohort Semester" in result.columns:
+        result["_cohort_sort"] = result["Cohort Semester"].map(_cohort_sort)
+        sort_columns.append("_cohort_sort")
+    sort_columns.extend(column for column in grouping if column in result.columns)
+    result = result.sort_values(sort_columns, na_position="last") if sort_columns else result
+    return result.drop(columns=["_cohort_sort"], errors="ignore").reset_index(drop=True)
 
 
 def build_outcome_distribution(outcomes: pd.DataFrame) -> pd.DataFrame:
@@ -225,13 +269,16 @@ def build_sql_compile_milestone_dashboard(
     outcomes: pd.DataFrame,
     selected_semesters: Optional[Sequence[str]] = None,
     *,
+    selected_chapters: Optional[Sequence[str]] = None,
     selection_label: str = SQL_COMPILE_ALL_TIME_LABEL,
     max_years: int = 6,
 ) -> dict[str, object]:
     filtered_outcomes = _filter_by_selected_semesters(outcomes, selected_semesters)
+    filtered_outcomes = _filter_by_selected_chapters(filtered_outcomes, selected_chapters)
     empty = {
         "chart_frame": pd.DataFrame(columns=MILESTONE_CHART_COLUMNS),
         "table_frame": pd.DataFrame(columns=MILESTONE_TABLE_COLUMNS),
+        "detail_frame": pd.DataFrame(columns=MILESTONE_DETAIL_COLUMNS),
         "meta": {
             "students": 0,
             "cohort_term": selection_label,
@@ -293,18 +340,34 @@ def build_sql_compile_milestone_dashboard(
 
     chart_rows: list[dict[str, object]] = []
     table_rows: list[dict[str, object]] = []
+    detail_rows: list[dict[str, object]] = []
     last_milestone = ""
     capped_max_years = max(0, min(int(max_years), 6))
 
     for offset in range(0, capped_max_years + 1):
-        measured = cohort_students.loc[
-            cohort_students["Cohort Semester"].map(lambda value: _milestone_is_measurable(value, offset, latest_sort))
-        ].copy()
-        if measured.empty:
-            continue
-
+        measurable_mask = cohort_students["Cohort Semester"].map(
+            lambda value: _milestone_is_measurable(value, offset, latest_sort)
+        )
+        measured = cohort_students.loc[measurable_mask].copy()
+        future_students = cohort_students.loc[~measurable_mask].copy()
         counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
+        detail_counts: dict[tuple[str, str], dict[str, int]] = {}
+        detail_measured_counts: dict[tuple[str, str], int] = {}
+        detail_future_counts: dict[tuple[str, str], int] = {}
+        for _, student in future_students.iterrows():
+            detail_key = (
+                _clean_text(student.get("Cohort Semester", "")),
+                _clean_text(student.get("Cohort Chapter", "")),
+            )
+            detail_future_counts[detail_key] = int(detail_future_counts.get(detail_key, 0)) + 1
         for _, student in measured.iterrows():
+            detail_key = (
+                _clean_text(student.get("Cohort Semester", "")),
+                _clean_text(student.get("Cohort Chapter", "")),
+            )
+            if detail_key not in detail_counts:
+                detail_counts[detail_key] = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
+            detail_measured_counts[detail_key] = int(detail_measured_counts.get(detail_key, 0)) + 1
             target_sort = _milestone_target_sort(student["Cohort Semester"], offset)
             if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
@@ -320,38 +383,89 @@ def build_sql_compile_milestone_dashboard(
                 prefiltered=True,
             )
             counts[outcome] = int(counts.get(outcome, 0)) + 1
+            detail_counts[detail_key][outcome] = int(detail_counts[detail_key].get(outcome, 0)) + 1
 
         denominator = int(len(measured))
+        future_count = int(len(future_students))
         milestone_name = _milestone_name(offset)
-        last_milestone = milestone_name
+        if denominator:
+            last_milestone = milestone_name
+        milestone_status = _milestone_status(denominator, future_count)
         table_row: dict[str, object] = {
             "Milestone": milestone_name,
             "Term": selection_label,
+            "Milestone Status": milestone_status,
             "Measured Students": denominator,
+            "Future Students": future_count,
         }
         for outcome in PERSISTENCE_OUTCOME_ORDER:
             count = int(counts.get(outcome, 0))
             share = count / denominator if denominator else pd.NA
             table_row[outcome] = share
             table_row[f"{outcome} Count"] = count
+            if denominator:
+                chart_rows.append(
+                    {
+                        "Milestone": _milestone_label(offset, selection_label, denominator),
+                        "Milestone Sort": offset,
+                        "Outcome": outcome,
+                        "Share": share,
+                        "Count": count,
+                        "Denominator": denominator,
+                        "Label": f"{outcome}<br>{share:.1%}<br>(n={count:,})" if count and share >= 0.085 else "",
+                    }
+                )
+        if not denominator and future_count:
             chart_rows.append(
                 {
-                    "Milestone": _milestone_label(offset, selection_label, denominator),
+                    "Milestone": _milestone_label(offset, selection_label, 0),
                     "Milestone Sort": offset,
-                    "Outcome": outcome,
-                    "Share": share,
-                    "Count": count,
-                    "Denominator": denominator,
-                    "Label": f"{outcome}<br>{share:.1%}<br>(n={count:,})" if count and share >= 0.085 else "",
+                    "Outcome": FUTURE_MILESTONE_BUCKET,
+                    "Share": 1,
+                    "Count": future_count,
+                    "Denominator": 0,
+                    "Label": FUTURE_MILESTONE_BUCKET,
                 }
             )
         table_rows.append(table_row)
 
+        all_detail_keys = set(detail_counts) | set(detail_measured_counts) | set(detail_future_counts)
+        for cohort_semester, cohort_chapter in all_detail_keys:
+            detail_denominator = int(detail_measured_counts.get((cohort_semester, cohort_chapter), 0))
+            detail_future = int(detail_future_counts.get((cohort_semester, cohort_chapter), 0))
+            row_counts = detail_counts.get(
+                (cohort_semester, cohort_chapter),
+                {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER},
+            )
+            detail_row: dict[str, object] = {
+                "Cohort Semester": cohort_semester,
+                "Cohort Chapter": cohort_chapter,
+                "Milestone": milestone_name,
+                "Milestone Sort": offset,
+                "Milestone Status": _milestone_status(detail_denominator, detail_future),
+                "Measured Students": detail_denominator,
+                "Future Students": detail_future,
+            }
+            for outcome in PERSISTENCE_OUTCOME_ORDER:
+                count = int(row_counts.get(outcome, 0))
+                detail_row[outcome] = count / detail_denominator if detail_denominator else pd.NA
+                detail_row[f"{outcome} Count"] = count
+            detail_rows.append(detail_row)
+
     chart_frame = pd.DataFrame(chart_rows, columns=MILESTONE_CHART_COLUMNS)
     table_frame = pd.DataFrame(table_rows, columns=MILESTONE_TABLE_COLUMNS)
+    detail_frame = pd.DataFrame(detail_rows, columns=MILESTONE_DETAIL_COLUMNS)
+    if not detail_frame.empty:
+        detail_frame["_cohort_sort"] = detail_frame["Cohort Semester"].map(_cohort_sort)
+        detail_frame = (
+            detail_frame.sort_values(["_cohort_sort", "Cohort Chapter", "Milestone Sort"], na_position="last")
+            .drop(columns=["_cohort_sort"])
+            .reset_index(drop=True)
+        )
     return {
         "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
         "table_frame": table_frame.reset_index(drop=True),
+        "detail_frame": detail_frame,
         "meta": {
             "students": int(len(cohort_students)),
             "cohort_term": selection_label,
@@ -361,7 +475,8 @@ def build_sql_compile_milestone_dashboard(
                 "Each milestone uses its own eligible denominator. The 1 Year milestone includes every selected "
                 "new-member cohort. Later milestones include only cohorts old enough to be measured, and resolved "
                 "outcome buckets carry forward across later checkpoints. Unknown is an unresolved checkpoint state, "
-                "so it can shrink when later evidence resolves a student into a terminal bucket."
+                "so it can shrink when later evidence resolves a student into a terminal bucket. Future rows are "
+                "selected cohorts that are not old enough for that milestone and are not included in measured rates."
             ),
         },
     }
@@ -519,6 +634,21 @@ def _filter_by_selected_semesters(frame: pd.DataFrame, selected_semesters: Optio
     return frame.loc[frame["Cohort Semester"].fillna("").astype(str).str.strip().isin(selected)].copy()
 
 
+def _filter_by_selected_chapters(frame: pd.DataFrame, selected_chapters: Optional[Sequence[str]]) -> pd.DataFrame:
+    if selected_chapters is None or frame.empty or "Cohort Chapter" not in frame.columns:
+        return frame.copy()
+    selected = {str(value).strip() for value in selected_chapters if str(value).strip()}
+    if not selected:
+        return frame.iloc[0:0].copy()
+    return frame.loc[frame["Cohort Chapter"].fillna("").astype(str).str.strip().isin(selected)].copy()
+
+
+def _clean_text(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 def _timeline_status_code(row: pd.Series) -> str:
     status_code = str(row.get("Status Code", "") or "").strip()
     if status_code:
@@ -569,6 +699,14 @@ def _milestone_is_measurable(cohort_semester: object, offset: int, latest_sort: 
         return True
     target_sort = _milestone_target_sort(cohort_semester, offset)
     return target_sort < 999999 and latest_sort >= target_sort
+
+
+def _milestone_status(measured_students: int, future_students: int) -> str:
+    if measured_students <= 0 and future_students > 0:
+        return FUTURE_MILESTONE_BUCKET
+    if measured_students > 0 and future_students > 0:
+        return "Partially Future"
+    return "Measured"
 
 
 def _checkpoint_outcome(

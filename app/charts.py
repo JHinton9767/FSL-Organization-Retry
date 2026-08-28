@@ -7,6 +7,8 @@ import plotly.graph_objects as go
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 
 
+FUTURE_OUTCOME = "Future"
+PERSISTENCE_CHART_OUTCOME_ORDER = [*PERSISTENCE_OUTCOME_ORDER, FUTURE_OUTCOME]
 PLOTLY_TEMPLATE = "plotly_white"
 COLOR_SEQUENCE = [
     "#0B3954",
@@ -26,8 +28,9 @@ PERSISTENCE_OUTCOME_COLORS = {
     "Chapter Kicked": "#475569",
     "Unknown": "#B7B4AA",
     "Graduated": "#2F7D4A",
+    FUTURE_OUTCOME: "#E5E7EB",
 }
-PERSISTENCE_DARK_TEXT_OUTCOMES = {"Early Alumni", "Unknown"}
+PERSISTENCE_DARK_TEXT_OUTCOMES = {"Early Alumni", "Unknown", FUTURE_OUTCOME}
 
 
 def _finalize_figure(fig: go.Figure, y_format: str = "", **layout_updates: object) -> go.Figure:
@@ -158,7 +161,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
         if "Milestone Sort" in frame.columns
         else frame["Milestone"].drop_duplicates().astype(str).tolist()
     )
-    for outcome in PERSISTENCE_OUTCOME_ORDER:
+    for outcome in PERSISTENCE_CHART_OUTCOME_ORDER:
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
             continue
@@ -174,7 +177,7 @@ def persistence_milestone_chart(frame: pd.DataFrame, title: str, subtitle: str =
             x=subset["Milestone"],
             y=subset["Share"],
             name=outcome,
-            marker_color=PERSISTENCE_OUTCOME_COLORS[outcome],
+            marker_color=PERSISTENCE_OUTCOME_COLORS.get(outcome, "#6B7280"),
             text=subset["Label"],
             textposition="inside",
             textfont={"color": "#2F2E2A" if outcome in PERSISTENCE_DARK_TEXT_OUTCOMES else "white", "size": 11},

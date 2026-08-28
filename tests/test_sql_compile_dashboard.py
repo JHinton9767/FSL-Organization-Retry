@@ -240,4 +240,85 @@ def test_dashboard_milestones_use_eligibility_by_year_and_carry_forward_terminal
     assert table.loc["6 Year", "Graduated Count"] == 1
     assert table.loc["6 Year", "Dropped/Resigned Count"] == 1
     assert table.loc["6 Year", "Active Count"] == 0
+    assert table.loc["6 Year", "Future Students"] == 1
+    assert table.loc["6 Year", "Milestone Status"] == "Partially Future"
     assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Denominator"].iloc[0] == 2
+
+
+def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> None:
+    timeline = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2025",
+                "Student ID": "A3",
+                "Semester": "Fall 2025",
+                "Status Code": "N",
+                "Source": "sqlCompile",
+                "Included In Outcome": "Yes",
+            },
+            {
+                "Cohort Semester": "Fall 2025",
+                "Student ID": "A3",
+                "Semester": "Spring 2026",
+                "Status Code": "A",
+                "Source": "sqlCompile",
+                "Included In Outcome": "Yes",
+            },
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [{"Cohort Semester": "Fall 2025", "Cohort Chapter": "Beta", "Student ID": "A3"}]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2025"],
+        selection_label="Fall 2025",
+    )
+    table = dashboard["table_frame"].set_index("Milestone")
+    chart = dashboard["chart_frame"]
+    detail = dashboard["detail_frame"]
+
+    assert table.loc["1 Year", "Milestone Status"] == "Measured"
+    assert table.loc["2 Year", "Milestone Status"] == "Future"
+    assert table.loc["2 Year", "Measured Students"] == 0
+    assert table.loc["2 Year", "Future Students"] == 1
+    future_bar = chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(2)].iloc[0]
+    assert future_bar["Share"] == 1
+    assert future_bar["Count"] == 1
+    assert dashboard["meta"]["max_milestone"] == "1 Year"
+    assert detail.loc[detail["Milestone"].eq("6 Year"), "Milestone Status"].iloc[0] == "Future"
+
+
+def test_dashboard_milestones_can_filter_to_selected_chapters() -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2021", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2021", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A1", "Final Outcome Bucket": "Active / Still On Roster", "Needs Manual Form Review": "No"},
+            {"Cohort Semester": "Fall 2020", "Cohort Chapter": "Beta", "Student ID": "A2", "Final Outcome Bucket": "Graduated", "Needs Manual Form Review": "No"},
+        ]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2020"],
+        selected_chapters=["Beta"],
+        selection_label="Fall 2020",
+    )
+    detail = dashboard["detail_frame"]
+    rates = build_dashboard_rate_table(outcomes, group_columns=["Cohort Semester", "Cohort Chapter"])
+
+    assert dashboard["meta"]["students"] == 1
+    assert detail["Cohort Chapter"].unique().tolist() == ["Beta"]
+    assert dashboard["table_frame"].set_index("Milestone").loc["1 Year", "Graduated Count"] == 1
+    assert rates.columns.tolist()[:2] == ["Cohort Semester", "Cohort Chapter"]
+    assert set(rates["Cohort Chapter"]) == {"Alpha", "Beta"}
