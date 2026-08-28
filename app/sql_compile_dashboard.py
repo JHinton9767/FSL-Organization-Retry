@@ -64,6 +64,9 @@ MANUAL_CHECKER_PAGE_KEY = "sql_compile_manual_checker_page"
 MANUAL_CHECKER_PAGE_SIZE_OPTIONS = [50, 100, 250, 500]
 MANUAL_CHECKER_DEFAULT_PAGE_SIZE = 100
 PG_MILESTONE_OPTIONS = {
+    "1 Year": 1,
+    "2 Year": 2,
+    "3 Year": 3,
     "4 Year": 4,
     "5 Year": 5,
     "6 Year": 6,
@@ -523,17 +526,14 @@ def _cohort_filter(options: list[str]) -> tuple[list[str], str]:
         return [], SQL_COMPILE_ALL_TIME_LABEL
 
     mode = st.sidebar.radio(
-        "Cohort selection",
-        options=["All semesters", "Single semester", "Semester group"],
+        "Cohort semesters",
+        options=["All semesters", "Choose semesters"],
         index=0,
     )
     if mode == "All semesters":
         return options, SQL_COMPILE_ALL_TIME_LABEL
-    if mode == "Single semester":
-        selected = st.sidebar.selectbox("New-member semester", options=options, index=len(options) - 1)
-        return [selected], str(selected)
 
-    selected = st.sidebar.multiselect("New-member semesters", options=options, default=options)
+    selected = st.sidebar.multiselect("Joined semesters", options=options, default=options)
     if not selected:
         return [], "No Semesters"
     if len(selected) == len(options):
@@ -596,7 +596,7 @@ def _pg_chart_controls() -> tuple[str, list[int], str]:
     milestone_label = st.sidebar.selectbox(
         "Milestone",
         options=list(PG_MILESTONE_OPTIONS),
-        index=2,
+        index=5,
     )
     return chart_breakdown, [PG_MILESTONE_OPTIONS[milestone_label]], milestone_label
 
@@ -644,7 +644,7 @@ def _render_rate_charts(
         title = f"Persistence and Graduation by Chapter Joined"
         xaxis_title = "Chapter joined"
     else:
-        title = "4/5/6 Year Outcome Rates"
+        title = "1-6 Year Outcome Rates"
         xaxis_title = "Milestone"
     subtitle = (
         f"{selected_label} | {chapter_label} chapters | {chart_milestone_label} | "
@@ -1072,8 +1072,8 @@ def main() -> None:
     selected_chapters = _selected_chapters(base_outcomes)
     chapter_label = "ALL"
     chart_breakdown = PG_CHART_BREAKDOWN_OVERALL
-    chart_milestone_offsets = [4, 5, 6]
-    chart_milestone_label = "4 Year, 5 Year, 6 Year"
+    chart_milestone_offsets = [1, 2, 3, 4, 5, 6]
+    chart_milestone_label = "1 Year, 2 Year, 3 Year, 4 Year, 5 Year, 6 Year"
     if section == "Persistence & Graduation":
         selected_chapters, chapter_label = _chapter_filter(selected_chapters)
         chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
