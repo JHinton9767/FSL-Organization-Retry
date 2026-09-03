@@ -56,6 +56,30 @@ def test_dashboard_rate_table_uses_resolved_denominator() -> None:
     assert row["Known Exit Rate"] == 1 / 3
 
 
+def test_dashboard_rate_table_counts_inactive_suspended_as_known_exit() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2025",
+                "Student ID": "A01234567",
+                "Final Outcome Bucket": "Inactive/Suspended",
+                "Needs Manual Form Review": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2025",
+                "Student ID": "A01234568",
+                "Final Outcome Bucket": "Suspended",
+                "Needs Manual Form Review": "No",
+            },
+        ]
+    )
+
+    row = build_dashboard_rate_table(outcomes).iloc[0]
+
+    assert row["Known Non-Graduate Exits"] == 2
+    assert row["Known Exit Rate"] == 1
+
+
 def test_dashboard_manual_entry_template_round_trips_to_manual_rows() -> None:
     review = pd.DataFrame(
         [

@@ -9,12 +9,22 @@ from src.sqlCompile_cohort import (
     ZERO_MEMBER_PERIOD_COLUMNS,
     build_new_member_cohort_report,
     build_new_member_cohort_tables,
+    normalize_status_code,
+    outcome_bucket,
     write_report_csvs,
 )
 
 
 def _inventory(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ROSTER_INVENTORY_COLUMNS)
+
+
+def test_inactive_suspended_status_variants_share_one_outcome_bucket() -> None:
+    statuses = ["I", "Inactive", "S", "Suspended", "I/S", "I / S", "Inactive/Suspended"]
+
+    buckets = {outcome_bucket(normalize_status_code(status), needs_manual_review=False) for status in statuses}
+
+    assert buckets == {"Inactive/Suspended"}
 
 
 def test_new_member_cohort_flags_last_active_rows_for_manual_review() -> None:

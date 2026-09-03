@@ -53,6 +53,7 @@ REPORT_TABLES = {
 KNOWN_NON_GRADUATE_EXIT_BUCKETS = {
     "Dropped/Inactive",
     "Early Alumni",
+    "Inactive/Suspended",
     "Resigned",
     "Revoked",
     "Suspended",
@@ -118,9 +119,9 @@ def normalize_status_code(value: object) -> str:
         return "T"
     if compact in {"CK", "KICKED", "CHAPTERKICKED", "CHAPTERKICKEDOFF", "ORGANIZATIONKICKED"}:
         return CHAPTER_KICKED_STATUS_CODE
-    if compact in {"S", "SUSPEND", "SUSPENDED"}:
+    if compact in {"S", "SUSPEND", "SUSPENDED", "I", "INACTIVE", "IS", "INACTIVESUSPEND", "INACTIVESUSPENDED"}:
         return "S"
-    if compact in {"D", "DROP", "DROPPED", "I", "INACTIVE", "REMOVE", "REMOVED"}:
+    if compact in {"D", "DROP", "DROPPED", "REMOVE", "REMOVED"}:
         return "D"
     if compact in {"AL", "ALUMNI", "EARLYALUMNI", "EARLYALUM"}:
         return "AL"
@@ -146,8 +147,8 @@ def outcome_bucket(status_code: str, needs_manual_review: bool) -> str:
         return "Resigned"
     if status_code == "RV":
         return "Revoked"
-    if status_code == "S":
-        return "Suspended"
+    if status_code in {"S", "I", "I/S"}:
+        return "Inactive/Suspended"
     if status_code == "T":
         return "Transfer"
     if status_code == "AL":

@@ -124,7 +124,9 @@ MANUAL_CHECKER_COLUMNS = [MANUAL_CHECKER_SELECT_COLUMN, *LAST_KNOWN_STATUS_COLUM
 KNOWN_NON_GRADUATE_BUCKETS = {
     "Chapter Kicked",
     "Dropped/Inactive",
+    "Dropped/Resigned",
     "Early Alumni",
+    "Inactive/Suspended",
     "Resigned",
     "Revoked",
     "Suspended",

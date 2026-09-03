@@ -218,7 +218,7 @@ def normalize_status(bucket_value: object, raw_value: object = "") -> str:
         return "Early Alumni"
     if compact in {"G", "GRAD", "GRADUATED"}:
         return "Graduated"
-    if compact in {"I", "INACTIVE", "S", "SUSPENDED", "INACTIVESUSPENDED"}:
+    if compact in {"I", "INACTIVE", "S", "SUSPEND", "SUSPENDED", "IS", "INACTIVESUSPEND", "INACTIVESUSPENDED"}:
         return "Inactive/Suspended"
     if compact in {"RS", "RESIGNED", "DROPPED", "DROPOUT", "DROPPEDRESIGNED"}:
         return "Dropped/Resigned"

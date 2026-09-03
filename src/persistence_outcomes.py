@@ -40,13 +40,14 @@ _ACTIVE_STATUSES = {
 def persistence_outcome_from_status(value: object) -> str:
     text = str(value or "").strip()
     upper = text.upper()
+    compact = "".join(character for character in upper if character.isalnum())
     if not upper:
         return "Unknown"
     if upper in _ACTIVE_STATUSES or ("STILL ACTIVE" in upper and "CURRENTLY ACTIVE" in upper):
         return "Active"
     if upper in {"AL", "ALUMNI", "EARLY ALUMNI"} or "EARLY ALUM" in upper:
         return "Early Alumni"
-    if upper in {"I", "INACTIVE", "S", "SUSPENDED", "INACTIVE/SUSPENDED"}:
+    if compact in {"I", "INACTIVE", "S", "SUSPEND", "SUSPENDED", "IS", "INACTIVESUSPEND", "INACTIVESUSPENDED"}:
         return "Inactive/Suspended"
     if upper in {"RS", "RESIGNED"} or "RESIGN" in upper:
         return "Dropped/Resigned"

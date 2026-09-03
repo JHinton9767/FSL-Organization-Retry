@@ -23,6 +23,9 @@ def test_manual_outcome_labels_match_persistence_buckets() -> None:
     ]
     assert persistence_outcome_from_status("Inactive") == "Inactive/Suspended"
     assert persistence_outcome_from_status("Suspended") == "Inactive/Suspended"
+    assert persistence_outcome_from_status("I/S") == "Inactive/Suspended"
+    assert persistence_outcome_from_status("I / S") == "Inactive/Suspended"
+    assert persistence_outcome_from_status("Inactive / Suspended") == "Inactive/Suspended"
     assert persistence_outcome_from_status("Dropped") == "Dropped/Resigned"
     assert persistence_outcome_from_status("Resigned") == "Dropped/Resigned"
     assert persistence_outcome_from_status("CK") == "Chapter Kicked"
