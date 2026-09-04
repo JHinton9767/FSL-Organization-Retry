@@ -10,6 +10,7 @@ from src.sqlCompile_dashboard import (
     build_manual_checker_queue,
     build_manual_entry_template,
     build_outcome_distribution,
+    build_pg_aligned_manual_checker_template,
     build_sql_compile_milestone_dashboard,
     odd_record_editor_to_manual_rows,
 )
@@ -276,6 +277,77 @@ def test_dashboard_milestones_use_eligibility_by_year_and_carry_forward_terminal
     assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Share"].iloc[0] == 1 / 2
     assert chart.loc[chart["Outcome"].eq("Graduated") & chart["Milestone Sort"].eq(6), "Future Students"].iloc[0] == 1
     assert chart.loc[chart["Outcome"].eq("Future") & chart["Milestone Sort"].eq(6)].empty
+
+
+def test_manual_checker_last_outcome_can_mirror_pg_milestone_bucket() -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Fall 2021", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Fall 2020", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2020", "Student ID": "A2", "Semester": "Spring 2024", "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2025", "Student ID": "A3", "Semester": "Fall 2025", "Status Code": "N", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+            {"Cohort Semester": "Fall 2025", "Student ID": "A3", "Semester": "Spring 2026", "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+        ]
+    )
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Last Known Semester": "Fall 2021",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A2",
+                "Last Known Semester": "Spring 2024",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "G",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2025",
+                "Cohort Chapter": "Beta",
+                "Student ID": "A3",
+                "Last Known Semester": "Spring 2026",
+                "Last Known Chapter": "Beta",
+                "Last Known Status": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+        ]
+    )
+
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        outcomes,
+        selected_semesters=["Fall 2020", "Fall 2025"],
+        selection_label="2 Semesters",
+        chart_milestone_offsets=[6],
+    )
+    aligned = build_pg_aligned_manual_checker_template(
+        outcomes,
+        dashboard["detail_frame"],
+        milestone_offset=6,
+    )
+    chart = dashboard["chart_frame"]
+
+    assert chart.loc[chart["Outcome"].eq("Unknown") & chart["Milestone Sort"].eq(6), "Count"].iloc[0] == 1
+    assert aligned["Last Known Outcome Bucket"].value_counts().to_dict() == {
+        "Unknown": 1,
+        "Graduated": 1,
+        "Future": 1,
+    }
 
 
 def test_dashboard_milestones_marks_unmeasured_recent_cohorts_as_future() -> None:

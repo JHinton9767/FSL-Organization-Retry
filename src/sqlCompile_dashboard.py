@@ -90,6 +90,15 @@ MILESTONE_CHART_TABLE_COLUMNS = [
     "Future Students",
     "Cohort Students",
 ]
+MILESTONE_DETAIL_COLUMNS = [
+    "Cohort Semester",
+    "Cohort Chapter",
+    "Student ID",
+    "Milestone",
+    "Milestone Sort",
+    "Milestone Status",
+    "P&G Outcome Bucket",
+]
 ODD_RECORD_COLUMNS = [
     "Cohort Semester",
     "Cohort Chapter",
@@ -317,7 +326,7 @@ def build_sql_compile_milestone_dashboard(
         "chart_frame": pd.DataFrame(columns=MILESTONE_CHART_COLUMNS),
         "table_frame": pd.DataFrame(columns=MILESTONE_TABLE_COLUMNS),
         "chart_table_frame": pd.DataFrame(columns=MILESTONE_CHART_TABLE_COLUMNS),
-        "detail_frame": pd.DataFrame(),
+        "detail_frame": pd.DataFrame(columns=MILESTONE_DETAIL_COLUMNS),
         "meta": {
             "students": 0,
             "cohort_term": selection_label,
@@ -381,6 +390,7 @@ def build_sql_compile_milestone_dashboard(
 
     chart_rows: list[dict[str, object]] = []
     chart_table_rows: list[dict[str, object]] = []
+    detail_rows: list[dict[str, object]] = []
     table_rows: list[dict[str, object]] = []
     last_milestone = ""
 
@@ -392,9 +402,21 @@ def build_sql_compile_milestone_dashboard(
         future_students = cohort_students.loc[~measurable_mask].copy()
         counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
         chart_groups: dict[str, dict[str, object]] = {}
+        milestone_name = _milestone_name(offset)
         for _, student in future_students.iterrows():
             chart_group = _chart_group_state(chart_groups, student, offset, chart_breakdown)
             chart_group["future"] = int(chart_group["future"]) + 1
+            detail_rows.append(
+                {
+                    "Cohort Semester": student["Cohort Semester"],
+                    "Cohort Chapter": student.get("Cohort Chapter", ""),
+                    "Student ID": student["Student ID"],
+                    "Milestone": milestone_name,
+                    "Milestone Sort": offset,
+                    "Milestone Status": FUTURE_MILESTONE_BUCKET,
+                    "P&G Outcome Bucket": FUTURE_MILESTONE_BUCKET,
+                }
+            )
         for _, student in measured.iterrows():
             chart_group = _chart_group_state(chart_groups, student, offset, chart_breakdown)
             chart_group["eligible"] = int(chart_group["eligible"]) + 1
@@ -416,10 +438,20 @@ def build_sql_compile_milestone_dashboard(
             chart_counts = chart_group["counts"]
             if isinstance(chart_counts, dict):
                 chart_counts[outcome] = int(chart_counts.get(outcome, 0)) + 1
+            detail_rows.append(
+                {
+                    "Cohort Semester": student["Cohort Semester"],
+                    "Cohort Chapter": student.get("Cohort Chapter", ""),
+                    "Student ID": student["Student ID"],
+                    "Milestone": milestone_name,
+                    "Milestone Sort": offset,
+                    "Milestone Status": "Measured",
+                    "P&G Outcome Bucket": outcome,
+                }
+            )
 
         denominator = int(len(measured))
         future_count = int(len(future_students))
-        milestone_name = _milestone_name(offset)
         if denominator:
             last_milestone = milestone_name
         milestone_status = _milestone_status(denominator, future_count)
@@ -510,11 +542,12 @@ def build_sql_compile_milestone_dashboard(
     chart_frame = pd.DataFrame(chart_rows, columns=MILESTONE_CHART_COLUMNS)
     table_frame = pd.DataFrame(table_rows, columns=MILESTONE_TABLE_COLUMNS)
     chart_table_frame = pd.DataFrame(chart_table_rows, columns=MILESTONE_CHART_TABLE_COLUMNS)
+    detail_frame = pd.DataFrame(detail_rows, columns=MILESTONE_DETAIL_COLUMNS)
     return {
         "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
         "table_frame": table_frame.reset_index(drop=True),
         "chart_table_frame": chart_table_frame.reset_index(drop=True),
-        "detail_frame": pd.DataFrame(),
+        "detail_frame": detail_frame.reset_index(drop=True),
         "meta": {
             "students": int(len(cohort_students)),
             "cohort_term": selection_label,
@@ -605,6 +638,52 @@ def build_last_known_status_template(outcomes: pd.DataFrame) -> pd.DataFrame:
         }
     )
     return result.loc[:, LAST_KNOWN_STATUS_COLUMNS]
+
+
+def build_pg_aligned_manual_checker_template(
+    outcomes: pd.DataFrame,
+    milestone_detail: pd.DataFrame,
+    *,
+    milestone_offset: Optional[int] = None,
+) -> pd.DataFrame:
+    template = build_last_known_status_template(outcomes)
+    if template.empty:
+        return template
+
+    detail = _ensure_missing_columns(milestone_detail, MILESTONE_DETAIL_COLUMNS)
+    if detail.empty:
+        return template.iloc[0:0].copy()
+
+    detail["_milestone_sort"] = pd.to_numeric(detail["Milestone Sort"], errors="coerce")
+    if milestone_offset is None:
+        sorts = detail["_milestone_sort"].dropna()
+        if sorts.empty:
+            return template.iloc[0:0].copy()
+        milestone_offset = int(sorts.max())
+
+    detail = detail.loc[detail["_milestone_sort"].eq(int(milestone_offset))].copy()
+    if detail.empty:
+        return template.iloc[0:0].copy()
+
+    for column in ["Cohort Semester", "Student ID", "P&G Outcome Bucket"]:
+        detail[column] = detail[column].fillna("").astype(str).str.strip()
+    detail = (
+        detail.loc[detail["Cohort Semester"].ne("") & detail["Student ID"].ne("")]
+        .drop_duplicates(subset=["Cohort Semester", "Student ID"], keep="last")
+        .loc[:, ["Cohort Semester", "Student ID", "P&G Outcome Bucket"]]
+    )
+    if detail.empty:
+        return template.iloc[0:0].copy()
+
+    merged = template.merge(
+        detail,
+        on=["Cohort Semester", "Student ID"],
+        how="inner",
+        validate="one_to_one",
+    )
+    pg_bucket = merged["P&G Outcome Bucket"].fillna("").astype(str).str.strip()
+    merged["Last Known Outcome Bucket"] = pg_bucket.where(pg_bucket.ne(""), merged["Last Known Outcome Bucket"])
+    return merged.loc[:, LAST_KNOWN_STATUS_COLUMNS].reset_index(drop=True)
 
 
 def build_manual_checker_queue(source: pd.DataFrame) -> pd.DataFrame:

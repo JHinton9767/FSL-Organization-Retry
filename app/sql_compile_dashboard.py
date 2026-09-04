@@ -28,6 +28,7 @@ from src.sqlCompile_dashboard import (
     PG_CHART_BREAKDOWN_SEMESTER,
     SQL_COMPILE_ALL_TIME_LABEL,
     build_manual_checker_queue,
+    build_pg_aligned_manual_checker_template,
     build_sql_compile_milestone_dashboard,
     load_dashboard_tables,
     odd_record_editor_to_manual_rows,
@@ -696,7 +697,13 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: Path, manual_rows: pd.DataFrame) -> None:
+def _render_manual_checker(
+    checker_template: pd.DataFrame,
+    manual_status_file: Path,
+    manual_rows: pd.DataFrame,
+    *,
+    outcome_filter_label: str = "Last outcome",
+) -> None:
     st.subheader("Manual Checker")
     st.caption("Review all selected students by last-known status. Filter by P&G bucket, fill verified corrections, and save completed decisions to the manual status CSV.")
 
@@ -722,7 +729,7 @@ def _render_manual_checker(checker_template: pd.DataFrame, manual_status_file: P
     with filter_cols[3]:
         last_semester_filter = st.multiselect("Last seen", options=_unique_nonempty_options(queue, "Last Known Semester"), key="sql_compile_manual_checker_last_seen_filter")
     with filter_cols[4]:
-        outcome_filter = st.multiselect("Last outcome", options=_manual_checker_outcome_options(queue), key="sql_compile_manual_checker_outcome_filter")
+        outcome_filter = st.multiselect(outcome_filter_label, options=_manual_checker_outcome_options(queue), key="sql_compile_manual_checker_outcome_filter")
 
     detail_filter_cols = st.columns([1, 1, 2])
     with detail_filter_cols[0]:
@@ -1074,10 +1081,11 @@ def main() -> None:
     chart_breakdown = PG_CHART_BREAKDOWN_OVERALL
     chart_milestone_offsets = [1, 2, 3, 4, 5, 6]
     chart_milestone_label = "1 Year, 2 Year, 3 Year, 4 Year, 5 Year, 6 Year"
-    if section == "Persistence & Graduation":
+    uses_pg_controls = section in {"Persistence & Graduation", "Manual Checker"}
+    if uses_pg_controls:
         selected_chapters, chapter_label = _chapter_filter(selected_chapters)
         chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
-    outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if section == "Persistence & Graduation" else base_outcomes
+    outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if uses_pg_controls else base_outcomes
 
     if st.sidebar.button("Write Report Files", use_container_width=True):
         try:
@@ -1108,7 +1116,8 @@ def main() -> None:
     with kpis[3]:
         st.metric("Chapter view", chapter_label)
 
-    if section == "Persistence & Graduation":
+    milestone_dashboard: dict[str, object] | None = None
+    if uses_pg_controls:
         milestone_dashboard = _session_cached_milestone_dashboard(
             all_tables.timeline,
             all_tables.outcomes,
@@ -1120,6 +1129,10 @@ def main() -> None:
             database_path=database_path,
             manual_status_file=manual_status_file,
         )
+
+    if section == "Persistence & Graduation":
+        if milestone_dashboard is None:
+            return
         _render_rate_charts(
             milestone_dashboard,
             selected_label,
@@ -1136,10 +1149,19 @@ def main() -> None:
 
     elif section == "Manual Checker":
         checker_template = all_tables.manual_checker_template.loc[all_tables.manual_checker_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_checker_template.empty else all_tables.manual_checker_template.iloc[0:0].copy()
+        checker_template = _filter_by_chapters(checker_template, selected_chapters)
+        checker_milestone_offset = max([int(offset) for offset in chart_milestone_offsets] or [6])
+        if milestone_dashboard is not None:
+            checker_template = build_pg_aligned_manual_checker_template(
+                checker_template,
+                milestone_dashboard.get("detail_frame", pd.DataFrame()),
+                milestone_offset=checker_milestone_offset,
+            )
         _render_manual_checker(
             checker_template.loc[:, LAST_KNOWN_STATUS_COLUMNS] if not checker_template.empty else checker_template,
             manual_status_file,
             all_tables.manual_rows,
+            outcome_filter_label=f"Last outcome ({checker_milestone_offset} Year P&G)",
         )
 
     else:
