@@ -204,17 +204,17 @@ def persistence_milestone_chart(
         template=PLOTLY_TEMPLATE,
         barmode="stack",
         bargap=0.18,
-        height=610,
+        height=660,
         title={
             "text": title + (f"<br><sup>{subtitle}</sup>" if subtitle else ""),
             "x": 0.01,
             "xanchor": "left",
             "font": {"color": "#17213A", "size": 18},
         },
-        legend={"orientation": "h", "yanchor": "top", "y": -0.08, "xanchor": "left", "x": 0.0},
+        legend={"orientation": "h", "yanchor": "top", "y": -0.22, "xanchor": "left", "x": 0.0},
         xaxis_title=xaxis_title,
         yaxis_title=yaxis_title,
-        margin={"l": 24, "r": 24, "t": 90, "b": 120},
+        margin={"l": 24, "r": 24, "t": 90, "b": 190},
         uniformtext={"minsize": 8, "mode": "hide"},
     )
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
