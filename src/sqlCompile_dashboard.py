@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import pandas as pd
 
@@ -660,7 +661,6 @@ def build_sql_compile_milestone_dashboard(
         for column in ["Cohort Semester", "Student ID", "Semester", "Status", "Status Code", "Source", "Included In Outcome"]:
             timeline_work[column] = timeline_work[column].fillna("").astype(str).str.strip()
         timeline_work["_term_sort"] = timeline_work["Semester"].map(_cohort_sort)
-        timeline_work["_status_code"] = timeline_work.apply(_timeline_status_code, axis=1)
         timeline_work["_manual_priority"] = timeline_work["Source"].eq("manual_status").astype(int)
         if "Included In Outcome" in timeline_work.columns:
             timeline_work = timeline_work.loc[timeline_work["Included In Outcome"].eq("Yes")].copy()
@@ -669,25 +669,40 @@ def build_sql_compile_milestone_dashboard(
     if latest_sort == 0:
         latest_sort = max([_cohort_sort(value) for value in cohort_students["Cohort Semester"].tolist()] or [0])
 
-    timeline_groups: dict[tuple[str, str], pd.DataFrame] = {}
-    if not timeline_work.empty:
+    timeline_groups: dict[tuple[str, str], tuple[list[int], list[str]]] = {}
+    if not timeline_work.empty and selected_offsets:
+        # Keep the full-data horizon above, but prepare only the selected students' histories.
+        key_columns = ["Cohort Semester", "Student ID"]
+        selected_keys = pd.MultiIndex.from_frame(cohort_students[key_columns])
+        timeline_keys = pd.MultiIndex.from_frame(timeline_work[key_columns])
+        timeline_work = timeline_work.loc[timeline_keys.isin(selected_keys)].copy()
+        timeline_work["_status_code"] = timeline_work.apply(_timeline_status_code, axis=1)
+        timeline_work["_outcome"] = timeline_work["_status_code"].map(persistence_outcome_from_status)
         sort_columns = ["_term_sort", "_manual_priority", "Semester"]
         for key, group in timeline_work.groupby(["Cohort Semester", "Student ID"], sort=False):
-            timeline_groups[(str(key[0]).strip(), str(key[1]).strip())] = group.sort_values(
-                sort_columns,
-                na_position="last",
+            ordered = group.sort_values(sort_columns, na_position="last")
+            outcomes_at_rows = ordered["_outcome"]
+            # Carry the most recent resolved outcome through later active/unknown rows.
+            resolved = outcomes_at_rows.where(~outcomes_at_rows.isin(["Active", "Unknown"])).ffill()
+            timeline_groups[(str(key[0]).strip(), str(key[1]).strip())] = (
+                ordered["_term_sort"].tolist(),
+                resolved.fillna(outcomes_at_rows).tolist(),
             )
 
     chart_rows: list[dict[str, object]] = []
-    chart_table_rows: list[dict[str, object]] = []
     detail_rows: list[dict[str, object]] = []
     table_rows: list[dict[str, object]] = []
     last_milestone = ""
 
     for offset in selected_offsets:
-        measurable_mask = cohort_students["Cohort Semester"].map(
-            lambda value: _milestone_is_measurable(value, offset, latest_sort)
-        )
+        target_sorts = {
+            semester: _milestone_target_sort(semester, offset)
+            for semester in cohort_students["Cohort Semester"].unique()
+        }
+        measurable_mask = cohort_students["Cohort Semester"].map({
+            semester: offset in {0, 1} or (target < 999999 and latest_sort >= target)
+            for semester, target in target_sorts.items()
+        })
         measured = cohort_students.loc[measurable_mask].copy()
         future_students = cohort_students.loc[~measurable_mask].copy()
         counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
@@ -710,7 +725,7 @@ def build_sql_compile_milestone_dashboard(
         for _, student in measured.iterrows():
             chart_group = _chart_group_state(chart_groups, student, offset, chart_breakdown)
             chart_group["eligible"] = int(chart_group["eligible"]) + 1
-            target_sort = _milestone_target_sort(student["Cohort Semester"], offset)
+            target_sort = target_sorts[student["Cohort Semester"]]
             if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
             if str(student.get("Last Known Outcome Bucket", "") or "").strip() == DUPLICATE_NAME_MISMATCH_OUTCOME:
@@ -719,13 +734,10 @@ def build_sql_compile_milestone_dashboard(
                 outcome = _checkpoint_outcome(
                     timeline_groups.get(
                         (str(student["Cohort Semester"]).strip(), str(student["Student ID"]).strip()),
-                        pd.DataFrame(),
+                        ([], []),
                     ),
-                    student["Cohort Semester"],
-                    student["Student ID"],
                     offset,
                     target_sort=target_sort,
-                    prefiltered=True,
                 )
             counts[outcome] = int(counts.get(outcome, 0)) + 1
             chart_counts = chart_group["counts"]
@@ -818,23 +830,11 @@ def build_sql_compile_milestone_dashboard(
                     "Label": label,
                 }
                 chart_rows.append(row)
-                chart_table_rows.append(
-                    {
-                        "Chart Group": chart_group_label,
-                        "Milestone": milestone_name,
-                        "Milestone Status": row["Milestone Status"],
-                        "Outcome": outcome,
-                        "Share": share,
-                        "Count": count,
-                        "Eligible Students": eligible_students,
-                        "Future Students": future_students_count,
-                        "Cohort Students": cohort_total,
-                    }
-                )
 
     chart_frame = pd.DataFrame(chart_rows, columns=MILESTONE_CHART_COLUMNS)
     table_frame = pd.DataFrame(table_rows, columns=MILESTONE_TABLE_COLUMNS)
-    chart_table_frame = pd.DataFrame(chart_table_rows, columns=MILESTONE_CHART_TABLE_COLUMNS)
+    chart_table_frame = chart_frame.drop(columns="Milestone").rename(columns={"Milestone Name": "Milestone"})
+    chart_table_frame = chart_table_frame.loc[:, MILESTONE_CHART_TABLE_COLUMNS]
     detail_frame = pd.DataFrame(detail_rows, columns=MILESTONE_DETAIL_COLUMNS)
     return {
         "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
@@ -1190,18 +1190,9 @@ def _milestone_target_sort(cohort_semester: object, offset: int) -> int:
 
     season_text = str(season or "").strip().lower()
     year_value = int(year)
-    if season_text == "fall":
-        return sort_term_code(f"{year_value + int(offset)}SP")
-    if season_text == "spring":
+    if season_text in {"fall", "spring"}:
         return sort_term_code(f"{year_value + int(offset)}SP")
     return cohort_sort + (int(offset) * 10)
-
-
-def _milestone_is_measurable(cohort_semester: object, offset: int, latest_sort: int) -> bool:
-    if offset in {0, 1}:
-        return True
-    target_sort = _milestone_target_sort(cohort_semester, offset)
-    return target_sort < 999999 and latest_sort >= target_sort
 
 
 def _milestone_status(measured_students: int, future_students: int) -> str:
@@ -1213,46 +1204,21 @@ def _milestone_status(measured_students: int, future_students: int) -> str:
 
 
 def _checkpoint_outcome(
-    timeline: pd.DataFrame,
-    cohort_semester: str,
-    student_id: str,
+    history: tuple[list[int], list[str]],
     offset: int,
     *,
-    target_sort: int | None = None,
-    prefiltered: bool = False,
+    target_sort: int,
 ) -> str:
-    if timeline.empty:
+    row_sorts, outcomes = history
+    position = bisect_right(row_sorts, target_sort) - 1
+    if position < 0:
         return "Active" if offset == 0 else "Unknown"
 
-    checkpoint_sort = target_sort if target_sort is not None else _milestone_target_sort(cohort_semester, offset)
-    if prefiltered:
-        student_rows = timeline.copy()
-    else:
-        student_rows = timeline.loc[
-            timeline["Cohort Semester"].eq(str(cohort_semester).strip())
-            & timeline["Student ID"].eq(str(student_id).strip())
-        ].copy()
-    if student_rows.empty:
-        return "Active" if offset == 0 else "Unknown"
-
-    if not prefiltered:
-        student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
-    row_sorts = pd.to_numeric(student_rows["_term_sort"], errors="coerce")
-    before_or_at = student_rows.loc[row_sorts.le(checkpoint_sort)].copy()
-    if before_or_at.empty:
-        return "Active" if offset == 0 else "Unknown"
-
-    before_or_at["_outcome"] = before_or_at["_status_code"].map(persistence_outcome_from_status)
-    terminal = before_or_at.loc[~before_or_at["_outcome"].isin(["Active", "Unknown"])].copy()
-    if not terminal.empty:
-        return str(terminal.iloc[-1]["_outcome"])
-
-    latest_outcome = str(before_or_at.iloc[-1].get("_outcome", "") or "Unknown").strip() or "Unknown"
+    latest_outcome = outcomes[position]
     if offset == 0 or latest_outcome != "Active":
         return latest_outcome
 
-    at_or_after = student_rows.loc[row_sorts.ge(checkpoint_sort)]
-    return "Active" if not at_or_after.empty else "Unknown"
+    return "Active" if row_sorts[-1] >= target_sort else "Unknown"
 
 
 def _ensure_missing_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:

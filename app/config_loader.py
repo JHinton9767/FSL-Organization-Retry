@@ -17,7 +17,6 @@ from app.models import MetricDefinition
 from app.status_framework import DEFAULT_OUTCOME_RESOLUTION_CONFIG
 from src.chapter_status_events import (
     CHAPTER_STATUS_EVENT_COLUMNS,
-    CHAPTER_STATUS_EVENT_INTERNAL_COLUMNS,
     empty_chapter_status_events as _empty_chapter_status_events,
     normalize_chapter_status_events,
 )
@@ -756,13 +755,6 @@ def _load_registry(path: Optional[Path], default_path: Path, normalizer: Callabl
     return normalizer(_read_optional_tabular(candidate))
 
 
-def _save_registry(frame: pd.DataFrame, path: Optional[Path], default_path: Path, normalizer: Callable[[Optional[pd.DataFrame]], pd.DataFrame]) -> Path:
-    candidate = path or default_path
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    normalizer(frame).to_csv(candidate, index=False)
-    return candidate
-
-
 def _append_registry(
     frame: pd.DataFrame,
     path: Optional[Path],
@@ -792,10 +784,6 @@ def load_graduation_evidence(path: Optional[Path] = None) -> pd.DataFrame:
     return _load_registry(path, GRADUATION_EVIDENCE_PATH, normalize_graduation_evidence)
 
 
-def save_graduation_evidence(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
-    return _save_registry(frame, path, GRADUATION_EVIDENCE_PATH, normalize_graduation_evidence)
-
-
 def append_graduation_evidence(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
     return _append_registry(
         frame,
@@ -810,10 +798,6 @@ def load_outcome_overrides(path: Optional[Path] = None) -> pd.DataFrame:
     return _load_registry(path, OUTCOME_OVERRIDES_PATH, normalize_outcome_overrides)
 
 
-def save_outcome_overrides(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
-    return _save_registry(frame, path, OUTCOME_OVERRIDES_PATH, normalize_outcome_overrides)
-
-
 def append_outcome_overrides(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
     return _append_registry(
         frame,
@@ -826,10 +810,6 @@ def append_outcome_overrides(frame: pd.DataFrame, path: Optional[Path] = None) -
 
 def load_roster_exclusions(path: Optional[Path] = None) -> pd.DataFrame:
     return _load_registry(path, ROSTER_EXCLUSIONS_PATH, normalize_roster_exclusions)
-
-
-def save_roster_exclusions(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
-    return _save_registry(frame, path, ROSTER_EXCLUSIONS_PATH, normalize_roster_exclusions)
 
 
 def append_roster_exclusions(frame: pd.DataFrame, path: Optional[Path] = None) -> Dict[str, object]:
@@ -1118,14 +1098,6 @@ def append_manual_roster_corrections(frame: pd.DataFrame, path: Optional[Path] =
     return {"path": candidate, "incoming_rows": incoming_count, "appended_rows": len(to_append), "skipped_rows": skipped}
 
 
-def load_manual_review_queue(path: Optional[Path] = None) -> pd.DataFrame:
-    candidate = path or MANUAL_REVIEW_QUEUE_PATH
-    frame = _read_manual_review_file(candidate)
-    if frame.empty:
-        return empty_manual_review_queue()
-    return _normalize_manual_review_frame(frame)
-
-
 def _read_manual_review_file(path: Path) -> pd.DataFrame:
     if not path.exists():
         return empty_manual_review_queue()
@@ -1154,14 +1126,6 @@ def _normalize_manual_review_frame(frame: Optional[pd.DataFrame]) -> pd.DataFram
         cleaned[column] = cleaned[column].str.strip()
     cleaned = cleaned.loc[cleaned["review_key"].ne("")].drop_duplicates(subset=["review_key"], keep="last").reset_index(drop=True)
     return dedupe_manual_review_queue_by_cohort(cleaned)
-
-
-def save_manual_review_queue(frame: pd.DataFrame, path: Optional[Path] = None) -> Path:
-    candidate = path or MANUAL_REVIEW_QUEUE_PATH
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    cleaned = _normalize_manual_review_frame(frame)
-    cleaned.to_csv(candidate, index=False)
-    return candidate
 
 
 def load_manual_review_actions(path: Optional[Path] = None) -> pd.DataFrame:

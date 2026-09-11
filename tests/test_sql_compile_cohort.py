@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.sqlCompile import ROSTER_INVENTORY_COLUMNS, write_sqlite
 from src.sqlCompile_cohort import (
@@ -11,12 +12,77 @@ from src.sqlCompile_cohort import (
     build_new_member_cohort_tables,
     normalize_status_code,
     outcome_bucket,
+    read_roster_inventory_table,
+    read_sql_compile_table,
+    read_student_name_observations_table,
+    read_student_name_table,
     write_report_csvs,
+    write_report_tables,
 )
 
 
 def _inventory(rows: list[dict[str, object]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ROSTER_INVENTORY_COLUMNS)
+
+
+def test_sqlite_connections_close_after_success_missing_tables_and_errors(tmp_path, monkeypatch) -> None:
+    connections = []
+    original_connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        connection = original_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    compiled = pd.DataFrame([
+        {"Semester": "Fall 2020", "Chapter": "Alpha", "Student ID": "A1", "Status": "N"},
+    ])
+    database = write_sqlite(compiled, tmp_path / "roster.sqlite")
+    pd.testing.assert_frame_equal(read_sql_compile_table(database), compiled)
+    assert read_roster_inventory_table(database).empty
+    assert read_student_name_table(database).empty
+    assert read_student_name_observations_table(database, table_name="missing_observations").empty
+    write_report_tables(database, compiled, compiled, compiled, compiled)
+    with pytest.raises(pd.errors.DatabaseError):
+        read_sql_compile_table(database, table_name="missing_table")
+    with pytest.raises(KeyError):
+        write_sqlite(pd.DataFrame([{"unexpected": "value"}]), tmp_path / "invalid.sqlite")
+
+    assert connections
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            connection.execute("SELECT 1")
+
+
+def test_all_cohorts_match_individual_reports_with_shared_chapter_gaps() -> None:
+    compiled = pd.DataFrame([
+        {"Semester": "Fall 2020", "Chapter": "Delta Tau Delta", "Student ID": "A1", "Status": "N"},
+        {"Semester": "Fall 2021", "Chapter": "Delta Tau Delta", "Student ID": "A1", "Status": "A"},
+        {"Semester": "Fall 2021", "Chapter": "Delta Tau Delta", "Student ID": "A2", "Status": "N"},
+        {"Semester": "Fall 2022", "Chapter": "Beta Theta Pi", "Student ID": "B1", "Status": "N"},
+        {"Semester": "Fall 2023", "Chapter": "Delta Tau Delta", "Student ID": "A3", "Status": "N"},
+    ])
+    inventory = _inventory([
+        {"Semester": row["Semester"], "Chapter": row["Chapter"], "Roster Pass Priority": 3}
+        for row in compiled.to_dict("records")
+    ])
+    manual = pd.DataFrame([{
+        "Cohort Semester": "Fall 2021", "Cohort Chapter": "Delta Tau Delta", "Student ID": "A2",
+        "Semester": "Fall 2022", "Chapter": "Delta Tau Delta", "Status": "G", "Notes": "Verified form",
+    }], columns=MANUAL_STATUS_COLUMNS)
+    options = {"roster_inventory": inventory, "zero_member_periods": pd.DataFrame(columns=ZERO_MEMBER_PERIOD_COLUMNS)}
+
+    combined = build_new_member_cohort_tables(compiled, manual, all_cohorts=True, **options)
+
+    for semester in combined[4]:
+        individual = build_new_member_cohort_tables(compiled, manual, cohort_semesters=[semester], **options)
+        for all_rows, single_rows in zip(combined[:3], individual[:3]):
+            selected = all_rows.loc[all_rows["Cohort Semester"].eq(semester)].reset_index(drop=True)
+            pd.testing.assert_frame_equal(selected, single_rows.reset_index(drop=True))
+    outcomes = combined[1].set_index("Student ID")
+    assert outcomes.loc["A1", "Final Outcome Bucket"] == "Chapter Kicked"
+    assert outcomes.loc["A2", "Final Outcome Bucket"] == "Graduated"
 
 
 def test_inactive_suspended_status_variants_share_one_outcome_bucket() -> None:

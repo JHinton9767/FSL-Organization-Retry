@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -549,7 +550,7 @@ def write_sqlite(
     column_identifiers = [_quote_identifier(column) for column in OUTPUT_COLUMNS]
     placeholders = ", ".join(["?"] * len(OUTPUT_COLUMNS))
 
-    with sqlite3.connect(destination) as connection:
+    with closing(sqlite3.connect(destination)) as connection, connection:
         connection.execute(f"DROP TABLE IF EXISTS {table_identifier}")
         connection.execute(
             f"CREATE TABLE {table_identifier} ("
@@ -618,8 +619,6 @@ def write_sqlite(
             f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{student_name_observation_table_name}_student')} "
             f"ON {observations_identifier} ({_quote_identifier('Student ID')})"
         )
-        connection.commit()
-
     return destination
 
 

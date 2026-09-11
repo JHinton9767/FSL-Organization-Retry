@@ -5,7 +5,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
 import pandas as pd
 from openpyxl import Workbook
@@ -109,14 +109,6 @@ def _term_label_from_code(term_code: str) -> str:
     return {"WI": "Winter", "SP": "Spring", "SU": "Summer", "FA": "Fall"}[season] + f" {year}"
 
 
-def _compact_term(term_code: str) -> str:
-    match = re.fullmatch(r"(19\d{2}|20\d{2})(WI|SP|SU|FA)", str(term_code or "").upper())
-    if not match:
-        return ""
-    year, season = match.groups()
-    return {"WI": "W", "SP": "S", "SU": "U", "FA": "F"}[season] + year[-2:]
-
-
 def _previous_term_code(term_code: str) -> str:
     match = re.fullmatch(r"(19\d{2}|20\d{2})(WI|SP|SU|FA)", str(term_code or "").upper())
     if not match:
@@ -144,10 +136,6 @@ def _latest_term_code(frame: pd.DataFrame) -> str:
 
 def _numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce")
-
-
-def _yes_mask(series: pd.Series) -> pd.Series:
-    return series.fillna("").astype(str).str.strip().str.lower().isin({"yes", "true", "1", "y"})
 
 
 def _term_frame(frame: pd.DataFrame, term_code: str) -> pd.DataFrame:

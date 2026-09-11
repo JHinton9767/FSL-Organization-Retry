@@ -386,10 +386,6 @@ def normalize_chapter_name(value: str) -> str:
     return normalized or "Unknown"
 
 
-def is_order_of_omega(chapter: str) -> bool:
-    return normalize_chapter_name(chapter) == "Order of Omega"
-
-
 def is_excluded_chapter(chapter: str) -> bool:
     normalized = normalize_chapter_name(chapter)
     return normalized in {"Order of Omega", "Epsilon Lambda Alpha"}
@@ -655,10 +651,6 @@ def get_cell(row: Tuple[object, ...], index: Optional[int]) -> str:
     if index is None or index >= len(row):
         return ""
     return clean_text(row[index])
-
-
-def row_is_empty(values: Iterable[str]) -> bool:
-    return all(not clean_text(value) for value in values)
 
 
 def pdf_table_rows(path: Path) -> Tuple[List[Tuple[str, List[Tuple[object, ...]]]], List[str]]:

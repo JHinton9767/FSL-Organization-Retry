@@ -1,10 +1,22 @@
 # FSL Academic Analytics
 
-This repository now centers on a single canonical analytics architecture for Fraternity / Sorority Life academic reporting.
+This repository supports Fraternity / Sorority Life academic reporting. The current persistence/graduation dashboard and Manual Checker use sqlCompile. The older canonical analytics app and focused graduation pipeline remain available as separate workflows.
+
+## Current sqlCompile workflow
+
+Run from the project root in PowerShell:
+
+```powershell
+$env:UV_CACHE_DIR=".uv-cache"
+uv run --with-requirements requirements.txt python sqlCompile.py --all-semesters
+uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py --server.port 8502
+```
+
+The dashboard reads `output/sqlCompile/sqlCompile.sqlite` and persistent manual-review files under `config/`. It supports selected join semesters/chapters, years 1-6, Future milestones, and duplicate-name review. See [the sqlCompile workflow](docs/sqlCompile_cohort_workflow.md) for correction/import commands and [the architecture](docs/architecture.md) for the boundaries between workflows.
 
 ## Canonical source of truth
 
-All future analytics are expected to flow from the canonical authoritative tables:
+The older canonical analytics app reads these authoritative tables:
 
 - `roster_term`
 - `academic_term`
@@ -30,8 +42,9 @@ Use `--archive-run` only when you intentionally want an additional timestamped
 
 ## Focused graduation-rate workflow
 
-When the only goal is conservative 4-year, 5-year, and 6-year graduation rates,
-use the focused graduation pipeline instead of the broader analytics app:
+The separate focused graduation pipeline also produces 4-year, 5-year, and
+6-year graduation reports. It has its own evidence rules and correction ledger;
+its outputs are not inputs to the sqlCompile dashboard:
 
 ```powershell
 uv run --with-requirements requirements.txt python src\graduation_pipeline\run_pipeline.py --config config\local_paths.yaml

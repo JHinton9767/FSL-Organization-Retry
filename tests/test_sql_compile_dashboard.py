@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from src.sqlCompile_dashboard import (
     DUPLICATE_NAME_MISMATCH_OUTCOME,
@@ -22,6 +23,57 @@ from src.sqlCompile_dashboard import (
     read_duplicate_name_recheck_rows,
     read_duplicate_name_resolution_rows,
 )
+
+
+@pytest.mark.parametrize(
+    ("observations", "expected"),
+    [
+        ([], ["Unknown"] * 6),
+        (
+            [("Fall 2020", "N", "sqlCompile"), ("Spring 2021", "RS", "sqlCompile"),
+             ("Spring 2022", "A", "sqlCompile"), ("Spring 2024", "G", "manual_status"),
+             ("Spring 2025", "Unknown", "sqlCompile")],
+            ["Dropped/Resigned"] * 3 + ["Graduated"] * 3,
+        ),
+        (
+            [("Fall 2020", "N", "sqlCompile"), ("Spring 2021", "G", "sqlCompile"),
+             ("Spring 2021", "RV", "manual_status")],
+            ["Revoked"] * 6,
+        ),
+        (
+            [("Fall 2020", "N", "sqlCompile"), ("Fall 2021", "A", "sqlCompile")],
+            ["Active"] + ["Unknown"] * 5,
+        ),
+        (
+            [("Fall 2020", "N", "sqlCompile"), ("Spring 2021", "Unknown", "sqlCompile"),
+             ("Spring 2022", "A", "sqlCompile"), ("Spring 2026", "A", "sqlCompile")],
+            ["Unknown"] + ["Active"] * 5,
+        ),
+    ],
+)
+def test_checkpoint_history_preserves_outcome_changes_and_manual_priority(observations, expected) -> None:
+    timeline = pd.DataFrame(
+        [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": semester,
+             "Status Code": status, "Source": source, "Included In Outcome": "Yes"}
+            for semester, status, source in observations
+        ] + [
+            {"Cohort Semester": "Fall 2020", "Student ID": "A1", "Semester": "Spring 2026",
+             "Status Code": "G", "Source": "manual_status", "Included In Outcome": "No"},
+            {"Cohort Semester": "Fall 2025", "Student ID": "B1", "Semester": "Spring 2026",
+             "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"},
+        ]
+    ).sample(frac=1, random_state=17)
+    outcomes = pd.DataFrame([{"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha", "Student ID": "A1"}])
+    original_timeline = timeline.copy(deep=True)
+    original_outcomes = outcomes.copy(deep=True)
+
+    dashboard = build_sql_compile_milestone_dashboard(timeline, outcomes, ["Fall 2020"])
+
+    assert dashboard["detail_frame"]["P&G Outcome Bucket"].tolist() == expected
+    assert dashboard["table_frame"]["Measured Students"].tolist() == [1] * 6
+    pd.testing.assert_frame_equal(timeline, original_timeline)
+    pd.testing.assert_frame_equal(outcomes, original_outcomes)
 
 
 def test_dashboard_rate_table_uses_resolved_denominator() -> None:

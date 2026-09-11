@@ -4,10 +4,8 @@ import argparse
 import hashlib
 import inspect
 import json
-import math
 import re
 import shutil
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
@@ -508,20 +506,6 @@ def ensure_text_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataF
             result[column] = ""
         result[column] = result[column].astype("object").where(result[column].notna(), "")
     return result
-
-
-def combine_reference_frames(
-    frames: Sequence[pd.DataFrame],
-    columns: Sequence[str],
-    dedupe_subset: Optional[Sequence[str]] = None,
-) -> pd.DataFrame:
-    usable = [frame for frame in frames if frame is not None and not frame.empty]
-    if not usable:
-        return pd.DataFrame(columns=list(columns))
-    combined = pd.concat([ensure_columns(frame, columns) for frame in usable], ignore_index=True)
-    if dedupe_subset:
-        combined = combined.drop_duplicates(subset=list(dedupe_subset), keep="first")
-    return ensure_columns(combined, columns)
 
 
 def read_cached_frame(path: Path) -> pd.DataFrame:
@@ -1201,28 +1185,6 @@ def detect_membership_reference_header_row(frame: pd.DataFrame) -> Tuple[Optiona
     return best_row, best_terms, best_chapter_col
 
 
-def parse_membership_count_value(value: object) -> Optional[int]:
-    text = clean_text(value)
-    if not text:
-        return None
-    if text.endswith(".0"):
-        text = text[:-2]
-    if re.fullmatch(r"-?\d+", text):
-        return int(text)
-    return None
-
-
-def parse_reference_gpa_value(value: object) -> Optional[float]:
-    text = clean_text(value)
-    if not text:
-        return None
-    text = text.replace("%", "").strip()
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
 def parse_reference_numeric_entry(value: object) -> Optional[Tuple[float, bool]]:
     text = clean_text(value)
     if not text or text in {"-", "--"}:
@@ -1425,278 +1387,6 @@ def build_reference_subset(
     if value_column in subset.columns:
         subset[value_column] = coerce_numeric(subset[value_column])
     return subset.drop_duplicates(subset=list(dedupe_subset), keep="first").reset_index(drop=True)
-
-
-def load_membership_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    reference_rows: List[dict] = []
-    issue_rows: List[dict] = []
-    columns = [
-        "chapter",
-        "chapter_raw",
-        "term_code",
-        "term_label",
-        "membership_count_reference",
-        "source_file",
-        "source_sheet",
-    ]
-    empty_reference = pd.DataFrame(columns=columns)
-    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    if not root.exists():
-        return empty_reference, empty_issues
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
-            continue
-        try:
-            workbook = pd.read_excel(path, sheet_name=None, header=None)
-        except Exception as exc:
-            issue_rows.append(
-                {
-                    "exception_type": "membership_reference_unreadable",
-                    "source_file": str(path),
-                    "student_id": "",
-                    "term_code": "",
-                    "details": clean_text(exc),
-                }
-            )
-            continue
-
-        for sheet_name, raw_sheet in workbook.items():
-            frame = raw_sheet.fillna("")
-            header_row, term_columns, chapter_col = detect_membership_reference_header_row(frame)
-            if header_row is None or not term_columns:
-                continue
-            for row_idx in range(header_row + 1, len(frame.index)):
-                chapter_raw = clean_text(frame.iat[row_idx, chapter_col]) if chapter_col < len(frame.columns) else ""
-                if not chapter_raw:
-                    continue
-                if re.search(r"(average|total|council)", chapter_raw, re.IGNORECASE):
-                    continue
-                chapter = normalize_chapter_name(chapter_raw)
-                if not chapter:
-                    issue_rows.append(
-                        {
-                            "exception_type": "membership_reference_unmapped_chapter",
-                            "source_file": str(path),
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"{sheet_name}: {chapter_raw}",
-                        }
-                    )
-                    continue
-                found_numeric_count = False
-                for col_idx, (term_code, term_label) in term_columns.items():
-                    count_value = parse_membership_count_value(frame.iat[row_idx, col_idx])
-                    if count_value is None:
-                        continue
-                    found_numeric_count = True
-                    reference_rows.append(
-                        {
-                            "chapter": chapter,
-                            "chapter_raw": chapter_raw,
-                            "term_code": term_code,
-                            "term_label": term_label,
-                            "membership_count_reference": count_value,
-                            "source_file": str(path),
-                            "source_sheet": clean_text(sheet_name),
-                        }
-                    )
-                if not found_numeric_count:
-                    issue_rows.append(
-                        {
-                            "exception_type": "membership_reference_row_without_counts",
-                            "source_file": str(path),
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"{sheet_name}: {chapter_raw}",
-                        }
-                    )
-
-    reference = pd.DataFrame(reference_rows, columns=columns)
-    if not reference.empty:
-        reference = (
-            reference.sort_values(["chapter", "term_code", "source_file", "source_sheet"])
-            .drop_duplicates(subset=["chapter", "term_code"], keep="first")
-            .reset_index(drop=True)
-        )
-    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    return reference, issues
-
-
-def load_gpa_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    reference_rows: List[dict] = []
-    issue_rows: List[dict] = []
-    columns = [
-        "chapter",
-        "chapter_raw",
-        "term_code",
-        "term_label",
-        "chapter_average_gpa_reference",
-        "source_file",
-        "source_sheet",
-    ]
-    empty_reference = pd.DataFrame(columns=columns)
-    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    if not root.exists():
-        return empty_reference, empty_issues
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
-            continue
-        try:
-            workbook = pd.read_excel(path, sheet_name=None, header=None)
-        except Exception as exc:
-            issue_rows.append(
-                {
-                    "exception_type": "gpa_reference_unreadable",
-                    "source_file": str(path),
-                    "student_id": "",
-                    "term_code": "",
-                    "details": clean_text(exc),
-                }
-            )
-            continue
-
-        for sheet_name, raw_sheet in workbook.items():
-            frame = raw_sheet.fillna("")
-            header_row, term_columns, chapter_col = detect_membership_reference_header_row(frame)
-            if header_row is None or not term_columns:
-                continue
-            for row_idx in range(header_row + 1, len(frame.index)):
-                chapter_raw = clean_text(frame.iat[row_idx, chapter_col]) if chapter_col < len(frame.columns) else ""
-                if not chapter_raw:
-                    continue
-                if re.search(r"(average|total|council)", chapter_raw, re.IGNORECASE):
-                    continue
-                chapter = normalize_chapter_name(chapter_raw)
-                if not chapter:
-                    issue_rows.append(
-                        {
-                            "exception_type": "gpa_reference_unmapped_chapter",
-                            "source_file": str(path),
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"{sheet_name}: {chapter_raw}",
-                        }
-                    )
-                    continue
-                found_numeric_gpa = False
-                for col_idx, (term_code, term_label) in term_columns.items():
-                    gpa_value = parse_reference_gpa_value(frame.iat[row_idx, col_idx])
-                    if gpa_value is None:
-                        continue
-                    found_numeric_gpa = True
-                    reference_rows.append(
-                        {
-                            "chapter": chapter,
-                            "chapter_raw": chapter_raw,
-                            "term_code": term_code,
-                            "term_label": term_label,
-                            "chapter_average_gpa_reference": gpa_value,
-                            "source_file": str(path),
-                            "source_sheet": clean_text(sheet_name),
-                        }
-                    )
-                if not found_numeric_gpa:
-                    issue_rows.append(
-                        {
-                            "exception_type": "gpa_reference_row_without_values",
-                            "source_file": str(path),
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"{sheet_name}: {chapter_raw}",
-                        }
-                    )
-
-    reference = pd.DataFrame(reference_rows, columns=columns)
-    if not reference.empty:
-        reference = (
-            reference.sort_values(["chapter", "term_code", "source_file", "source_sheet"])
-            .drop_duplicates(subset=["chapter", "term_code"], keep="first")
-            .reset_index(drop=True)
-        )
-    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    return reference, issues
-
-
-def load_gpa_benchmark_reference_table(root: Path) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    reference_rows: List[dict] = []
-    issue_rows: List[dict] = []
-    columns = [
-        "benchmark_label",
-        "term_code",
-        "term_label",
-        "benchmark_average_gpa_reference",
-        "source_file",
-        "source_sheet",
-    ]
-    empty_reference = pd.DataFrame(columns=columns)
-    empty_issues = pd.DataFrame(columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    if not root.exists():
-        return empty_reference, empty_issues
-
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"}:
-            continue
-        try:
-            workbook = pd.read_excel(path, sheet_name=None, header=None)
-        except Exception as exc:
-            issue_rows.append(
-                {
-                    "exception_type": "gpa_benchmark_unreadable",
-                    "source_file": str(path),
-                    "student_id": "",
-                    "term_code": "",
-                    "details": clean_text(exc),
-                }
-            )
-            continue
-
-        for sheet_name, raw_sheet in workbook.items():
-            frame = raw_sheet.fillna("")
-            header_row, term_columns, label_col = detect_membership_reference_header_row(frame)
-            if header_row is None or not term_columns:
-                continue
-            for row_idx in range(header_row + 1, len(frame.index)):
-                benchmark_label = clean_text(frame.iat[row_idx, label_col]) if label_col < len(frame.columns) else ""
-                if not benchmark_label:
-                    continue
-                found_numeric_gpa = False
-                for col_idx, (term_code, term_label) in term_columns.items():
-                    gpa_value = parse_reference_gpa_value(frame.iat[row_idx, col_idx])
-                    if gpa_value is None:
-                        continue
-                    found_numeric_gpa = True
-                    reference_rows.append(
-                        {
-                            "benchmark_label": benchmark_label,
-                            "term_code": term_code,
-                            "term_label": term_label,
-                            "benchmark_average_gpa_reference": gpa_value,
-                            "source_file": str(path),
-                            "source_sheet": clean_text(sheet_name),
-                        }
-                    )
-                if not found_numeric_gpa:
-                    issue_rows.append(
-                        {
-                            "exception_type": "gpa_benchmark_row_without_values",
-                            "source_file": str(path),
-                            "student_id": "",
-                            "term_code": "",
-                            "details": f"{sheet_name}: {benchmark_label}",
-                        }
-                    )
-
-    reference = pd.DataFrame(reference_rows, columns=columns)
-    if not reference.empty:
-        reference = (
-            reference.sort_values(["benchmark_label", "term_code", "source_file", "source_sheet"])
-            .drop_duplicates(subset=["benchmark_label", "term_code"], keep="first")
-            .reset_index(drop=True)
-        )
-    issues = pd.DataFrame(issue_rows, columns=["exception_type", "source_file", "student_id", "term_code", "details"])
-    return reference, issues
 
 
 def build_membership_reference_validation(roster: pd.DataFrame, reference: pd.DataFrame) -> pd.DataFrame:
@@ -2441,11 +2131,6 @@ def secondary_organization_set(settings: Dict[str, object]) -> set[str]:
         if chapter and chapter != "Unknown":
             normalized.add(chapter)
     return normalized
-
-
-def is_secondary_organization(value: object, settings: Dict[str, object]) -> bool:
-    normalized = normalize_chapter_name(clean_text(value))
-    return bool(normalized) and normalized in secondary_organization_set(settings)
 
 
 def choose_preferred_roster_rows(roster: pd.DataFrame, settings: Dict[str, object]) -> pd.DataFrame:
@@ -3380,10 +3065,6 @@ def ensure_manual_roster_corrections_template(path: Path = MANUAL_ROSTER_CORRECT
 
 def _manual_truthy(value: object) -> bool:
     return clean_text(value).lower() in {"yes", "y", "true", "1", "remove", "delete", "exclude"}
-
-
-def _manual_falsey(value: object) -> bool:
-    return clean_text(value).lower() in {"no", "n", "false", "0"}
 
 
 def _manual_term_code(value: object) -> str:
@@ -5386,24 +5067,6 @@ def should_mark_roster_disappeared_unknown(
     if last_seen_sort is None:
         return False
     return int(last_seen_sort) < int(latest_roster_term_sort)
-
-
-def should_mark_chapter_kicked(
-    latest_outcome_bucket: str,
-    latest_chapter: str,
-    student_last_roster_sort: object,
-    chapter_status_events: pd.DataFrame,
-    latest_roster_term_sort: int,
-) -> bool:
-    if clean_text(latest_outcome_bucket) not in UNRESOLVED_OUTCOMES:
-        return False
-    return chapter_kicked_by_status_event(
-        chapter_status_events,
-        latest_chapter,
-        student_last_roster_sort,
-        latest_roster_term_sort,
-        latest_roster_term_sort,
-    )
 
 
 def build_student_summary(

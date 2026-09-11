@@ -60,23 +60,17 @@ cache/
 build/
 dist/
 Yearly/
-__pycache__/
 *.pkl
 *.parquet
 *.feather
 *.sqlite
 *.db
-*.pyc
 
 # Office temp/lock files
 ~$*
 *.tmp
 *.bak
 
-# Local machine config
-config/local_paths.yaml
-.env
- 
 # Ignore all raw inbox data
 data/inbox/
  

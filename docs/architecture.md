@@ -1,5 +1,20 @@
 # FSL Analytics App Architecture
 
+## Current sqlCompile baseline
+
+The primary persistence/graduation and Manual Checker workflow is:
+
+1. `sqlCompile.py` reads Excel rosters through `src/sqlCompile.py`, resolves same-semester statuses, and writes the four-column SQLite table plus roster/name inventory tables.
+2. `src/sqlCompile_cohort.py` builds cohort timelines with persisted manual statuses and chapter-disappearance events. Chapter events are computed once per report and reused across cohorts.
+3. `src/sqlCompile_dashboard.py` consolidates duplicate IDs, prepares checkpoint histories, and produces milestone chart/detail data. Checkpoints reuse each selected student's history; the available-data horizon still comes from the full timeline.
+4. `app/sql_compile_dashboard.py`, launched by `run_sql_compile_dashboard.py`, displays the chart and Manual Checker. Saved statuses are incorporated through the explicit dashboard refresh.
+
+Persistent inputs include `config/sqlCompile_manual_status.csv`, `config/sqlCompile_duplicate_name_resolutions.csv`, `config/sqlCompile_duplicate_name_recheck.csv`, and `config/sqlCompile_zero_member_periods.csv`. The legacy importer translates completed checks into the sqlCompile status ledger.
+
+The canonical workflow below remains supported for the older dashboard. Its canonical-only loading requirement does not apply to sqlCompile. The separately documented `src/graduation_pipeline/` command remains available and has its own output/evidence rules; do not substitute its rates or corrections into either dashboard implicitly.
+
+See [the cleanup audit](codebase_cleanup_audit.md) for remaining correctness risks and [the refactor plan](../REFACTOR_PLAN.md) for maintenance constraints.
+
 ## Goals
 
 - Center all analytics on one canonical source-of-truth bundle

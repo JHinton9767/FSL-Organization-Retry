@@ -217,12 +217,6 @@ def _session_cached_milestone_dashboard(
     return cache[key]
 
 
-def _format_percent(value: object) -> str:
-    if value is None or pd.isna(value):
-        return "n/a"
-    return f"{float(value):.1%}"
-
-
 def _unique_nonempty_options(frame: pd.DataFrame, column: str) -> list[str]:
     if frame.empty or column not in frame.columns:
         return []

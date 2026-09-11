@@ -158,13 +158,6 @@ def _bool_like_series(series: pd.Series) -> pd.Series:
     return pd.Series([_is_true(value) for value in series], index=series.index, dtype="boolean")
 
 
-def _non_blank_series(frame: pd.DataFrame, column: str) -> pd.Series:
-    if column not in frame.columns:
-        return pd.Series(False, index=frame.index, dtype="bool")
-    cleaned = frame[column].fillna("").astype(str).str.strip()
-    return cleaned.ne("") & ~cleaned.str.lower().isin({"nan", "none", "nat", "<na>"})
-
-
 def _explicit_graduation_text_mask(series: pd.Series) -> pd.Series:
     cleaned = series.fillna("").astype(str).str.upper()
     if cleaned.empty:

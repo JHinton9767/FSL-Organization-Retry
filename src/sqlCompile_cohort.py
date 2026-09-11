@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import re
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -236,7 +237,7 @@ def read_sql_compile_table(database_path: str | Path = DEFAULT_OUTPUT_PATH, tabl
         raise FileNotFoundError(f"SQL compile database not found: {database}")
 
     columns = ", ".join(_quote_identifier(column) for column in OUTPUT_COLUMNS)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         frame = pd.read_sql_query(f"SELECT {columns} FROM {_quote_identifier(table_name)}", connection)
     return _ensure_columns(frame, OUTPUT_COLUMNS)
 
@@ -249,7 +250,7 @@ def read_roster_inventory_table(
     if not database.exists():
         return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -268,7 +269,7 @@ def read_student_name_table(
     if not database.exists():
         return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -287,7 +288,7 @@ def read_student_name_observations_table(
     if not database.exists():
         return pd.DataFrame(columns=STUDENT_NAME_OBSERVATION_COLUMNS)
 
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -406,8 +407,7 @@ def _manual_rows_for_cohort(manual: pd.DataFrame, cohort_label: str, cohort_stud
 def _timeline_rows_for_cohort(
     compiled: pd.DataFrame,
     manual: pd.DataFrame,
-    roster_inventory: pd.DataFrame,
-    zero_member_periods: pd.DataFrame,
+    chapter_disappearance_events: Dict[str, List[dict]],
     cohort_label: str,
     cohort_source_rows: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -444,8 +444,7 @@ def _timeline_rows_for_cohort(
     chapter_disappearance_timeline = _chapter_disappearance_rows_for_cohort(
         base_timeline,
         manual_timeline,
-        roster_inventory,
-        zero_member_periods,
+        chapter_disappearance_events,
         cohort_students,
         cohort_sort,
     )
@@ -640,8 +639,7 @@ def _chapter_disappearance_events(
 def _chapter_disappearance_rows_for_cohort(
     base_timeline: pd.DataFrame,
     manual_timeline: pd.DataFrame,
-    roster_inventory: pd.DataFrame,
-    zero_member_periods: pd.DataFrame,
+    events: Dict[str, List[dict]],
     cohort_students: pd.DataFrame,
     cohort_sort: int,
 ) -> pd.DataFrame:
@@ -659,11 +657,7 @@ def _chapter_disappearance_rows_for_cohort(
         "_source",
         "_manual_priority",
     ]
-    if base_timeline.empty or roster_inventory.empty:
-        return pd.DataFrame(columns=common_columns)
-
-    events = _chapter_disappearance_events(roster_inventory, zero_member_periods)
-    if not events:
+    if base_timeline.empty or not events:
         return pd.DataFrame(columns=common_columns)
 
     manual_student_ids = set()
@@ -896,6 +890,7 @@ def build_new_member_cohort_tables(
         read_zero_member_periods() if zero_member_periods is None else zero_member_periods
     )
     selected_semesters = _selected_cohort_semesters(compiled, cohort_semesters, all_cohorts)
+    chapter_events = _chapter_disappearance_events(inventory, zero_member) if selected_semesters else {}
 
     timeline_frames: List[pd.DataFrame] = []
     outcome_frames: List[pd.DataFrame] = []
@@ -907,7 +902,7 @@ def build_new_member_cohort_tables(
         ].copy()
         if cohort_rows.empty:
             continue
-        timeline = _timeline_rows_for_cohort(compiled, manual, inventory, zero_member, cohort_label, cohort_rows)
+        timeline = _timeline_rows_for_cohort(compiled, manual, chapter_events, cohort_label, cohort_rows)
         outcomes = _build_outcomes_for_cohort(cohort_label, cohort_rows, timeline)
         review = _build_review_rows(outcomes)
         timeline_frames.append(timeline)
@@ -960,7 +955,7 @@ def write_report_tables(
     summary: pd.DataFrame,
 ) -> None:
     database = _resolve_path(database_path)
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         for frame, table_name in [
             (timeline, REPORT_TABLES["timeline"]),
             (outcomes, REPORT_TABLES["outcomes"]),
@@ -968,7 +963,6 @@ def write_report_tables(
             (summary, REPORT_TABLES["summary"]),
         ]:
             frame.to_sql(table_name, connection, if_exists="replace", index=False)
-        connection.commit()
 
 
 def write_report_csvs(

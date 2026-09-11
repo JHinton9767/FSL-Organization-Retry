@@ -1,65 +1,37 @@
 # Refactor Plan
 
-## Current target architecture
+## Supported workflows
 
-The project should now stay centered on two supported surfaces:
+- **Current baseline:** `sqlCompile.py`, `sqlCompileCohort.py`, and `run_sql_compile_dashboard.py`. These own the SQLite roster/cohort workflow, 1-6 year outcome chart, and Manual Checker.
+- **Older canonical app:** `run_canonical_pipeline.py` and `run_local_analytics_app.py`. Keep the canonical bundle, academic analytics, exports, and historical manual-correction workflow available.
+- **Focused graduation reports:** `src/graduation_pipeline/run_pipeline.py`. This documented command has its own evidence rules and correction ledger.
 
-1. `src/build_canonical_pipeline.py`
-   - Ingests rosters, grades, transcript text, graduation evidence, snapshots, reference data, and config.
-   - Produces the canonical CSV bundle and QA/audit outputs.
-   - Owns normalization, student matching, chapter assignment, current-active tagging, graduation evidence gating, cohorts, and metrics.
+Do not replace one workflow's outputs with another's without a separate migration and output comparison. The old "canonical-only" rule applies to the canonical app loader, not to sqlCompile.
 
-2. `app/`
-   - Loads only the canonical bundle through `app/data_loader.py`.
-   - Provides dashboards, rankings, audit tables, Advisor Help, Chapter Health, and export workbooks.
-   - Replaces the old standalone spreadsheet/report builders.
+## Maintenance rules
 
-## Files that should remain
+- Preserve explicit graduation evidence requirements. Disappearance alone is not graduation.
+- Preserve sqlCompile status precedence: non-A/N overrides A/N; N overrides A; equivalent-priority statuses use roster pass/version order.
+- Preserve unique-student cohort handling, manual name selections, selected-semester/chapter filters, and Future eligibility.
+- Preserve current checkpoint behavior: the most recent resolved outcome through a checkpoint carries forward; Unknown can change when later evidence becomes available.
+- Preserve all manual ledgers, pending-file imports, name recheck lists, and zero-member chapter exceptions.
+- Keep raw student files unchanged and out of Git.
+- Preserve existing command names, database schemas, output paths, and report formats.
+- Use shared domain logic where semantics are identical. Similar-looking status/term parsers are not interchangeable without parity tests.
+- Remove code only after checking imports, call sites, tests, documented commands, and indirect references.
+- Keep changes scoped. Large module splits require output parity, not just passing unit tests.
 
-- `run_canonical_pipeline.py`
-- `run_local_analytics_app.py`
-- `src/build_canonical_pipeline.py`
-- `src/build_master_roster.py` as roster parsing/helper utilities only
-- `src/shared_utils.py`
-- `app/*.py`
-- `config/*.json` and required config CSVs
-- `tests/*.py`
-- `data/inbox/**/.gitkeep` and source-folder documentation
+## Cleanup completed
 
-## Files intentionally removed
+- Removed unused legacy reference loaders superseded by the unified reference inventory.
+- Removed uncalled formatting, status, roster, and manual-save helpers plus unused imports/constants.
+- Reused chapter-disappearance events across cohort builds.
+- Prepared selected student checkpoint histories once instead of copying and reclassifying them for every milestone.
+- Derived chart-detail exports from the chart rows instead of assembling a duplicate dictionary.
+- Updated architecture documentation to recognize sqlCompile as the current baseline.
 
-The standalone workbook/report builders were removed because their review workflows now live in the app and app export workbook. The app and canonical pipeline are the supported path.
+## Next work
 
-`src/excel_utils.py` has also been removed because it was a legacy formatting helper module with no active imports in the app, pipeline, or tests.
+See [the audit](docs/codebase_cleanup_audit.md) for remaining identity, reporting, and fallback risks. Address those as explicit correctness changes with fixtures before changing stored outcomes or rate definitions.
 
-## Helper functions intentionally removed
-
-- `app/io_utils.py`: removed unused cache writing, boolean category, first-value, and unique-list helpers.
-- `src/shared_utils.py`: removed unused spreadsheet-era rate/text formatting helpers.
-- Preserved all helpers still used by the canonical pipeline, Streamlit app, tests, and config-driven workflows.
-
-## Operations that should happen once
-
-- Term normalization
-- Status taxonomy resolution
-- Graduation evidence gating
-- Current-active tagging from the most recent roster
-- Chapter mapping and chapter provenance resolution
-- Reference inventory parsing
-- Transcript text parsing
-- Metric table preparation
-
-## Outputs that must be preserved
-
-- Canonical CSV bundle under `output/canonical/run_*`
-- `output/canonical/latest`
-- Canonical QA/audit CSVs
-- Streamlit app dashboards and downloadable `analytics_export.xlsx`
-
-## Future cleanup checklist
-
-- Split the large canonical pipeline into focused modules only when tests can prove output parity.
-- Keep app loading canonical-only.
-- Do not reintroduce standalone report builders unless there is a required output the app cannot replace.
-- Keep graduation explicit-evidence-only and current-active latest-roster-only.
-- Add table-level parity fixtures before any deeper rewrite of `src/build_canonical_pipeline.py` or `app/main.py`.
+Extract focused modules from the large canonical pipeline and dashboard only when the extracted behavior can be compared against representative existing outputs. Keep legacy import support until the manual-review migration has a verified completion path.

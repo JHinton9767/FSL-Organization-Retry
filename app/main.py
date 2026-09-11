@@ -142,8 +142,6 @@ FILTER_LIST_STATE_KEYS = [
     "observed_terms",
 ]
 MANUAL_STAGED_CORRECTIONS_KEY = "manual_staged_corrections"
-MANUAL_SAVE_MODE_KEY = "manual_correction_save_mode"
-MANUAL_STAGE_MODE_LABEL = "Stage changes (fast batch)"
 MANUAL_IMMEDIATE_MODE_LABEL = "Save immediately"
 MANUAL_QUEUE_REVIEW_OUTCOMES = {"Unknown"}
 MANUAL_QUEUE_HARD_ISSUES = {
@@ -1800,23 +1798,6 @@ def _commit_staged_manual_corrections(assigned_to: str = "") -> dict[str, object
     created_transcripts = ensure_manual_transcript_files(staged)
     _mark_manual_queue_corrected(staged, assigned_to=assigned_to, note="Manual correction committed from staged changes.")
     _clear_staged_manual_corrections()
-    return {"saved_path": saved_path, "saved_rows": append_result["appended_rows"], "created_transcripts": created_transcripts}
-
-
-def _manual_save_mode_is_staged() -> bool:
-    return st.session_state.get(MANUAL_SAVE_MODE_KEY, MANUAL_STAGE_MODE_LABEL) == MANUAL_STAGE_MODE_LABEL
-
-
-def _save_manual_correction_batch(corrections: pd.DataFrame, assigned_to: str = "", note: str = "") -> dict[str, object]:
-    cleaned = normalize_manual_roster_corrections(corrections)
-    if cleaned.empty:
-        return {"saved_path": None, "saved_rows": 0, "created_transcripts": []}
-
-    append_result = append_manual_roster_corrections(cleaned)
-    saved_path = append_result["path"]
-    _append_manual_adjustments_from_corrections(cleaned, reviewer=assigned_to, reason=note or "Manual correction batch saved.")
-    created_transcripts = ensure_manual_transcript_files(cleaned)
-    _mark_manual_queue_corrected(cleaned, assigned_to=assigned_to, note=note)
     return {"saved_path": saved_path, "saved_rows": append_result["appended_rows"], "created_transcripts": created_transcripts}
 
 
