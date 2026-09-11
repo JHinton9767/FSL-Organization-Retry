@@ -3,11 +3,42 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from streamlit.web import cli as stcli
 
 from src.sqlCompile_host import host_urls, load_host_config
+
+
+def print_sharing_addresses(address: str, port: int) -> None:
+    office_links = []
+    local_links = []
+    has_public_address = False
+    for url in host_urls(address, port):
+        hostname = urlsplit(url).hostname or ""
+        try:
+            parsed_address = ip_address(hostname)
+            local_only = parsed_address.is_loopback
+            has_public_address = has_public_address or parsed_address.is_global
+        except ValueError:
+            local_only = hostname.lower() == "localhost"
+        (local_links if local_only else office_links).append(url)
+    for url in local_links:
+        print(f"THIS COMPUTER ONLY (do not send to coworkers): {url}")
+    if office_links:
+        print("OFFICE LINK CANDIDATES - test one from a coworker's computer:")
+        for url in office_links:
+            print(f"  {url}")
+        print("Coworkers need only a browser. Keep this host running and awake.")
+        print("If none opens remotely, ask IT to check the host's inbound TCP port and office network access.")
+        if has_public_address:
+            print("A listed IP address is publicly routable. Have IT restrict access to approved office computers before sharing student records.")
+    else:
+        print("No office link is available from this configuration.")
+        print('For office sharing, set address to "0.0.0.0" in config/sqlCompile_host.json and check the network connection.')
+    print("Shared-drive access alone does not guarantee browser access to this host.")
 
 
 def main() -> None:
@@ -46,8 +77,7 @@ def main() -> None:
         ]
         print("Shared dashboard: no sign-in. Everyone with network access can view and edit student records.")
         print("Use only on an approved, trusted network. Do not expose this port to the public internet.")
-        for url in host_urls(config.address, config.port):
-            print(f"Open: {url}")
+        print_sharing_addresses(config.address, config.port)
         for path in config.data_paths[1:]:
             if not path.exists():
                 print(f"Missing saved-data file: {path}. Copy existing decisions/exceptions before sharing.")

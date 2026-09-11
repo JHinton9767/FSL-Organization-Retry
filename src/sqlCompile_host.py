@@ -88,8 +88,14 @@ def host_urls(address: str, port: int) -> list[str]:
     if address != "0.0.0.0":
         hostname = f"[{address}]" if ":" in address else address
         return [f"http://{hostname}:{port}"]
+    hostname = socket.gethostname()
     try:
-        addresses = sorted({item[4][0] for item in socket.getaddrinfo(socket.gethostname(), port, socket.AF_INET)})
+        addresses = sorted({item[4][0] for item in socket.getaddrinfo(hostname, port, socket.AF_INET)})
     except OSError:
         addresses = []
-    return [f"http://localhost:{port}", *[f"http://{ip}:{port}" for ip in addresses if not ip.startswith("127.")]]
+    names = [hostname] if hostname.lower() != "localhost" else []
+    return [
+        f"http://localhost:{port}",
+        *[f"http://{name}:{port}" for name in names],
+        *[f"http://{ip}:{port}" for ip in addresses if not ip.startswith("127.")],
+    ]

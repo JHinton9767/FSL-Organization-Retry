@@ -5,6 +5,47 @@ They do not install Python, SQL software, VS Code, or this repository. Everyone
 uses the host's database and saved corrections; there is no copy to merge later.
 The existing local dashboard command still works.
 
+## Get the office link
+
+The previous `127.0.0.1:8504` preview was a sample-data test on the development
+computer. Neither `127.0.0.1` nor `localhost` is an address to send to coworkers:
+on their computers it points back to their own computers.
+
+1. On the office computer holding the complete database and saved corrections,
+   update the code and run `Start_Shared_SQL_Dashboard.bat`. Only this computer
+   runs the launcher. Keep its window open and the computer awake.
+2. If `config/sqlCompile_host.json` exists, its `address` must be `0.0.0.0` or the
+   host's office-network address, not `127.0.0.1` or `localhost`. Without a host
+   configuration file, `0.0.0.0` and port 8502 are the defaults.
+3. Find the launcher's **OFFICE LINK CANDIDATES**. Send one of those addresses to
+   a coworker to test. The computer-name address can be easier to bookmark;
+   the numeric address is an alternative if name lookup does not work. Multiple
+   numeric addresses may include VPN or virtual adapters. These are candidate
+   links, not proof of access from a different computer.
+4. Your coworker opens the link in a browser. They get their own filter selections
+   and the full dashboard, backed by the same host-owned data and saved decisions.
+   They do not receive a separate database copy or run their own compiler.
+5. If it opens on the host but not on the other computer, have IT allow inbound
+   TCP access to the configured port from the approved office computers. Access
+   to a shared drive does not prove that office computers can connect to one
+   another on this port. Do not disable the firewall.
+
+For a permanent office link, IT can run the same app on an always-on internal
+server and provide a stable hostname. Your workstation then need not stay on.
+
+### Where the shared SSD fits
+
+A shared SSD stores files; simply placing Python code there does not turn it
+into a website. If a server already provides that shared drive, ask IT whether
+that server can also run the dashboard as a separate service. Do not assume a
+storage-only device can run it.
+
+Use the shared SSD for approved backups, source-roster storage, or a shortcut
+to the tested office URL. Coworkers can open that shortcut instead of installing
+anything. Keep the running code and live SQLite/correction files local to the
+chosen host for the simplest setup. Avoid having every computer launch its own
+copy against files on the shared SSD.
+
 ## Before sharing student records
 
 There is deliberately **no sign-in and no read-only role**. Anyone who can reach
@@ -46,6 +87,21 @@ weeks of manual decisions. Copy the `_backups` folders as well when available.
 Check the cohort totals and saved manual rows against the old host before others
 start work. An absent correction ledger means an empty ledger, not an automatic
 import from the old dashboard.
+
+If only `sqlCompile_zero_member_periods.csv` is missing, the tracked example
+contains the established Alpha Kappa Alpha exception for Spring through Fall
+2018. On the host, after updating the code, restore it only when the actual
+configuration file is absent:
+
+```powershell
+if (-not (Test-Path config\sqlCompile_zero_member_periods.csv)) {
+    Copy-Item config\sqlCompile_zero_member_periods.example.csv config\sqlCompile_zero_member_periods.csv
+}
+```
+
+Restart or refresh the dashboard after restoring it. Preserve an existing file
+instead of replacing it with the example; it may contain additional decisions.
+For a custom host path, restore the file at that configured location instead.
 
 Keep the live SQLite database and correction ledgers on the host's local disk,
 outside OneDrive, Dropbox, or a shared/network drive. Copies of backups can go

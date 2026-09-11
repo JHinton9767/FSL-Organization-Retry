@@ -9,7 +9,7 @@ from src.path_config import ROOT
 from src.sqlCompile import OUTPUT_COLUMNS, write_sqlite
 from src.sqlCompile_cohort import append_manual_status_rows, read_manual_status_rows
 from src.sqlCompile_dashboard import read_duplicate_name_recheck_rows, read_duplicate_name_resolution_rows
-from src.sqlCompile_host import data_revision, load_host_config
+from src.sqlCompile_host import data_revision, host_urls, load_host_config
 
 
 @pytest.fixture
@@ -86,6 +86,57 @@ def test_local_launcher_preserves_existing_arguments(monkeypatch):
         launcher.main()
     assert captured[-2:] == ["--server.port", "8503"]
     assert "--server.address" not in captured
+
+
+def test_office_addresses_include_computer_name_and_unique_ipv4s(monkeypatch):
+    from src import sqlCompile_host as host
+
+    monkeypatch.setattr(host.socket, "gethostname", lambda: "OFFICE-PC")
+    monkeypatch.setattr(host.socket, "getaddrinfo", lambda *args: [
+        (None, None, None, None, (ip, 8502))
+        for ip in ["192.0.2.10", "127.0.0.1", "192.0.2.10"]
+    ])
+    assert host_urls("0.0.0.0", 8502) == [
+        "http://localhost:8502", "http://OFFICE-PC:8502", "http://192.0.2.10:8502",
+    ]
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "127.1.2.3", "::1", "localhost"])
+def test_local_addresses_are_not_advertised_for_coworkers(address, capsys):
+    from run_sql_compile_dashboard import print_sharing_addresses
+
+    print_sharing_addresses(address, 8504)
+    output = capsys.readouterr().out
+    assert "THIS COMPUTER ONLY" in output
+    assert "OFFICE LINK CANDIDATES" not in output
+    assert "No office link" in output
+
+
+def test_office_link_is_labeled_as_needing_a_remote_test(capsys):
+    from run_sql_compile_dashboard import print_sharing_addresses
+
+    print_sharing_addresses("192.0.2.10", 8510)
+    output = capsys.readouterr().out
+    assert "OFFICE LINK CANDIDATES" in output
+    assert "http://192.0.2.10:8510" in output
+    assert "THIS COMPUTER ONLY" not in output
+    assert "test one from a coworker's computer" in output
+
+
+def test_public_address_requires_network_restriction_warning(capsys):
+    from run_sql_compile_dashboard import print_sharing_addresses
+
+    print_sharing_addresses("8.8.8.8", 8502)
+    assert "publicly routable" in capsys.readouterr().out
+
+
+def test_transferred_zero_member_template_preserves_established_exception():
+    from src.sqlCompile_cohort import read_zero_member_periods
+
+    periods = read_zero_member_periods(ROOT / "config" / "sqlCompile_zero_member_periods.example.csv")
+    assert periods[["Chapter", "Start Semester", "End Semester"]].to_dict("records") == [
+        {"Chapter": "Alpha Kappa Alpha", "Start Semester": "Spring 2018", "End Semester": "Fall 2018"},
+    ]
 
 
 def test_shared_ui_keeps_snapshot_until_refresh(shared_host):
