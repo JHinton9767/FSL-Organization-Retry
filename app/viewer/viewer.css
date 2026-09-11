@@ -1,0 +1,55 @@
+:root {font-family: "Segoe UI", Arial, sans-serif; color: #17213a; background: white; font-size: 16px; letter-spacing: 0; accent-color: #5c1418;}
+* {box-sizing: border-box;}
+body {margin: 0;}
+[hidden] {display: none !important;}
+.page-header {display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 28px 32px 24px; border-bottom: 4px solid #c69026;}
+.eyebrow {font-size: 13px; color: #555b65;}
+h1 {font-size: 28px; line-height: 1.2; margin: 5px 0 0; color: #5c1418; overflow-wrap: anywhere;}
+.publication {display: grid; gap: 4px; font-size: 12px; text-align: right; color: #555b65; flex-shrink: 0;}
+.publication strong {font-size: 13px; color: #17213a;}
+.workspace {display: grid; grid-template-columns: 264px minmax(0, 1fr);}
+.filters {background: #f5f6f8; border-right: 1px solid #dce0e6; padding: 20px;}
+.filters > summary {font-weight: 650; margin-bottom: 18px;}
+summary {cursor: pointer;}
+.filter-body {display: grid; gap: 18px;}
+fieldset {border: 0; padding: 0; margin: 0; min-width: 0;}
+legend, .field-label {font-size: 14px; font-weight: 650; margin-bottom: 8px;}
+.options {max-height: 206px; overflow-y: auto; scrollbar-gutter: stable;}
+.options label, .all-option {display: flex; align-items: flex-start; gap: 8px; padding: 5px 1px; font-size: 14px; line-height: 1.4; overflow-wrap: anywhere;}
+input[type="checkbox"] {flex: 0 0 16px; width: 16px; height: 16px; margin: 2px 0 0;}
+.all-option {font-weight: 600; border-bottom: 1px solid #dce0e6; margin-bottom: 4px; padding-bottom: 8px;}
+input[type="search"], select, button {font: inherit; font-size: 14px; border: 1px solid #b9c0cb; border-radius: 4px; background: white; color: #17213a; min-height: 36px;}
+input[type="search"], select {width: 100%; padding: 7px 9px;}
+input[type="search"] {margin-bottom: 7px;}
+button {padding: 6px 14px; cursor: pointer;}
+button:hover {background: #eaedf1;}
+:focus-visible {outline: 2px solid #0b6c94; outline-offset: 3px;}
+.year-options {display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; font-size: 14px;}
+.year-options label {display: flex; gap: 7px; align-items: center;}
+.field-label select {margin-top: 8px;}
+main {min-width: 0; padding: 26px 30px;}
+.metrics {display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; padding-bottom: 30px;}
+.metrics span {display: block; font-size: 13px; margin-bottom: 8px;}
+.metrics strong {display: block; font-size: 26px; line-height: 1.2; font-weight: 400; overflow-wrap: anywhere;}
+.chart-heading h2 {font-size: 18px; margin: 0 0 6px;}
+.chart-heading > span {font-size: 13px; color: #555b65; overflow-wrap: anywhere;}
+.chart-scroll {width: 100%; overflow-x: auto;}
+#chart {height: 660px; min-width: 540px;}
+#empty, #chart-error {padding: 28px 0;}
+#chart-error {color: #9f1d35;}
+#chart-data {border-top: 1px solid #dce0e6; margin-top: 12px; padding-top: 16px; font-size: 14px;}
+.table-scroll {max-height: 300px; overflow: auto; margin-top: 12px;}
+table {border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums;}
+th, td {padding: 9px; text-align: left; border-bottom: 1px solid #e4e7eb; white-space: nowrap;}
+th {position: sticky; top: 0; background: #f5f6f8;}
+@media (max-width: 760px) {
+  .page-header {padding: 20px; align-items: flex-start; flex-direction: column; gap: 14px;}
+  h1 {font-size: 24px;}
+  .publication {text-align: left;}
+  .workspace {grid-template-columns: minmax(0, 1fr);}
+  .filters {border-right: 0; border-bottom: 1px solid #dce0e6;}
+  .filter-body {grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;}
+  main {padding: 24px 16px;}
+  .metrics {gap: 14px;}
+  .metrics strong {font-size: 20px;}
+}

@@ -14,6 +14,16 @@ uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py 
 
 The dashboard reads `output/sqlCompile/sqlCompile.sqlite` and persistent manual-review files under `config/`. It supports selected join semesters/chapters, years 1-6, Future milestones, and duplicate-name review. See [the sqlCompile workflow](docs/sqlCompile_cohort_workflow.md) for correction/import commands and [the architecture](docs/architecture.md) for the boundaries between workflows.
 
+## Read-only office viewer
+
+When coworkers only need to view and filter rates, run
+`Publish_Read_Only_Dashboard.bat` on the computer with the complete data. Place
+the generated `output/sqlCompile/viewer/FSL_Dashboard.html` on approved shared
+storage. Coworkers open that one file in their browser: no installation,
+server, sign-in, or firewall change is needed. It includes semester/chapter
+filters and years 1-6, using aggregate counts without student IDs or names.
+Republish after data changes. See [the read-only viewer guide](docs/readonly_viewer_setup.md).
+
 ## Shared Dashboard
 
 For browser access from other computers, use `Start_Shared_SQL_Dashboard.bat`

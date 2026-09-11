@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; worker-src blob:; base-uri 'none'; form-action 'none'">
+  <title>FSL Persistence and Graduation</title>
+  <style>/*VIEWER_CSS*/</style>
+</head>
+<body>
+  <header class="page-header">
+    <div><span class="eyebrow">Fraternity and Sorority Life</span><h1>Persistence and Graduation</h1></div>
+    <div class="publication"><strong>Read-only snapshot</strong><span id="published"></span><span id="data-through"></span></div>
+  </header>
+  <div class="workspace">
+    <details class="filters" open>
+      <summary>Filters</summary>
+      <div class="filter-body">
+        <fieldset><legend>Semester joined</legend><label class="all-option"><input id="all-semesters" type="checkbox" checked> All semesters</label><div id="semesters" class="options"></div></fieldset>
+        <fieldset><legend>Chapter joined</legend><input id="chapter-search" type="search" aria-label="Search chapters" placeholder="Search chapters"><label class="all-option"><input id="all-chapters" type="checkbox" checked> All chapters</label><div id="chapters" class="options"></div></fieldset>
+        <label class="field-label">Breakdown<select id="breakdown"><option>Overall</option><option>Semester joined</option><option>Chapter joined</option></select></label>
+        <fieldset id="years-field"><legend>Milestones</legend><div id="years" class="year-options"></div></fieldset>
+        <label class="field-label" id="single-year-field" hidden>Milestone<select id="single-year" aria-label="Milestone"></select></label>
+        <button id="reset" type="button">Reset filters</button>
+      </div>
+    </details>
+    <main>
+      <div class="metrics" aria-live="polite">
+        <div><span>Cohort size</span><strong id="cohort-size"></strong></div>
+        <div><span>Selected cohort</span><strong id="cohort-label"></strong></div>
+        <div><span>Chapter view</span><strong id="chapter-label"></strong></div>
+      </div>
+      <section class="chart-section" aria-label="Outcome rates">
+        <div class="chart-heading"><h2 id="chart-title">1-6 Year Outcome Rates</h2><span id="selection-label"></span></div>
+        <p id="empty" role="status" hidden>No students match the selected semesters and chapters.</p>
+        <div class="chart-scroll"><div id="chart" role="img" aria-label="Stacked outcome rate chart"></div></div>
+        <p id="chart-error" role="alert" hidden>The chart could not load. Reopen the downloaded HTML file in an approved browser.</p>
+      </section>
+      <details id="chart-data"><summary>Chart data</summary><div class="table-scroll"><table><thead><tr><th>Group</th><th>Year</th><th>Outcome</th><th>Share</th><th>Students</th><th>Eligible</th><th>Future</th></tr></thead><tbody id="chart-rows"></tbody></table></div></details>
+    </main>
+  </div>
+  <noscript>This dashboard requires JavaScript to display its published charts and filters.</noscript>
+  <script>/*PLOTLY_JS*/</script>
+  <script id="viewer-data" type="application/json">/*VIEWER_DATA*/</script>
+  <script>/*VIEWER_MODEL*/</script>
+  <script>/*VIEWER_UI*/</script>
+</body>
+</html>

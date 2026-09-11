@@ -998,15 +998,16 @@ def load_dashboard_tables(
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = True,
     zero_member_periods_file: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH,
+    create_review_files: bool = True,
 ) -> SqlCompileDashboardTables:
     with data_lock(_resolve_path(database_path)):
         compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
         roster_inventory = read_roster_inventory_table(database_path)
         student_names = read_student_name_table(database_path)
         student_name_observations = read_student_name_observations_table(database_path)
-    manual_rows = read_manual_status_rows(manual_status_file)
-    duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file)
-    duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file)
+    manual_rows = read_manual_status_rows(manual_status_file, create_if_missing=create_review_files)
+    duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file, create_if_missing=create_review_files)
+    duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file, create_if_missing=create_review_files)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         manual_rows,
