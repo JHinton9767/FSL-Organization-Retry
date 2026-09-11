@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence, Tuple
@@ -12,6 +13,7 @@ from src.sqlCompile_cohort import (
     MANUAL_STATUS_COLUMNS,
     build_new_member_cohort_tables,
     normalize_status_code,
+    read_student_name_observations_table,
     read_manual_status_rows,
     read_roster_inventory_table,
     read_student_name_table,
@@ -21,6 +23,7 @@ from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outc
 
 
 FUTURE_MILESTONE_BUCKET = "Future"
+DUPLICATE_NAME_MISMATCH_OUTCOME = "Duplicate ID / Name Mismatch"
 PG_CHART_BREAKDOWN_OVERALL = "Overall"
 PG_CHART_BREAKDOWN_MILESTONE = PG_CHART_BREAKDOWN_OVERALL
 PG_CHART_BREAKDOWN_SEMESTER = "Semester joined"
@@ -288,6 +291,145 @@ def attach_student_names(frame: pd.DataFrame, student_names: pd.DataFrame) -> pd
     return result
 
 
+def _normalized_student_name_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _observed_names_by_student_id(outcomes: pd.DataFrame, name_observations: pd.DataFrame) -> dict[str, list[str]]:
+    source = name_observations.copy() if name_observations is not None and not name_observations.empty else pd.DataFrame()
+    if source.empty:
+        source = outcomes.loc[:, [column for column in ["Student ID", "Student Name"] if column in outcomes.columns]].copy()
+    source = _ensure_missing_columns(source, ["Student ID", "Student Name", "Observation Count"])
+    if source.empty:
+        return {}
+
+    for column in ["Student ID", "Student Name"]:
+        source[column] = source[column].fillna("").astype(str).str.strip()
+    source["Observation Count"] = pd.to_numeric(source["Observation Count"], errors="coerce").fillna(0)
+    source["_name_key"] = source["Student Name"].map(_normalized_student_name_key)
+    source = source.loc[source["Student ID"].ne("") & source["_name_key"].ne("")].copy()
+    if source.empty:
+        return {}
+
+    source = source.sort_values(
+        ["Student ID", "Observation Count", "Student Name"],
+        ascending=[True, False, True],
+        na_position="last",
+    )
+    names_by_id: dict[str, list[str]] = {}
+    for student_id, group in source.groupby("Student ID", sort=False):
+        names: list[str] = []
+        seen_keys: set[str] = set()
+        for _, row in group.iterrows():
+            name = str(row.get("Student Name", "") or "").strip()
+            key = _normalized_student_name_key(name)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            names.append(name)
+        if names:
+            names_by_id[str(student_id)] = names
+    return names_by_id
+
+
+def _row_with_latest_last_known(group: pd.DataFrame) -> pd.Series:
+    work = group.copy()
+    work["_last_known_sort"] = work["Last Known Semester"].map(_cohort_sort)
+    work["_cohort_sort"] = work["Cohort Semester"].map(_cohort_sort)
+    return work.sort_values(
+        ["_last_known_sort", "_cohort_sort", "Cohort Semester"],
+        na_position="last",
+    ).iloc[-1]
+
+
+def _row_with_earliest_cohort(group: pd.DataFrame) -> pd.Series:
+    work = group.copy()
+    work["_cohort_sort"] = work["Cohort Semester"].map(_cohort_sort)
+    return work.sort_values(["_cohort_sort", "Cohort Semester"], na_position="last").iloc[0]
+
+
+def consolidate_duplicate_student_outcomes(
+    outcomes: pd.DataFrame,
+    name_observations: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    if outcomes.empty or "Student ID" not in outcomes.columns:
+        return outcomes.copy()
+
+    columns = list(outcomes.columns)
+    extra_columns = [column for column in ["Last Known Outcome Bucket", "Notes"] if column not in columns]
+    work = _ensure_missing_columns(outcomes, [*columns, *extra_columns])
+    for column in [
+        "Cohort Semester",
+        "Cohort Chapter",
+        "Student ID",
+        "Student Name",
+        "Last Known Semester",
+        "Last Known Chapter",
+        "Last Known Status",
+        "Last Known Status Code",
+        "Final Outcome Bucket",
+        "Needs Manual Form Review",
+        "Manual Status Applied",
+        "Last Known Outcome Bucket",
+        "Notes",
+    ]:
+        if column in work.columns:
+            work[column] = work[column].fillna("").astype(str).str.strip()
+
+    duplicate_ids = set(
+        work.loc[work["Student ID"].ne(""), "Student ID"]
+        .value_counts()
+        .loc[lambda counts: counts.gt(1)]
+        .index
+        .tolist()
+    )
+    if not duplicate_ids:
+        return work.loc[:, [*columns, *extra_columns]].reset_index(drop=True)
+
+    observed_names = _observed_names_by_student_id(work, name_observations if name_observations is not None else pd.DataFrame())
+    rows: list[pd.Series] = []
+    non_duplicates = work.loc[~work["Student ID"].isin(duplicate_ids)].copy()
+    rows.extend(row for _, row in non_duplicates.iterrows())
+
+    for student_id, group in work.loc[work["Student ID"].isin(duplicate_ids)].groupby("Student ID", sort=False):
+        names = observed_names.get(str(student_id), [])
+        if not names:
+            names = [
+                name
+                for name in group["Student Name"].fillna("").astype(str).str.strip().tolist()
+                if _normalized_student_name_key(name)
+            ]
+        name_keys = {_normalized_student_name_key(name) for name in names if _normalized_student_name_key(name)}
+        earliest = _row_with_earliest_cohort(group)
+        latest = _row_with_latest_last_known(group)
+        row = earliest.copy()
+        for column in [
+            "Last Known Semester",
+            "Last Known Chapter",
+            "Last Known Status",
+            "Last Known Status Code",
+            "Final Outcome Bucket",
+            "Needs Manual Form Review",
+            "Manual Status Applied",
+            "Last Known Outcome Bucket",
+        ]:
+            if column in row.index:
+                row[column] = latest.get(column, "")
+        if names:
+            row["Student Name"] = " | ".join(names) if len(name_keys) > 1 else names[0]
+        if len(name_keys) > 1:
+            row["Final Outcome Bucket"] = "Needs Manual Form Review"
+            row["Needs Manual Form Review"] = "Yes"
+            row["Last Known Outcome Bucket"] = DUPLICATE_NAME_MISMATCH_OUTCOME
+            row["Notes"] = f"Duplicate Student ID has mismatched observed names: {' | '.join(names)}"
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    result["_cohort_sort"] = result["Cohort Semester"].map(_cohort_sort)
+    result = result.sort_values(["_cohort_sort", "Cohort Semester", "Cohort Chapter", "Student ID"], na_position="last")
+    return result.drop(columns=["_cohort_sort"], errors="ignore").loc[:, [*columns, *extra_columns]].reset_index(drop=True)
+
+
 def build_sql_compile_milestone_dashboard(
     timeline: pd.DataFrame,
     outcomes: pd.DataFrame,
@@ -341,7 +483,10 @@ def build_sql_compile_milestone_dashboard(
         return empty
 
     cohort_students = (
-        filtered_outcomes.loc[:, ["Cohort Semester", "Cohort Chapter", "Student ID"]]
+        _ensure_missing_columns(
+            filtered_outcomes,
+            ["Cohort Semester", "Cohort Chapter", "Student ID", "Last Known Outcome Bucket"],
+        )
         .fillna("")
         .astype(str)
         .apply(lambda column: column.str.strip())
@@ -423,17 +568,20 @@ def build_sql_compile_milestone_dashboard(
             target_sort = _milestone_target_sort(student["Cohort Semester"], offset)
             if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
-            outcome = _checkpoint_outcome(
-                timeline_groups.get(
-                    (str(student["Cohort Semester"]).strip(), str(student["Student ID"]).strip()),
-                    pd.DataFrame(),
-                ),
-                student["Cohort Semester"],
-                student["Student ID"],
-                offset,
-                target_sort=target_sort,
-                prefiltered=True,
-            )
+            if str(student.get("Last Known Outcome Bucket", "") or "").strip() == DUPLICATE_NAME_MISMATCH_OUTCOME:
+                outcome = "Unknown"
+            else:
+                outcome = _checkpoint_outcome(
+                    timeline_groups.get(
+                        (str(student["Cohort Semester"]).strip(), str(student["Student ID"]).strip()),
+                        pd.DataFrame(),
+                    ),
+                    student["Cohort Semester"],
+                    student["Student ID"],
+                    offset,
+                    target_sort=target_sort,
+                    prefiltered=True,
+                )
             counts[outcome] = int(counts.get(outcome, 0)) + 1
             chart_counts = chart_group["counts"]
             if isinstance(chart_counts, dict):
@@ -614,11 +762,12 @@ def build_last_known_status_template(outcomes: pd.DataFrame) -> pd.DataFrame:
     if outcomes.empty:
         return pd.DataFrame(columns=LAST_KNOWN_STATUS_COLUMNS)
 
-    outcome_bucket_series = (
-        outcomes["Last Known Outcome Bucket"]
-        if "Last Known Outcome Bucket" in outcomes.columns
-        else outcomes.apply(_manual_checker_outcome_bucket, axis=1)
-    )
+    computed_outcome_bucket = outcomes.apply(_manual_checker_outcome_bucket, axis=1)
+    if "Last Known Outcome Bucket" in outcomes.columns:
+        provided_outcome_bucket = outcomes["Last Known Outcome Bucket"].fillna("").astype(str).str.strip()
+        outcome_bucket_series = provided_outcome_bucket.where(provided_outcome_bucket.ne(""), computed_outcome_bucket)
+    else:
+        outcome_bucket_series = computed_outcome_bucket
     result = pd.DataFrame(
         {
             "Cohort Semester": outcomes.get("Cohort Semester", pd.Series("", index=outcomes.index)),
@@ -634,7 +783,7 @@ def build_last_known_status_template(outcomes: pd.DataFrame) -> pd.DataFrame:
             "Semester": "",
             "Chapter": outcomes.get("Last Known Chapter", pd.Series("", index=outcomes.index)),
             "Status": "",
-            "Notes": "",
+            "Notes": outcomes.get("Notes", pd.Series("", index=outcomes.index)),
         }
     )
     return result.loc[:, LAST_KNOWN_STATUS_COLUMNS]
@@ -682,7 +831,9 @@ def build_pg_aligned_manual_checker_template(
         validate="one_to_one",
     )
     pg_bucket = merged["P&G Outcome Bucket"].fillna("").astype(str).str.strip()
-    merged["Last Known Outcome Bucket"] = pg_bucket.where(pg_bucket.ne(""), merged["Last Known Outcome Bucket"])
+    existing_bucket = merged["Last Known Outcome Bucket"].fillna("").astype(str).str.strip()
+    preserve_existing = existing_bucket.eq(DUPLICATE_NAME_MISMATCH_OUTCOME)
+    merged["Last Known Outcome Bucket"] = existing_bucket.where(preserve_existing | pg_bucket.eq(""), pg_bucket)
     return merged.loc[:, LAST_KNOWN_STATUS_COLUMNS].reset_index(drop=True)
 
 
@@ -724,6 +875,7 @@ def load_dashboard_tables(
     compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
     roster_inventory = read_roster_inventory_table(database_path)
     student_names = read_student_name_table(database_path)
+    student_name_observations = read_student_name_observations_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
@@ -733,6 +885,7 @@ def load_dashboard_tables(
         all_cohorts=all_cohorts,
     )
     outcomes = attach_student_names(outcomes, student_names)
+    outcomes = consolidate_duplicate_student_outcomes(outcomes, student_name_observations)
     review = attach_student_names(review, student_names)
     return SqlCompileDashboardTables(
         timeline=timeline,

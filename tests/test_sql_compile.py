@@ -5,6 +5,7 @@ from openpyxl import Workbook
 
 from src.sqlCompile import (
     OUTPUT_COLUMNS,
+    STUDENT_NAME_OBSERVATION_TABLE,
     ROSTER_INVENTORY_TABLE,
     STUDENT_NAME_TABLE,
     build_sql_compile_frame,
@@ -121,8 +122,12 @@ def test_sql_compile_writes_sqlite_table_with_requested_columns(tmp_path: Path) 
         name_rows = connection.execute(
             f'SELECT "Student ID", "Student Name" FROM "{STUDENT_NAME_TABLE}"'
         ).fetchall()
+        name_observation_rows = connection.execute(
+            f'SELECT "Student ID", "Student Name", "Observation Count" FROM "{STUDENT_NAME_OBSERVATION_TABLE}"'
+        ).fetchall()
 
     assert columns == OUTPUT_COLUMNS
     assert rows == [("Fall 2025", "Alpha Sigma Phi", "A01234567", "RS")]
     assert inventory_rows == 1
     assert name_rows == [("A01234567", "Ana Rivera")]
+    assert name_observation_rows == [("A01234567", "Ana Rivera", 1)]

@@ -41,6 +41,8 @@ TABLE_NAME = "sqlCompile"
 OUTPUT_COLUMNS = ["Semester", "Chapter", "Student ID", "Status"]
 STUDENT_NAME_TABLE = "sqlCompile_student_names"
 STUDENT_NAME_COLUMNS = ["Student ID", "Student Name"]
+STUDENT_NAME_OBSERVATION_TABLE = "sqlCompile_student_name_observations"
+STUDENT_NAME_OBSERVATION_COLUMNS = ["Student ID", "Student Name", "Observation Count"]
 ROSTER_INVENTORY_TABLE = "sqlCompile_roster_inventory"
 ROSTER_INVENTORY_COLUMNS = [
     "Semester",
@@ -497,6 +499,30 @@ def build_student_name_lookup(rows: pd.DataFrame) -> pd.DataFrame:
     return result.sort_values(["Student Name", "Student ID"], na_position="last").reset_index(drop=True)
 
 
+def build_student_name_observations(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=STUDENT_NAME_OBSERVATION_COLUMNS)
+
+    work = rows.copy()
+    for column in STUDENT_NAME_COLUMNS:
+        if column not in work.columns:
+            work[column] = ""
+        work[column] = work[column].fillna("").astype(str).map(clean_text)
+    work = work.loc[work["Student ID"].ne("") & work["Student Name"].ne("")].copy()
+    if work.empty:
+        return pd.DataFrame(columns=STUDENT_NAME_OBSERVATION_COLUMNS)
+
+    grouped = (
+        work.groupby(STUDENT_NAME_COLUMNS, dropna=False)["Student ID"]
+        .size()
+        .reset_index(name="Observation Count")
+    )
+    return grouped.loc[:, STUDENT_NAME_OBSERVATION_COLUMNS].sort_values(
+        ["Student ID", "Student Name"],
+        na_position="last",
+    ).reset_index(drop=True)
+
+
 def build_sql_compile_frame(roots: Sequence[str | Path]) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
     source_rows, issues, source_file_count = load_sql_compile_rows(roots)
     return resolve_semester_statuses(source_rows), issues, source_file_count
@@ -514,6 +540,8 @@ def write_sqlite(
     roster_inventory_table_name: str = ROSTER_INVENTORY_TABLE,
     student_names: Optional[pd.DataFrame] = None,
     student_name_table_name: str = STUDENT_NAME_TABLE,
+    student_name_observations: Optional[pd.DataFrame] = None,
+    student_name_observation_table_name: str = STUDENT_NAME_OBSERVATION_TABLE,
 ) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -571,6 +599,25 @@ def write_sqlite(
             f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{student_name_table_name}_student')} "
             f"ON {names_identifier} ({_quote_identifier('Student ID')})"
         )
+        name_observations = (
+            student_name_observations.copy()
+            if student_name_observations is not None
+            else pd.DataFrame(columns=STUDENT_NAME_OBSERVATION_COLUMNS)
+        )
+        for column in STUDENT_NAME_OBSERVATION_COLUMNS:
+            if column not in name_observations.columns:
+                name_observations[column] = 0 if column == "Observation Count" else ""
+        name_observations.loc[:, STUDENT_NAME_OBSERVATION_COLUMNS].to_sql(
+            student_name_observation_table_name,
+            connection,
+            if_exists="replace",
+            index=False,
+        )
+        observations_identifier = _quote_identifier(student_name_observation_table_name)
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{student_name_observation_table_name}_student')} "
+            f"ON {observations_identifier} ({_quote_identifier('Student ID')})"
+        )
         connection.commit()
 
     return destination
@@ -587,12 +634,14 @@ def sqlCompile(
     frame = resolve_semester_statuses(source_rows)
     roster_inventory = build_roster_inventory(source_rows)
     student_names = build_student_name_lookup(source_rows)
+    student_name_observations = build_student_name_observations(source_rows)
     destination = write_sqlite(
         frame,
         output_path,
         table_name=table_name,
         roster_inventory=roster_inventory,
         student_names=student_names,
+        student_name_observations=student_name_observations,
     )
     return SqlCompileResult(
         output_path=destination,

@@ -1,6 +1,7 @@
 import pandas as pd
 
 from src.sqlCompile_dashboard import (
+    DUPLICATE_NAME_MISMATCH_OUTCOME,
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
     PG_CHART_BREAKDOWN_CHAPTER,
@@ -12,6 +13,7 @@ from src.sqlCompile_dashboard import (
     build_outcome_distribution,
     build_pg_aligned_manual_checker_template,
     build_sql_compile_milestone_dashboard,
+    consolidate_duplicate_student_outcomes,
     odd_record_editor_to_manual_rows,
 )
 
@@ -209,6 +211,197 @@ def test_dashboard_last_known_status_template_uses_persistence_buckets() -> None
     assert template.set_index("Student ID").loc["A2", "Last Known Outcome Bucket"] == "Chapter Kicked"
     assert template.set_index("Student ID").loc["A3", "Last Known Outcome Bucket"] == "Graduated"
     assert template.set_index("Student ID").loc["A3", "Manual Status Applied"] == "Yes"
+
+
+def test_duplicate_student_ids_with_matching_names_use_earliest_cohort_and_latest_outcome() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2021",
+                "Cohort Chapter": "Beta",
+                "Student ID": "A1",
+                "Student Name": "Jordan Lee",
+                "Last Known Semester": "Spring 2022",
+                "Last Known Chapter": "Beta",
+                "Last Known Status": "A",
+                "Last Known Status Code": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Student Name": "Jordan Lee",
+                "Last Known Semester": "Spring 2024",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "G",
+                "Last Known Status Code": "G",
+                "Final Outcome Bucket": "Graduated",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "Yes",
+            },
+        ]
+    )
+    name_observations = pd.DataFrame(
+        [{"Student ID": "A1", "Student Name": "Jordan Lee", "Observation Count": 2}]
+    )
+
+    consolidated = consolidate_duplicate_student_outcomes(outcomes, name_observations)
+    row = consolidated.iloc[0]
+
+    assert len(consolidated) == 1
+    assert row["Cohort Semester"] == "Fall 2020"
+    assert row["Cohort Chapter"] == "Alpha"
+    assert row["Last Known Semester"] == "Spring 2024"
+    assert row["Final Outcome Bucket"] == "Graduated"
+    assert row["Needs Manual Form Review"] == "No"
+
+
+def test_duplicate_student_ids_with_name_mismatch_are_flagged_for_manual_checker() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2021",
+                "Cohort Chapter": "Beta",
+                "Student ID": "A1",
+                "Student Name": "Jordan Lee",
+                "Last Known Semester": "Spring 2022",
+                "Last Known Chapter": "Beta",
+                "Last Known Status": "A",
+                "Last Known Status Code": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Student Name": "Jordan Leigh",
+                "Last Known Semester": "Spring 2024",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "G",
+                "Last Known Status Code": "G",
+                "Final Outcome Bucket": "Graduated",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "Yes",
+            },
+        ]
+    )
+    name_observations = pd.DataFrame(
+        [
+            {"Student ID": "A1", "Student Name": "Jordan Lee", "Observation Count": 1},
+            {"Student ID": "A1", "Student Name": "Jordan Leigh", "Observation Count": 1},
+        ]
+    )
+
+    consolidated = consolidate_duplicate_student_outcomes(outcomes, name_observations)
+    template = build_last_known_status_template(consolidated)
+    row = template.iloc[0]
+    aligned = build_pg_aligned_manual_checker_template(
+        consolidated,
+        pd.DataFrame(
+            [
+                {
+                    "Cohort Semester": "Fall 2020",
+                    "Cohort Chapter": "Alpha",
+                    "Student ID": "A1",
+                    "Milestone": "6 Year",
+                    "Milestone Sort": 6,
+                    "Milestone Status": "Measured",
+                    "P&G Outcome Bucket": "Graduated",
+                }
+            ]
+        ),
+        milestone_offset=6,
+    )
+
+    assert len(template) == 1
+    assert row["Last Known Outcome Bucket"] == DUPLICATE_NAME_MISMATCH_OUTCOME
+    assert row["Needs Manual Form Review"] == "Yes"
+    assert "Jordan Lee | Jordan Leigh" in row["Notes"]
+    assert aligned.iloc[0]["Last Known Outcome Bucket"] == DUPLICATE_NAME_MISMATCH_OUTCOME
+
+
+def test_pg_chart_counts_duplicate_name_mismatch_as_unknown() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2021",
+                "Cohort Chapter": "Beta",
+                "Student ID": "A1",
+                "Student Name": "Jordan Lee",
+                "Last Known Semester": "Spring 2022",
+                "Last Known Chapter": "Beta",
+                "Last Known Status": "A",
+                "Last Known Status Code": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Student Name": "Jordan Leigh",
+                "Last Known Semester": "Spring 2024",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "G",
+                "Last Known Status Code": "G",
+                "Final Outcome Bucket": "Graduated",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "Yes",
+            },
+        ]
+    )
+    name_observations = pd.DataFrame(
+        [
+            {"Student ID": "A1", "Student Name": "Jordan Lee", "Observation Count": 1},
+            {"Student ID": "A1", "Student Name": "Jordan Leigh", "Observation Count": 1},
+        ]
+    )
+    timeline = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Semester": "Fall 2020",
+                "Status": "N",
+                "Status Code": "N",
+                "Source": "sqlCompile",
+                "Included In Outcome": "Yes",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Semester": "Spring 2024",
+                "Status": "G",
+                "Status Code": "G",
+                "Source": "manual_status",
+                "Included In Outcome": "Yes",
+            },
+        ]
+    )
+
+    consolidated = consolidate_duplicate_student_outcomes(outcomes, name_observations)
+    dashboard = build_sql_compile_milestone_dashboard(
+        timeline,
+        consolidated,
+        ["Fall 2020"],
+        selection_label="Fall 2020",
+        chart_milestone_offsets=[1],
+    )
+
+    chart = dashboard["chart_frame"]
+    detail = dashboard["detail_frame"]
+
+    assert chart.loc[chart["Outcome"].eq("Unknown"), "Count"].sum() == 1
+    assert chart.loc[chart["Outcome"].eq("Graduated"), "Count"].sum() == 0
+    assert detail.iloc[0]["P&G Outcome Bucket"] == "Unknown"
 
 
 def test_dashboard_outcome_distribution_counts_by_cohort() -> None:
