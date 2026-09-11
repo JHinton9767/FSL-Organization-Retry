@@ -19,8 +19,10 @@ from src.sqlCompile_cohort import (
     write_manual_status_rows,
 )
 from src.sqlCompile_dashboard import (
+    DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
     DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
     DUPLICATE_NAME_MISMATCH_OUTCOME,
+    DUPLICATE_NAME_RECHECK_COLUMNS,
     DUPLICATE_NAME_RESOLUTION_COLUMNS,
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_COLUMNS,
@@ -30,6 +32,7 @@ from src.sqlCompile_dashboard import (
     PG_CHART_BREAKDOWN_OPTIONS,
     PG_CHART_BREAKDOWN_SEMESTER,
     SQL_COMPILE_ALL_TIME_LABEL,
+    append_duplicate_name_recheck_rows,
     append_duplicate_name_resolution_rows,
     build_manual_checker_queue,
     build_pg_aligned_manual_checker_template,
@@ -154,13 +157,16 @@ def _cached_load_dashboard_tables(
     manual_status_file_text: str,
     duplicate_name_resolution_file_text: str,
     duplicate_name_resolution_mtime_ns: int,
+    duplicate_name_recheck_file_text: str,
+    duplicate_name_recheck_mtime_ns: int,
     dashboard_refresh_token: int,
 ):
-    del database_mtime_ns, duplicate_name_resolution_mtime_ns, dashboard_refresh_token
+    del database_mtime_ns, duplicate_name_resolution_mtime_ns, duplicate_name_recheck_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
         database_path=Path(database_path_text),
         manual_status_file=Path(manual_status_file_text),
         duplicate_name_resolution_file=Path(duplicate_name_resolution_file_text),
+        duplicate_name_recheck_file=Path(duplicate_name_recheck_file_text),
         all_cohorts=True,
     )
 
@@ -510,6 +516,159 @@ def _duplicate_name_conflicts(queue: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def _parse_student_id_list(value: object) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    parts = [part.strip() for part in text.replace(",", "\n").replace(";", "\n").splitlines()]
+    ids: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        for token in part.split():
+            student_id = token.strip()
+            if not student_id or student_id in seen:
+                continue
+            seen.add(student_id)
+            ids.append(student_id)
+    return ids
+
+
+def _prepared_duplicate_name_resolutions(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    for column in DUPLICATE_NAME_RESOLUTION_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+        prepared[column] = prepared[column].fillna("").astype(str).str.strip()
+    prepared = prepared.loc[prepared["Student ID"].ne("")]
+    return prepared.drop_duplicates(subset=["Student ID"], keep="last").reset_index(drop=True)
+
+
+def _prepared_duplicate_name_rechecks(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+    for column in DUPLICATE_NAME_RECHECK_COLUMNS:
+        if column not in prepared.columns:
+            prepared[column] = ""
+        prepared[column] = prepared[column].fillna("").astype(str).str.strip()
+    prepared = prepared.loc[prepared["Student ID"].ne("")]
+    return prepared.drop_duplicates(subset=["Student ID"], keep="last").reset_index(drop=True)
+
+
+def _observed_names_from_resolution_note(value: object) -> str:
+    text = str(value or "").strip()
+    if text.lower().startswith("resolved from observed names:"):
+        return text.split(":", 1)[-1].strip()
+    return text
+
+
+def _duplicate_name_recheck_display(
+    duplicate_name_rechecks: pd.DataFrame,
+    duplicate_name_resolutions: pd.DataFrame,
+    queue: pd.DataFrame,
+) -> pd.DataFrame:
+    rechecks = _prepared_duplicate_name_rechecks(duplicate_name_rechecks)
+    columns = ["Student ID", "Selected Name", "Observed Names", "Recheck Notes", "Current Queue", "Cohort", "Last Outcome"]
+    if rechecks.empty:
+        return pd.DataFrame(columns=columns)
+
+    resolutions = _prepared_duplicate_name_resolutions(duplicate_name_resolutions)
+    resolution_lookup = (
+        resolutions.set_index("Student ID")[["Student Name", "Notes"]].to_dict("index")
+        if not resolutions.empty
+        else {}
+    )
+    queue_lookup: dict[str, dict[str, str]] = {}
+    if not queue.empty and "Student ID" in queue.columns:
+        queue_work = queue.copy()
+        for column in ["Student ID", "Cohort Semester", "Cohort Chapter", "Last Known Outcome Bucket"]:
+            if column not in queue_work.columns:
+                queue_work[column] = ""
+            queue_work[column] = queue_work[column].fillna("").astype(str).str.strip()
+        queue_work = queue_work.drop_duplicates(subset=["Student ID"], keep="first")
+        queue_lookup = queue_work.set_index("Student ID")[
+            ["Cohort Semester", "Cohort Chapter", "Last Known Outcome Bucket"]
+        ].to_dict("index")
+
+    rows: list[dict[str, str]] = []
+    for _, row in rechecks.iterrows():
+        student_id = str(row["Student ID"]).strip()
+        resolution = resolution_lookup.get(student_id, {})
+        queue_row = queue_lookup.get(student_id, {})
+        cohort = " | ".join(
+            value
+            for value in [
+                str(queue_row.get("Cohort Semester", "") or "").strip(),
+                str(queue_row.get("Cohort Chapter", "") or "").strip(),
+            ]
+            if value
+        )
+        rows.append(
+            {
+                "Student ID": student_id,
+                "Selected Name": str(resolution.get("Student Name", "") or "").strip(),
+                "Observed Names": _observed_names_from_resolution_note(resolution.get("Notes", "")),
+                "Recheck Notes": str(row.get("Notes", "") or "").strip(),
+                "Current Queue": "Yes" if student_id in queue_lookup else "No",
+                "Cohort": cohort,
+                "Last Outcome": str(queue_row.get("Last Known Outcome Bucket", "") or "").strip(),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _render_duplicate_name_recheck_list(
+    queue: pd.DataFrame,
+    duplicate_name_recheck_file: Path,
+    duplicate_name_rechecks: pd.DataFrame,
+    duplicate_name_resolutions: pd.DataFrame,
+) -> None:
+    display = _duplicate_name_recheck_display(duplicate_name_rechecks, duplicate_name_resolutions, queue)
+    with st.expander(f"Name recheck list ({len(display):,})", expanded=not display.empty):
+        st.caption("Paste Student IDs you were unsure about. This creates a durable checklist of saved name choices to revisit later.")
+        with st.form("sql_compile_duplicate_name_recheck_form"):
+            pasted_ids = st.text_area(
+                "Student IDs to recheck",
+                placeholder="Paste one per line, or separate with commas/spaces",
+                key="sql_compile_duplicate_name_recheck_ids",
+            )
+            recheck_note = st.text_input(
+                "Recheck note",
+                value="Needs name verification",
+                key="sql_compile_duplicate_name_recheck_note",
+            )
+            add_requested = st.form_submit_button("Add Recheck IDs", type="primary", use_container_width=True)
+        if add_requested:
+            ids = _parse_student_id_list(pasted_ids)
+            if not ids:
+                st.warning("Paste at least one Student ID first.")
+            else:
+                rows = pd.DataFrame(
+                    [{"Student ID": student_id, "Notes": recheck_note.strip()} for student_id in ids],
+                    columns=DUPLICATE_NAME_RECHECK_COLUMNS,
+                )
+                try:
+                    path, saved = append_duplicate_name_recheck_rows(rows, duplicate_name_recheck_file)
+                    if saved:
+                        _request_dashboard_data_refresh()
+                        st.success(f"Saved {saved:,} Student ID(s) to {path}.")
+                        st.rerun()
+                    else:
+                        st.warning("No Student IDs were ready to save.")
+                except OSError as exc:
+                    st.error(f"Could not save the recheck list. Close the CSV if it is open, then try again. Details: {exc}")
+
+        if display.empty:
+            st.caption("No duplicate-name recheck IDs have been saved yet.")
+        else:
+            st.dataframe(display, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Download Name Recheck List",
+                data=dataframe_to_csv_bytes(display),
+                file_name="sql_compile_duplicate_name_recheck_list.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+
 def _render_duplicate_name_resolver(
     queue: pd.DataFrame,
     duplicate_name_resolution_file: Path,
@@ -847,6 +1006,8 @@ def _render_manual_checker(
     manual_rows: pd.DataFrame,
     duplicate_name_resolution_file: Path,
     duplicate_name_resolutions: pd.DataFrame,
+    duplicate_name_recheck_file: Path,
+    duplicate_name_rechecks: pd.DataFrame,
     *,
     outcome_filter_label: str = "Last outcome",
 ) -> None:
@@ -858,6 +1019,12 @@ def _render_manual_checker(
     queue = _ensure_manual_checker_state(checker_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
     _render_duplicate_name_resolver(queue, duplicate_name_resolution_file, duplicate_name_resolutions)
+    _render_duplicate_name_recheck_list(
+        queue,
+        duplicate_name_recheck_file,
+        duplicate_name_rechecks,
+        duplicate_name_resolutions,
+    )
 
     if queue.empty:
         st.success("No student status records are available for the current cohort selection.")
@@ -1188,10 +1355,14 @@ def main() -> None:
     default_database = DEFAULT_OUTPUT_PATH
     default_manual = DEFAULT_MANUAL_STATUS_PATH
     default_duplicate_names = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
+    default_duplicate_rechecks = DEFAULT_DUPLICATE_NAME_RECHECK_PATH
     database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(default_database)))
     manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(default_manual)))
     duplicate_name_resolution_file = Path(
         st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(default_duplicate_names))
+    )
+    duplicate_name_recheck_file = Path(
+        st.sidebar.text_input("Duplicate name recheck CSV", value=_path_text(default_duplicate_rechecks))
     )
 
     st.sidebar.subheader("Refresh")
@@ -1219,6 +1390,8 @@ def main() -> None:
             str(manual_status_file.resolve()),
             str(duplicate_name_resolution_file.resolve()),
             _mtime_ns(duplicate_name_resolution_file),
+            str(duplicate_name_recheck_file.resolve()),
+            _mtime_ns(duplicate_name_recheck_file),
             _dashboard_data_refresh_token(),
         )
     except Exception as exc:
@@ -1317,6 +1490,8 @@ def main() -> None:
             all_tables.manual_rows,
             duplicate_name_resolution_file,
             all_tables.duplicate_name_resolutions,
+            duplicate_name_recheck_file,
+            all_tables.duplicate_name_rechecks,
             outcome_filter_label=f"Last outcome ({checker_milestone_offset} Year P&G)",
         )
 

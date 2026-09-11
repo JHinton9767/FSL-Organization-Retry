@@ -2,11 +2,13 @@ import pandas as pd
 
 from src.sqlCompile_dashboard import (
     DUPLICATE_NAME_MISMATCH_OUTCOME,
+    DUPLICATE_NAME_RECHECK_COLUMNS,
     DUPLICATE_NAME_RESOLUTION_COLUMNS,
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
     PG_CHART_BREAKDOWN_CHAPTER,
     PG_CHART_BREAKDOWN_SEMESTER,
+    append_duplicate_name_recheck_rows,
     append_duplicate_name_resolution_rows,
     build_dashboard_rate_table,
     build_last_known_status_template,
@@ -17,6 +19,7 @@ from src.sqlCompile_dashboard import (
     build_sql_compile_milestone_dashboard,
     consolidate_duplicate_student_outcomes,
     odd_record_editor_to_manual_rows,
+    read_duplicate_name_recheck_rows,
     read_duplicate_name_resolution_rows,
 )
 
@@ -397,6 +400,26 @@ def test_duplicate_name_resolution_rows_round_trip(tmp_path) -> None:
     assert loaded.columns.tolist() == DUPLICATE_NAME_RESOLUTION_COLUMNS
     assert loaded.to_dict("records") == [
         {"Student ID": "A1", "Student Name": "Jordan Leigh", "Notes": "Corrected pick."}
+    ]
+
+
+def test_duplicate_name_recheck_rows_round_trip(tmp_path) -> None:
+    destination = tmp_path / "duplicate_name_rechecks.csv"
+    rows = pd.DataFrame(
+        [
+            {"Student ID": "A1", "Notes": "Needs another look."},
+            {"Student ID": "A1", "Notes": "Still not sure."},
+            {"Student ID": "", "Notes": "Incomplete row."},
+        ]
+    )
+
+    path, saved = append_duplicate_name_recheck_rows(rows, destination)
+    loaded = read_duplicate_name_recheck_rows(path)
+
+    assert saved == 2
+    assert loaded.columns.tolist() == DUPLICATE_NAME_RECHECK_COLUMNS
+    assert loaded.to_dict("records") == [
+        {"Student ID": "A1", "Notes": "Still not sure."}
     ]
 
 

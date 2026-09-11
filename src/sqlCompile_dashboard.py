@@ -27,6 +27,8 @@ FUTURE_MILESTONE_BUCKET = "Future"
 DUPLICATE_NAME_MISMATCH_OUTCOME = "Duplicate ID / Name Mismatch"
 DUPLICATE_NAME_RESOLUTION_COLUMNS = ["Student ID", "Student Name", "Notes"]
 DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH = ROOT / "config" / "sqlCompile_duplicate_name_resolutions.csv"
+DUPLICATE_NAME_RECHECK_COLUMNS = ["Student ID", "Notes"]
+DEFAULT_DUPLICATE_NAME_RECHECK_PATH = ROOT / "config" / "sqlCompile_duplicate_name_recheck.csv"
 PG_CHART_BREAKDOWN_OVERALL = "Overall"
 PG_CHART_BREAKDOWN_MILESTONE = PG_CHART_BREAKDOWN_OVERALL
 PG_CHART_BREAKDOWN_SEMESTER = "Semester joined"
@@ -162,6 +164,7 @@ class SqlCompileDashboardTables:
     manual_checker_template: pd.DataFrame
     manual_rows: pd.DataFrame
     duplicate_name_resolutions: pd.DataFrame
+    duplicate_name_rechecks: pd.DataFrame
     selected_semesters: list[str]
 
 
@@ -366,6 +369,68 @@ def _duplicate_name_resolution_lookup(resolutions: Optional[pd.DataFrame]) -> di
         return {}
     prepared = prepared.drop_duplicates(subset=["Student ID"], keep="last")
     return prepared.set_index("Student ID")["Student Name"].to_dict()
+
+
+def _ensure_duplicate_name_recheck_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = _ensure_missing_columns(frame, DUPLICATE_NAME_RECHECK_COLUMNS)
+    for column in DUPLICATE_NAME_RECHECK_COLUMNS:
+        result[column] = result[column].fillna("").astype(str).str.strip()
+    return result.loc[:, DUPLICATE_NAME_RECHECK_COLUMNS]
+
+
+def ensure_duplicate_name_recheck_file(
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+) -> Path:
+    destination = Path(path)
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    if not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS).to_csv(destination, index=False)
+    return destination
+
+
+def read_duplicate_name_recheck_rows(
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+    *,
+    create_if_missing: bool = True,
+) -> pd.DataFrame:
+    recheck_path = ensure_duplicate_name_recheck_file(path) if create_if_missing else Path(path)
+    if not recheck_path.is_absolute():
+        recheck_path = ROOT / recheck_path
+    if not recheck_path.exists():
+        return pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS)
+    try:
+        frame = pd.read_csv(recheck_path, dtype=str).fillna("")
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS)
+    return _ensure_duplicate_name_recheck_columns(frame)
+
+
+def write_duplicate_name_recheck_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+) -> Path:
+    destination = ensure_duplicate_name_recheck_file(path)
+    _ensure_duplicate_name_recheck_columns(frame).to_csv(destination, index=False)
+    return destination
+
+
+def append_duplicate_name_recheck_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+) -> tuple[Path, int]:
+    incoming = _ensure_duplicate_name_recheck_columns(frame)
+    incoming = incoming.loc[incoming["Student ID"].ne("")].copy()
+    destination = ensure_duplicate_name_recheck_file(path)
+    if incoming.empty:
+        return destination, 0
+
+    existing = read_duplicate_name_recheck_rows(destination)
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["Student ID"], keep="last")
+    write_duplicate_name_recheck_rows(combined, destination)
+    return destination, len(incoming)
 
 
 def _normalized_student_name_key(value: object) -> str:
@@ -949,6 +1014,7 @@ def load_dashboard_tables(
     database_path: str | Path = DEFAULT_OUTPUT_PATH,
     manual_status_file: str | Path = DEFAULT_MANUAL_STATUS_PATH,
     duplicate_name_resolution_file: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+    duplicate_name_recheck_file: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
     table_name: str = TABLE_NAME,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = True,
@@ -959,6 +1025,7 @@ def load_dashboard_tables(
     student_name_observations = read_student_name_observations_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
     duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file)
+    duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         manual_rows,
@@ -984,6 +1051,7 @@ def load_dashboard_tables(
         manual_checker_template=build_last_known_status_template(outcomes),
         manual_rows=manual_rows,
         duplicate_name_resolutions=duplicate_name_resolutions,
+        duplicate_name_rechecks=duplicate_name_rechecks,
         selected_semesters=selected_semesters,
     )
 
