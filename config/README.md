@@ -1,5 +1,11 @@
 # Local Path Configuration
 
+For the shared sqlCompile browser dashboard, copy `sqlCompile_host.example.json`
+to `sqlCompile_host.json` on the host only, then set its local data paths and
+network port. See [shared dashboard setup](../docs/shared_dashboard_setup.md).
+This is separate from the roster source configuration below. Do not replace
+existing correction CSVs when updating code or configuring a new host.
+
 The repository should track code, app configuration, tests, and templates only.
 Raw student files, roster PDFs, grade reports, generated exports, and caches
 should stay outside Git.

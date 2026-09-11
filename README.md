@@ -14,6 +14,15 @@ uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py 
 
 The dashboard reads `output/sqlCompile/sqlCompile.sqlite` and persistent manual-review files under `config/`. It supports selected join semesters/chapters, years 1-6, Future milestones, and duplicate-name review. See [the sqlCompile workflow](docs/sqlCompile_cohort_workflow.md) for correction/import commands and [the architecture](docs/architecture.md) for the boundaries between workflows.
 
+## Shared Dashboard
+
+For browser access from other computers, use `Start_Shared_SQL_Dashboard.bat`
+or add `--shared` to the dashboard launcher. No client installation or sign-in
+is needed. Everyone who can reach the host can edit student records, so use an
+approved restricted network. See the [shared dashboard setup](docs/shared_dashboard_setup.md)
+for transferring existing decisions, host configuration, backups, and firewall
+requirements. This mode does not change cohort or outcome calculations.
+
 ## Canonical source of truth
 
 The older canonical analytics app reads these authoritative tables:

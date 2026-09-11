@@ -12,6 +12,7 @@ from src.sqlCompile import DEFAULT_OUTPUT_PATH, sqlCompile
 from src.sqlCompile_cohort import (
     DEFAULT_COHORT_OUTPUT_DIR,
     DEFAULT_MANUAL_STATUS_PATH,
+    DEFAULT_ZERO_MEMBER_PERIODS_PATH,
     MANUAL_STATUS_COLUMNS,
     append_manual_status_rows,
     build_new_member_cohort_report,
@@ -46,6 +47,8 @@ from src.sqlCompile_legacy_manual import (
     load_legacy_manual_decision_rows,
 )
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
+from src.sqlCompile_host import data_revision, load_host_config, shared_mode
+from src.sqlCompile_storage import ReviewConflictError
 
 
 st.set_page_config(
@@ -60,6 +63,7 @@ STATUS_OPTIONS = ["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"]
 SECTION_OPTIONS = ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
 SECTION_KEY = "sql_compile_dashboard_section"
 DASHBOARD_DATA_REFRESH_KEY = "sql_compile_dashboard_data_refresh_token"
+SHARED_SNAPSHOT_KEY = "sql_compile_shared_snapshot"
 MILESTONE_DASHBOARD_CACHE_KEY = "sql_compile_milestone_dashboard_cache"
 MILESTONE_DASHBOARD_CACHE_LIMIT = 8
 MANUAL_CHECKER_FILTERED_DOWNLOAD_KEY = "sql_compile_manual_checker_filtered_download"
@@ -147,10 +151,11 @@ def _request_dashboard_data_refresh() -> None:
     st.session_state[DASHBOARD_DATA_REFRESH_KEY] = _dashboard_data_refresh_token() + 1
     st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = None
     st.session_state.pop(MILESTONE_DASHBOARD_CACHE_KEY, None)
+    st.session_state.pop(SHARED_SNAPSHOT_KEY, None)
     _refresh_manual_checker_editor()
 
 
-@st.cache_data(show_spinner="Loading sqlCompile dashboard data...")
+@st.cache_data(show_spinner="Loading sqlCompile dashboard data...", max_entries=8)
 def _cached_load_dashboard_tables(
     database_path_text: str,
     database_mtime_ns: int,
@@ -160,6 +165,8 @@ def _cached_load_dashboard_tables(
     duplicate_name_recheck_file_text: str,
     duplicate_name_recheck_mtime_ns: int,
     dashboard_refresh_token: int,
+    zero_member_periods_file_text: str = str(DEFAULT_ZERO_MEMBER_PERIODS_PATH),
+    source_revision: tuple = (),
 ):
     del database_mtime_ns, duplicate_name_resolution_mtime_ns, duplicate_name_recheck_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
@@ -168,7 +175,14 @@ def _cached_load_dashboard_tables(
         duplicate_name_resolution_file=Path(duplicate_name_resolution_file_text),
         duplicate_name_recheck_file=Path(duplicate_name_recheck_file_text),
         all_cohorts=True,
+        zero_member_periods_file=Path(zero_member_periods_file_text),
     )
+
+
+@st.fragment(run_every=15)
+def _shared_change_notice(paths: tuple[Path, ...], loaded_revision: tuple) -> None:
+    if data_revision(paths) != loaded_revision:
+        st.info("Saved records changed. Save any pending work before refreshing dashboard data.")
 
 
 def _session_cached_milestone_dashboard(
@@ -186,10 +200,10 @@ def _session_cached_milestone_dashboard(
 ) -> dict[str, object]:
     key = (
         str(database_path.resolve()),
-        _mtime_ns(database_path),
+        st.session_state[SHARED_SNAPSHOT_KEY][1] if shared_mode() else _mtime_ns(database_path),
         str(manual_status_file.resolve()),
         str(duplicate_name_resolution_file.resolve()),
-        _mtime_ns(duplicate_name_resolution_file),
+        0 if shared_mode() else _mtime_ns(duplicate_name_resolution_file),
         _dashboard_data_refresh_token(),
         tuple(str(cohort).strip() for cohort in selected_cohorts),
         tuple(str(chapter).strip() for chapter in selected_chapters),
@@ -640,13 +654,18 @@ def _render_duplicate_name_recheck_list(
                     columns=DUPLICATE_NAME_RECHECK_COLUMNS,
                 )
                 try:
-                    path, saved = append_duplicate_name_recheck_rows(rows, duplicate_name_recheck_file)
+                    path, saved = append_duplicate_name_recheck_rows(
+                        rows, duplicate_name_recheck_file,
+                        expected_rows=duplicate_name_rechecks if shared_mode() else None,
+                    )
                     if saved:
                         _request_dashboard_data_refresh()
                         st.success(f"Saved {saved:,} Student ID(s) to {path}.")
                         st.rerun()
                     else:
                         st.warning("No Student IDs were ready to save.")
+                except ReviewConflictError as exc:
+                    st.warning(str(exc))
                 except OSError as exc:
                     st.error(f"Could not save the recheck list. Close the CSV if it is open, then try again. Details: {exc}")
 
@@ -730,6 +749,7 @@ def _render_duplicate_name_resolver(
                 path, saved = append_duplicate_name_resolution_rows(
                     pd.DataFrame(selected_rows, columns=DUPLICATE_NAME_RESOLUTION_COLUMNS),
                     duplicate_name_resolution_file,
+                    expected_rows=duplicate_name_resolutions if shared_mode() else None,
                 )
                 if saved:
                     _request_dashboard_data_refresh()
@@ -737,6 +757,8 @@ def _render_duplicate_name_resolver(
                     st.rerun()
                 else:
                     st.warning("No duplicate name choices were ready to save.")
+            except ReviewConflictError as exc:
+                st.warning(str(exc))
             except OSError as exc:
                 st.error(f"Could not save duplicate name choices. Close the CSV if it is open, then try again. Details: {exc}")
 
@@ -1008,7 +1030,8 @@ def _render_manual_checker(
     st.subheader("Manual Checker")
     st.caption("Review all selected students by last-known status. Filter by P&G bucket, fill verified corrections, and save completed decisions to the manual status CSV.")
 
-    _render_legacy_manual_importer(manual_status_file)
+    if not shared_mode():
+        _render_legacy_manual_importer(manual_status_file)
 
     queue = _ensure_manual_checker_state(checker_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
@@ -1237,24 +1260,34 @@ def _render_manual_checker(
     with action_cols[3]:
         if st.button("Save Selected", use_container_width=True, disabled=completed_selected_rows.empty):
             try:
-                path, saved = append_manual_status_rows(completed_selected_rows, manual_status_file)
+                path, saved = append_manual_status_rows(
+                    completed_selected_rows, manual_status_file,
+                    expected_rows=manual_rows if shared_mode() else None,
+                )
                 if saved:
                     st.success(f"Saved {saved:,} selected manual row(s) to {path}.")
                     st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
+            except ReviewConflictError as exc:
+                st.warning(str(exc))
             except OSError as exc:
                 st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
     with action_cols[4]:
         if st.button("Save All Ready", use_container_width=True, disabled=ready_count == 0):
             try:
                 completed_rows = _completed_manual_checker_rows(queue.loc[ready_mask].copy())
-                path, saved = append_manual_status_rows(completed_rows, manual_status_file)
+                path, saved = append_manual_status_rows(
+                    completed_rows, manual_status_file,
+                    expected_rows=manual_rows if shared_mode() else None,
+                )
                 if saved:
                     st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
                     st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
+            except ReviewConflictError as exc:
+                st.warning(str(exc))
             except OSError as exc:
                 st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
 
@@ -1330,14 +1363,19 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
                 options=STATUS_OPTIONS,
             ),
         },
-        key="sql_compile_manual_rows_editor",
+        key=f"sql_compile_manual_rows_editor_{_dashboard_data_refresh_token()}",
     )
     if st.button("Save Manual CSV", use_container_width=True):
         try:
-            path = write_manual_status_rows(edited_manual, manual_status_file)
+            path = write_manual_status_rows(
+                edited_manual, manual_status_file,
+                expected_rows=manual_rows if shared_mode() else None,
+            )
             _request_dashboard_data_refresh()
             st.success(f"Saved manual rows to {path}.")
             st.rerun()
+        except ReviewConflictError as exc:
+            st.warning(str(exc))
         except OSError as exc:
             st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
 
@@ -1346,21 +1384,28 @@ def main() -> None:
     _persistence_header()
     st.caption("New baseline dashboard powered by the sqlCompile roster database and manual status review file.")
 
-    default_database = DEFAULT_OUTPUT_PATH
-    default_manual = DEFAULT_MANUAL_STATUS_PATH
-    default_duplicate_names = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
-    default_duplicate_rechecks = DEFAULT_DUPLICATE_NAME_RECHECK_PATH
-    database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(default_database)))
-    manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(default_manual)))
-    duplicate_name_resolution_file = Path(
-        st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(default_duplicate_names))
-    )
-    duplicate_name_recheck_file = Path(
-        st.sidebar.text_input("Duplicate name recheck CSV", value=_path_text(default_duplicate_rechecks))
-    )
+    shared = shared_mode()
+    zero_member_periods_file = DEFAULT_ZERO_MEMBER_PERIODS_PATH
+    if shared:
+        try:
+            config = load_host_config()
+        except (OSError, ValueError) as exc:
+            st.error(f"Host configuration needs attention: {exc}")
+            return
+        database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file = config.data_paths
+        st.sidebar.caption("Shared dashboard | No sign-in")
+    else:
+        database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(DEFAULT_OUTPUT_PATH)))
+        manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(DEFAULT_MANUAL_STATUS_PATH)))
+        duplicate_name_resolution_file = Path(
+            st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH))
+        )
+        duplicate_name_recheck_file = Path(
+            st.sidebar.text_input("Duplicate name recheck CSV", value=_path_text(DEFAULT_DUPLICATE_NAME_RECHECK_PATH))
+        )
 
     st.sidebar.subheader("Refresh")
-    if st.sidebar.button("Run sqlCompile", use_container_width=True):
+    if not shared and st.sidebar.button("Run sqlCompile", use_container_width=True):
         try:
             result = sqlCompile(output_path=database_path)
             _request_dashboard_data_refresh()
@@ -1374,23 +1419,37 @@ def main() -> None:
     st.sidebar.caption("Manual saves are cached for speed. Refresh dashboard data when you want saved statuses reflected in rates and flags.")
 
     if not database_path.exists():
-        st.error("No sqlCompile SQLite file was found. Run `python sqlCompile.py --all-semesters` first, or use the sidebar button after your roster paths are configured.")
+        st.error("The host's compiled database is not available. Ask the host operator to compile or restore it." if shared else "No sqlCompile SQLite file was found. Run `python sqlCompile.py --all-semesters` first, or use the sidebar button after your roster paths are configured.")
         return
 
     try:
-        all_tables = _cached_load_dashboard_tables(
-            str(database_path.resolve()),
-            _mtime_ns(database_path),
-            str(manual_status_file.resolve()),
-            str(duplicate_name_resolution_file.resolve()),
-            _mtime_ns(duplicate_name_resolution_file),
-            str(duplicate_name_recheck_file.resolve()),
-            _mtime_ns(duplicate_name_recheck_file),
-            _dashboard_data_refresh_token(),
-        )
+        paths = (database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file)
+        snapshot = st.session_state.get(SHARED_SNAPSHOT_KEY) if shared else None
+        if snapshot is not None and snapshot[0] == paths:
+            _, revision, all_tables = snapshot
+        else:
+            revision = data_revision(paths)
+            all_tables = _cached_load_dashboard_tables(
+                str(database_path.resolve()),
+                revision[0][0],
+                str(manual_status_file.resolve()),
+                str(duplicate_name_resolution_file.resolve()),
+                revision[2][0],
+                str(duplicate_name_recheck_file.resolve()),
+                revision[3][0],
+                _dashboard_data_refresh_token(),
+                str(zero_member_periods_file.resolve()),
+                revision if shared else (revision[4],),
+            )
+            if shared:
+                # Keep drafts and the displayed data stable until an explicit refresh.
+                st.session_state[SHARED_SNAPSHOT_KEY] = (paths, revision, all_tables)
     except Exception as exc:
         st.error(f"Could not load sqlCompile dashboard data: {exc}")
         return
+
+    if shared:
+        _shared_change_notice(paths, revision)
 
     cohort_options = _selected_cohorts(all_tables.rate_table)
     selected_cohorts, selected_label = _cohort_filter(cohort_options)
@@ -1407,7 +1466,7 @@ def main() -> None:
         chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
     outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if uses_pg_controls else base_outcomes
 
-    if st.sidebar.button("Write Report Files", use_container_width=True):
+    if not shared and st.sidebar.button("Write Report Files", use_container_width=True):
         try:
             report = build_new_member_cohort_report(
                 database_path=database_path,

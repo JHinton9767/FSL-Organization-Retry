@@ -8,9 +8,10 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from src.sqlCompile import DEFAULT_OUTPUT_PATH, TABLE_NAME
+from src.sqlCompile import DEFAULT_OUTPUT_PATH, TABLE_NAME, _resolve_path
 from src.sqlCompile_cohort import (
     DEFAULT_MANUAL_STATUS_PATH,
+    DEFAULT_ZERO_MEMBER_PERIODS_PATH,
     MANUAL_STATUS_COLUMNS,
     build_new_member_cohort_tables,
     normalize_status_code,
@@ -19,7 +20,9 @@ from src.sqlCompile_cohort import (
     read_roster_inventory_table,
     read_student_name_table,
     read_sql_compile_table,
+    read_zero_member_periods,
 )
+from src.sqlCompile_storage import append_review_csv, data_lock, read_review_csv, write_review_csv
 from src.path_config import ROOT
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
@@ -309,12 +312,9 @@ def _ensure_duplicate_name_resolution_columns(frame: pd.DataFrame) -> pd.DataFra
 def ensure_duplicate_name_resolution_file(
     path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
 ) -> Path:
-    destination = Path(path)
-    if not destination.is_absolute():
-        destination = ROOT / destination
+    destination = _resolve_path(path)
     if not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS).to_csv(destination, index=False)
+        read_review_csv(destination, DUPLICATE_NAME_RESOLUTION_COLUMNS)
     return destination
 
 
@@ -323,42 +323,33 @@ def read_duplicate_name_resolution_rows(
     *,
     create_if_missing: bool = True,
 ) -> pd.DataFrame:
-    resolution_path = ensure_duplicate_name_resolution_file(path) if create_if_missing else Path(path)
-    if not resolution_path.is_absolute():
-        resolution_path = ROOT / resolution_path
-    if not resolution_path.exists():
-        return pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS)
-    try:
-        frame = pd.read_csv(resolution_path, dtype=str).fillna("")
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS)
+    frame = read_review_csv(_resolve_path(path), DUPLICATE_NAME_RESOLUTION_COLUMNS, create=create_if_missing)
     return _ensure_duplicate_name_resolution_columns(frame)
 
 
 def write_duplicate_name_resolution_rows(
     frame: pd.DataFrame,
     path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
 ) -> Path:
-    destination = ensure_duplicate_name_resolution_file(path)
-    _ensure_duplicate_name_resolution_columns(frame).to_csv(destination, index=False)
-    return destination
+    return write_review_csv(
+        frame, _resolve_path(path), _ensure_duplicate_name_resolution_columns, expected_rows=expected_rows,
+    )
 
 
 def append_duplicate_name_resolution_rows(
     frame: pd.DataFrame,
     path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
 ) -> tuple[Path, int]:
     incoming = _ensure_duplicate_name_resolution_columns(frame)
     incoming = incoming.loc[incoming["Student ID"].ne("") & incoming["Student Name"].ne("")].copy()
-    destination = ensure_duplicate_name_resolution_file(path)
-    if incoming.empty:
-        return destination, 0
-
-    existing = read_duplicate_name_resolution_rows(destination)
-    combined = pd.concat([existing, incoming], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["Student ID"], keep="last")
-    write_duplicate_name_resolution_rows(combined, destination)
-    return destination, len(incoming)
+    return append_review_csv(
+        incoming, _resolve_path(path), _ensure_duplicate_name_resolution_columns, ["Student ID"],
+        expected_rows=expected_rows,
+    )
 
 
 def _duplicate_name_resolution_lookup(resolutions: Optional[pd.DataFrame]) -> dict[str, str]:
@@ -382,12 +373,9 @@ def _ensure_duplicate_name_recheck_columns(frame: pd.DataFrame) -> pd.DataFrame:
 def ensure_duplicate_name_recheck_file(
     path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
 ) -> Path:
-    destination = Path(path)
-    if not destination.is_absolute():
-        destination = ROOT / destination
+    destination = _resolve_path(path)
     if not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS).to_csv(destination, index=False)
+        read_review_csv(destination, DUPLICATE_NAME_RECHECK_COLUMNS)
     return destination
 
 
@@ -396,42 +384,33 @@ def read_duplicate_name_recheck_rows(
     *,
     create_if_missing: bool = True,
 ) -> pd.DataFrame:
-    recheck_path = ensure_duplicate_name_recheck_file(path) if create_if_missing else Path(path)
-    if not recheck_path.is_absolute():
-        recheck_path = ROOT / recheck_path
-    if not recheck_path.exists():
-        return pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS)
-    try:
-        frame = pd.read_csv(recheck_path, dtype=str).fillna("")
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=DUPLICATE_NAME_RECHECK_COLUMNS)
+    frame = read_review_csv(_resolve_path(path), DUPLICATE_NAME_RECHECK_COLUMNS, create=create_if_missing)
     return _ensure_duplicate_name_recheck_columns(frame)
 
 
 def write_duplicate_name_recheck_rows(
     frame: pd.DataFrame,
     path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
 ) -> Path:
-    destination = ensure_duplicate_name_recheck_file(path)
-    _ensure_duplicate_name_recheck_columns(frame).to_csv(destination, index=False)
-    return destination
+    return write_review_csv(
+        frame, _resolve_path(path), _ensure_duplicate_name_recheck_columns, expected_rows=expected_rows,
+    )
 
 
 def append_duplicate_name_recheck_rows(
     frame: pd.DataFrame,
     path: str | Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
 ) -> tuple[Path, int]:
     incoming = _ensure_duplicate_name_recheck_columns(frame)
     incoming = incoming.loc[incoming["Student ID"].ne("")].copy()
-    destination = ensure_duplicate_name_recheck_file(path)
-    if incoming.empty:
-        return destination, 0
-
-    existing = read_duplicate_name_recheck_rows(destination)
-    combined = pd.concat([existing, incoming], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["Student ID"], keep="last")
-    write_duplicate_name_recheck_rows(combined, destination)
-    return destination, len(incoming)
+    return append_review_csv(
+        incoming, _resolve_path(path), _ensure_duplicate_name_recheck_columns, ["Student ID"],
+        expected_rows=expected_rows,
+    )
 
 
 def _normalized_student_name_key(value: object) -> str:
@@ -1018,11 +997,13 @@ def load_dashboard_tables(
     table_name: str = TABLE_NAME,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = True,
+    zero_member_periods_file: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH,
 ) -> SqlCompileDashboardTables:
-    compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
-    roster_inventory = read_roster_inventory_table(database_path)
-    student_names = read_student_name_table(database_path)
-    student_name_observations = read_student_name_observations_table(database_path)
+    with data_lock(_resolve_path(database_path)):
+        compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
+        roster_inventory = read_roster_inventory_table(database_path)
+        student_names = read_student_name_table(database_path)
+        student_name_observations = read_student_name_observations_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
     duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file)
     duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file)
@@ -1030,6 +1011,7 @@ def load_dashboard_tables(
         compiled_rows,
         manual_rows,
         roster_inventory=roster_inventory,
+        zero_member_periods=read_zero_member_periods(zero_member_periods_file),
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
     )

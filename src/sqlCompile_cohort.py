@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +12,13 @@ import pandas as pd
 from src.build_canonical_pipeline import parse_term_code, sort_term_code
 from src.path_config import ROOT
 from src.shared_utils import clean_text
+from src.sqlCompile_storage import (
+    append_review_csv,
+    atomic_database_update,
+    read_database,
+    read_review_csv,
+    write_review_csv,
+)
 from src.sqlCompile import (
     DEFAULT_OUTPUT_PATH,
     OUTPUT_COLUMNS,
@@ -164,8 +169,7 @@ def outcome_bucket(status_code: str, needs_manual_review: bool) -> str:
 def ensure_manual_status_file(path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> Path:
     destination = _resolve_path(path)
     if not destination.exists():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(columns=MANUAL_STATUS_COLUMNS).to_csv(destination, index=False)
+        read_review_csv(destination, MANUAL_STATUS_COLUMNS)
     return destination
 
 
@@ -180,13 +184,7 @@ def _ensure_columns(frame: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame
 
 
 def read_manual_status_rows(path: str | Path = DEFAULT_MANUAL_STATUS_PATH, create_if_missing: bool = True) -> pd.DataFrame:
-    manual_path = ensure_manual_status_file(path) if create_if_missing else _resolve_path(path)
-    if not manual_path.exists():
-        return pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
-    try:
-        frame = pd.read_csv(manual_path, dtype=str).fillna("")
-    except pd.errors.EmptyDataError:
-        return pd.DataFrame(columns=MANUAL_STATUS_COLUMNS)
+    frame = read_review_csv(_resolve_path(path), MANUAL_STATUS_COLUMNS, create=create_if_missing)
     return _ensure_columns(frame, MANUAL_STATUS_COLUMNS)
 
 
@@ -201,11 +199,16 @@ def read_zero_member_periods(path: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH
     return _ensure_columns(frame, ZERO_MEMBER_PERIOD_COLUMNS)
 
 
-def write_manual_status_rows(frame: pd.DataFrame, path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> Path:
-    destination = _resolve_path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_columns(frame, MANUAL_STATUS_COLUMNS).to_csv(destination, index=False)
-    return destination
+def write_manual_status_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_MANUAL_STATUS_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
+) -> Path:
+    return write_review_csv(
+        frame, _resolve_path(path), lambda rows: _ensure_columns(rows, MANUAL_STATUS_COLUMNS),
+        expected_rows=expected_rows,
+    )
 
 
 def completed_manual_status_rows(frame: pd.DataFrame) -> pd.DataFrame:
@@ -215,20 +218,18 @@ def completed_manual_status_rows(frame: pd.DataFrame) -> pd.DataFrame:
     ].copy()
 
 
-def append_manual_status_rows(frame: pd.DataFrame, path: str | Path = DEFAULT_MANUAL_STATUS_PATH) -> tuple[Path, int]:
+def append_manual_status_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_MANUAL_STATUS_PATH,
+    *,
+    expected_rows: pd.DataFrame | None = None,
+) -> tuple[Path, int]:
     incoming = completed_manual_status_rows(frame)
-    destination = ensure_manual_status_file(path)
-    if incoming.empty:
-        return destination, 0
-
-    existing = read_manual_status_rows(destination)
-    combined = pd.concat([existing, incoming], ignore_index=True)
-    combined = combined.drop_duplicates(
-        subset=["Cohort Semester", "Cohort Chapter", "Semester", "Chapter", "Student ID"],
-        keep="last",
+    return append_review_csv(
+        incoming, _resolve_path(path), lambda rows: _ensure_columns(rows, MANUAL_STATUS_COLUMNS),
+        ["Cohort Semester", "Cohort Chapter", "Semester", "Chapter", "Student ID"],
+        expected_rows=expected_rows,
     )
-    write_manual_status_rows(combined, destination)
-    return destination, len(incoming)
 
 
 def read_sql_compile_table(database_path: str | Path = DEFAULT_OUTPUT_PATH, table_name: str = TABLE_NAME) -> pd.DataFrame:
@@ -237,7 +238,7 @@ def read_sql_compile_table(database_path: str | Path = DEFAULT_OUTPUT_PATH, tabl
         raise FileNotFoundError(f"SQL compile database not found: {database}")
 
     columns = ", ".join(_quote_identifier(column) for column in OUTPUT_COLUMNS)
-    with closing(sqlite3.connect(database)) as connection, connection:
+    with read_database(database) as connection:
         frame = pd.read_sql_query(f"SELECT {columns} FROM {_quote_identifier(table_name)}", connection)
     return _ensure_columns(frame, OUTPUT_COLUMNS)
 
@@ -250,7 +251,7 @@ def read_roster_inventory_table(
     if not database.exists():
         return pd.DataFrame(columns=ROSTER_INVENTORY_COLUMNS)
 
-    with closing(sqlite3.connect(database)) as connection, connection:
+    with read_database(database) as connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -269,7 +270,7 @@ def read_student_name_table(
     if not database.exists():
         return pd.DataFrame(columns=STUDENT_NAME_COLUMNS)
 
-    with closing(sqlite3.connect(database)) as connection, connection:
+    with read_database(database) as connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -288,7 +289,7 @@ def read_student_name_observations_table(
     if not database.exists():
         return pd.DataFrame(columns=STUDENT_NAME_OBSERVATION_COLUMNS)
 
-    with closing(sqlite3.connect(database)) as connection, connection:
+    with read_database(database) as connection:
         exists = connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -955,7 +956,7 @@ def write_report_tables(
     summary: pd.DataFrame,
 ) -> None:
     database = _resolve_path(database_path)
-    with closing(sqlite3.connect(database)) as connection, connection:
+    with atomic_database_update(database) as connection:
         for frame, table_name in [
             (timeline, REPORT_TABLES["timeline"]),
             (outcomes, REPORT_TABLES["outcomes"]),

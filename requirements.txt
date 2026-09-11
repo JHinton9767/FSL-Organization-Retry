@@ -7,3 +7,4 @@ pyarrow>=17.0.0
 pytest>=8.3.0
 streamlit>=1.39.0
 kaleido>=0.2.1
+filelock>=3.16.1,<4

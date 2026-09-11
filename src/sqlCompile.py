@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sqlite3
-from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -35,6 +33,7 @@ from src.build_master_roster import (
     source_file_label,
 )
 from src.path_config import ROOT, load_path_config
+from src.sqlCompile_storage import atomic_database_update
 from src.shared_utils import clean_text
 
 
@@ -550,7 +549,7 @@ def write_sqlite(
     column_identifiers = [_quote_identifier(column) for column in OUTPUT_COLUMNS]
     placeholders = ", ".join(["?"] * len(OUTPUT_COLUMNS))
 
-    with closing(sqlite3.connect(destination)) as connection, connection:
+    with atomic_database_update(destination) as connection:
         connection.execute(f"DROP TABLE IF EXISTS {table_identifier}")
         connection.execute(
             f"CREATE TABLE {table_identifier} ("
