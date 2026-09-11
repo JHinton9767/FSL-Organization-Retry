@@ -19,11 +19,14 @@ from src.sqlCompile_cohort import (
     read_student_name_table,
     read_sql_compile_table,
 )
+from src.path_config import ROOT
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
 
 FUTURE_MILESTONE_BUCKET = "Future"
 DUPLICATE_NAME_MISMATCH_OUTCOME = "Duplicate ID / Name Mismatch"
+DUPLICATE_NAME_RESOLUTION_COLUMNS = ["Student ID", "Student Name", "Notes"]
+DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH = ROOT / "config" / "sqlCompile_duplicate_name_resolutions.csv"
 PG_CHART_BREAKDOWN_OVERALL = "Overall"
 PG_CHART_BREAKDOWN_MILESTONE = PG_CHART_BREAKDOWN_OVERALL
 PG_CHART_BREAKDOWN_SEMESTER = "Semester joined"
@@ -158,6 +161,7 @@ class SqlCompileDashboardTables:
     manual_entry_template: pd.DataFrame
     manual_checker_template: pd.DataFrame
     manual_rows: pd.DataFrame
+    duplicate_name_resolutions: pd.DataFrame
     selected_semesters: list[str]
 
 
@@ -291,6 +295,79 @@ def attach_student_names(frame: pd.DataFrame, student_names: pd.DataFrame) -> pd
     return result
 
 
+def _ensure_duplicate_name_resolution_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    result = _ensure_missing_columns(frame, DUPLICATE_NAME_RESOLUTION_COLUMNS)
+    for column in DUPLICATE_NAME_RESOLUTION_COLUMNS:
+        result[column] = result[column].fillna("").astype(str).str.strip()
+    return result.loc[:, DUPLICATE_NAME_RESOLUTION_COLUMNS]
+
+
+def ensure_duplicate_name_resolution_file(
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+) -> Path:
+    destination = Path(path)
+    if not destination.is_absolute():
+        destination = ROOT / destination
+    if not destination.exists():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS).to_csv(destination, index=False)
+    return destination
+
+
+def read_duplicate_name_resolution_rows(
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+    *,
+    create_if_missing: bool = True,
+) -> pd.DataFrame:
+    resolution_path = ensure_duplicate_name_resolution_file(path) if create_if_missing else Path(path)
+    if not resolution_path.is_absolute():
+        resolution_path = ROOT / resolution_path
+    if not resolution_path.exists():
+        return pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS)
+    try:
+        frame = pd.read_csv(resolution_path, dtype=str).fillna("")
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=DUPLICATE_NAME_RESOLUTION_COLUMNS)
+    return _ensure_duplicate_name_resolution_columns(frame)
+
+
+def write_duplicate_name_resolution_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+) -> Path:
+    destination = ensure_duplicate_name_resolution_file(path)
+    _ensure_duplicate_name_resolution_columns(frame).to_csv(destination, index=False)
+    return destination
+
+
+def append_duplicate_name_resolution_rows(
+    frame: pd.DataFrame,
+    path: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+) -> tuple[Path, int]:
+    incoming = _ensure_duplicate_name_resolution_columns(frame)
+    incoming = incoming.loc[incoming["Student ID"].ne("") & incoming["Student Name"].ne("")].copy()
+    destination = ensure_duplicate_name_resolution_file(path)
+    if incoming.empty:
+        return destination, 0
+
+    existing = read_duplicate_name_resolution_rows(destination)
+    combined = pd.concat([existing, incoming], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["Student ID"], keep="last")
+    write_duplicate_name_resolution_rows(combined, destination)
+    return destination, len(incoming)
+
+
+def _duplicate_name_resolution_lookup(resolutions: Optional[pd.DataFrame]) -> dict[str, str]:
+    if resolutions is None or resolutions.empty:
+        return {}
+    prepared = _ensure_duplicate_name_resolution_columns(resolutions)
+    prepared = prepared.loc[prepared["Student ID"].ne("") & prepared["Student Name"].ne("")].copy()
+    if prepared.empty:
+        return {}
+    prepared = prepared.drop_duplicates(subset=["Student ID"], keep="last")
+    return prepared.set_index("Student ID")["Student Name"].to_dict()
+
+
 def _normalized_student_name_key(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
 
@@ -351,6 +428,7 @@ def _row_with_earliest_cohort(group: pd.DataFrame) -> pd.Series:
 def consolidate_duplicate_student_outcomes(
     outcomes: pd.DataFrame,
     name_observations: Optional[pd.DataFrame] = None,
+    duplicate_name_resolutions: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     if outcomes.empty or "Student ID" not in outcomes.columns:
         return outcomes.copy()
@@ -387,12 +465,14 @@ def consolidate_duplicate_student_outcomes(
         return work.loc[:, [*columns, *extra_columns]].reset_index(drop=True)
 
     observed_names = _observed_names_by_student_id(work, name_observations if name_observations is not None else pd.DataFrame())
+    resolved_names = _duplicate_name_resolution_lookup(duplicate_name_resolutions)
     rows: list[pd.Series] = []
     non_duplicates = work.loc[~work["Student ID"].isin(duplicate_ids)].copy()
     rows.extend(row for _, row in non_duplicates.iterrows())
 
     for student_id, group in work.loc[work["Student ID"].isin(duplicate_ids)].groupby("Student ID", sort=False):
-        names = observed_names.get(str(student_id), [])
+        resolved_name = str(resolved_names.get(str(student_id), "") or "").strip()
+        names = [resolved_name] if resolved_name else observed_names.get(str(student_id), [])
         if not names:
             names = [
                 name
@@ -868,6 +948,7 @@ def odd_record_editor_to_manual_rows(edited: pd.DataFrame) -> pd.DataFrame:
 def load_dashboard_tables(
     database_path: str | Path = DEFAULT_OUTPUT_PATH,
     manual_status_file: str | Path = DEFAULT_MANUAL_STATUS_PATH,
+    duplicate_name_resolution_file: str | Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
     table_name: str = TABLE_NAME,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = True,
@@ -877,6 +958,7 @@ def load_dashboard_tables(
     student_names = read_student_name_table(database_path)
     student_name_observations = read_student_name_observations_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file)
+    duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         manual_rows,
@@ -885,7 +967,11 @@ def load_dashboard_tables(
         all_cohorts=all_cohorts,
     )
     outcomes = attach_student_names(outcomes, student_names)
-    outcomes = consolidate_duplicate_student_outcomes(outcomes, student_name_observations)
+    outcomes = consolidate_duplicate_student_outcomes(
+        outcomes,
+        student_name_observations,
+        duplicate_name_resolutions,
+    )
     review = attach_student_names(review, student_names)
     return SqlCompileDashboardTables(
         timeline=timeline,
@@ -897,6 +983,7 @@ def load_dashboard_tables(
         manual_entry_template=build_manual_entry_template(review),
         manual_checker_template=build_last_known_status_template(outcomes),
         manual_rows=manual_rows,
+        duplicate_name_resolutions=duplicate_name_resolutions,
         selected_semesters=selected_semesters,
     )
 

@@ -19,6 +19,9 @@ from src.sqlCompile_cohort import (
     write_manual_status_rows,
 )
 from src.sqlCompile_dashboard import (
+    DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH,
+    DUPLICATE_NAME_MISMATCH_OUTCOME,
+    DUPLICATE_NAME_RESOLUTION_COLUMNS,
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
@@ -27,6 +30,7 @@ from src.sqlCompile_dashboard import (
     PG_CHART_BREAKDOWN_OPTIONS,
     PG_CHART_BREAKDOWN_SEMESTER,
     SQL_COMPILE_ALL_TIME_LABEL,
+    append_duplicate_name_resolution_rows,
     build_manual_checker_queue,
     build_pg_aligned_manual_checker_template,
     build_sql_compile_milestone_dashboard,
@@ -148,12 +152,15 @@ def _cached_load_dashboard_tables(
     database_path_text: str,
     database_mtime_ns: int,
     manual_status_file_text: str,
+    duplicate_name_resolution_file_text: str,
+    duplicate_name_resolution_mtime_ns: int,
     dashboard_refresh_token: int,
 ):
-    del database_mtime_ns, dashboard_refresh_token
+    del database_mtime_ns, duplicate_name_resolution_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
         database_path=Path(database_path_text),
         manual_status_file=Path(manual_status_file_text),
+        duplicate_name_resolution_file=Path(duplicate_name_resolution_file_text),
         all_cohorts=True,
     )
 
@@ -169,11 +176,14 @@ def _session_cached_milestone_dashboard(
     chart_milestone_offsets: list[int],
     database_path: Path,
     manual_status_file: Path,
+    duplicate_name_resolution_file: Path,
 ) -> dict[str, object]:
     key = (
         str(database_path.resolve()),
         _mtime_ns(database_path),
         str(manual_status_file.resolve()),
+        str(duplicate_name_resolution_file.resolve()),
+        _mtime_ns(duplicate_name_resolution_file),
         _dashboard_data_refresh_token(),
         tuple(str(cohort).strip() for cohort in selected_cohorts),
         tuple(str(chapter).strip() for chapter in selected_chapters),
@@ -444,6 +454,140 @@ def _saved_manual_rows_for_queue(manual_rows: pd.DataFrame, queue: pd.DataFrame)
     return prepared.loc[mask, MANUAL_STATUS_COLUMNS].reset_index(drop=True)
 
 
+def _name_choices_from_duplicate_row(row: pd.Series) -> list[str]:
+    candidates: list[str] = []
+    for column in ["Student Name", "Notes"]:
+        text = str(row.get(column, "") or "").strip()
+        if not text:
+            continue
+        if "mismatched observed names:" in text.lower():
+            text = text.split(":", 1)[-1].strip()
+        for part in text.split("|"):
+            name = part.strip()
+            if name and name.lower() not in {"duplicate student id has mismatched observed names"}:
+                candidates.append(name)
+
+    choices: list[str] = []
+    seen: set[str] = set()
+    for name in candidates:
+        key = "".join(character for character in name.lower() if character.isalnum())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        choices.append(name)
+    return choices
+
+
+def _duplicate_name_conflicts(queue: pd.DataFrame) -> pd.DataFrame:
+    columns = ["Student ID", "Observed Names", "Name Choices", "Cohort Semester", "Cohort Chapter"]
+    if queue.empty or "Last Known Outcome Bucket" not in queue.columns:
+        return pd.DataFrame(columns=columns)
+
+    bucket = queue["Last Known Outcome Bucket"].fillna("").astype(str).str.strip()
+    conflicts = queue.loc[bucket.eq(DUPLICATE_NAME_MISMATCH_OUTCOME)].copy()
+    if conflicts.empty:
+        return pd.DataFrame(columns=columns)
+
+    rows: list[dict[str, object]] = []
+    for student_id, group in conflicts.groupby("Student ID", sort=False):
+        choices: list[str] = []
+        for _, row in group.iterrows():
+            for name in _name_choices_from_duplicate_row(row):
+                if name not in choices:
+                    choices.append(name)
+        if len(choices) < 2:
+            continue
+        first = group.iloc[0]
+        rows.append(
+            {
+                "Student ID": str(student_id).strip(),
+                "Observed Names": " | ".join(choices),
+                "Name Choices": choices,
+                "Cohort Semester": str(first.get("Cohort Semester", "") or "").strip(),
+                "Cohort Chapter": str(first.get("Cohort Chapter", "") or "").strip(),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _render_duplicate_name_resolver(
+    queue: pd.DataFrame,
+    duplicate_name_resolution_file: Path,
+    duplicate_name_resolutions: pd.DataFrame,
+) -> None:
+    conflicts = _duplicate_name_conflicts(queue)
+    if conflicts.empty:
+        return
+
+    saved_lookup: dict[str, str] = {}
+    if not duplicate_name_resolutions.empty:
+        prepared = duplicate_name_resolutions.copy()
+        for column in DUPLICATE_NAME_RESOLUTION_COLUMNS:
+            if column not in prepared.columns:
+                prepared[column] = ""
+            prepared[column] = prepared[column].fillna("").astype(str).str.strip()
+        prepared = prepared.loc[prepared["Student ID"].ne("") & prepared["Student Name"].ne("")]
+        saved_lookup = prepared.drop_duplicates(subset=["Student ID"], keep="last").set_index("Student ID")[
+            "Student Name"
+        ].to_dict()
+
+    with st.expander(f"Duplicate ID name choices ({len(conflicts):,})", expanded=True):
+        st.caption("Pick the correct name for each duplicate Student ID, then save. Refreshing will remove resolved name-mismatch rows from this list.")
+        with st.form("sql_compile_duplicate_name_resolution_form"):
+            selected_rows: list[dict[str, str]] = []
+            for index, row in conflicts.reset_index(drop=True).iterrows():
+                student_id = str(row["Student ID"]).strip()
+                choices = [str(value).strip() for value in row["Name Choices"] if str(value).strip()]
+                saved_name = saved_lookup.get(student_id, "")
+                selected_index = choices.index(saved_name) if saved_name in choices else 0
+                cols = st.columns([1, 1.4, 2.2])
+                with cols[0]:
+                    st.text_input(
+                        "Student ID",
+                        value=student_id,
+                        disabled=True,
+                        key=f"sql_compile_dup_id_{student_id}_{index}",
+                    )
+                with cols[1]:
+                    st.text_input(
+                        "Cohort",
+                        value=f"{row['Cohort Semester']} | {row['Cohort Chapter']}",
+                        disabled=True,
+                        key=f"sql_compile_dup_cohort_{student_id}_{index}",
+                    )
+                with cols[2]:
+                    selected_name = st.selectbox(
+                        "Correct name",
+                        options=choices,
+                        index=selected_index,
+                        key=f"sql_compile_dup_name_{student_id}_{index}",
+                    )
+                selected_rows.append(
+                    {
+                        "Student ID": student_id,
+                        "Student Name": selected_name,
+                        "Notes": f"Resolved from observed names: {row['Observed Names']}",
+                    }
+                )
+
+            save_requested = st.form_submit_button("Save Name Choices", type="primary", use_container_width=True)
+
+        if save_requested:
+            try:
+                path, saved = append_duplicate_name_resolution_rows(
+                    pd.DataFrame(selected_rows, columns=DUPLICATE_NAME_RESOLUTION_COLUMNS),
+                    duplicate_name_resolution_file,
+                )
+                if saved:
+                    _request_dashboard_data_refresh()
+                    st.success(f"Saved {saved:,} duplicate name choice(s) to {path}.")
+                    st.rerun()
+                else:
+                    st.warning("No duplicate name choices were ready to save.")
+            except OSError as exc:
+                st.error(f"Could not save duplicate name choices. Close the CSV if it is open, then try again. Details: {exc}")
+
+
 def _render_legacy_manual_importer(manual_status_file: Path) -> None:
     with st.expander("Reuse Legacy Manual Decisions", expanded=False):
         legacy_path_text = st.text_input(
@@ -701,6 +845,8 @@ def _render_manual_checker(
     checker_template: pd.DataFrame,
     manual_status_file: Path,
     manual_rows: pd.DataFrame,
+    duplicate_name_resolution_file: Path,
+    duplicate_name_resolutions: pd.DataFrame,
     *,
     outcome_filter_label: str = "Last outcome",
 ) -> None:
@@ -711,6 +857,7 @@ def _render_manual_checker(
 
     queue = _ensure_manual_checker_state(checker_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
+    _render_duplicate_name_resolver(queue, duplicate_name_resolution_file, duplicate_name_resolutions)
 
     if queue.empty:
         st.success("No student status records are available for the current cohort selection.")
@@ -1040,8 +1187,12 @@ def main() -> None:
 
     default_database = DEFAULT_OUTPUT_PATH
     default_manual = DEFAULT_MANUAL_STATUS_PATH
+    default_duplicate_names = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
     database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(default_database)))
     manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(default_manual)))
+    duplicate_name_resolution_file = Path(
+        st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(default_duplicate_names))
+    )
 
     st.sidebar.subheader("Refresh")
     if st.sidebar.button("Run sqlCompile", use_container_width=True):
@@ -1066,6 +1217,8 @@ def main() -> None:
             str(database_path.resolve()),
             _mtime_ns(database_path),
             str(manual_status_file.resolve()),
+            str(duplicate_name_resolution_file.resolve()),
+            _mtime_ns(duplicate_name_resolution_file),
             _dashboard_data_refresh_token(),
         )
     except Exception as exc:
@@ -1128,6 +1281,7 @@ def main() -> None:
             chart_milestone_offsets=chart_milestone_offsets,
             database_path=database_path,
             manual_status_file=manual_status_file,
+            duplicate_name_resolution_file=duplicate_name_resolution_file,
         )
 
     if section == "Persistence & Graduation":
@@ -1161,6 +1315,8 @@ def main() -> None:
             checker_template.loc[:, LAST_KNOWN_STATUS_COLUMNS] if not checker_template.empty else checker_template,
             manual_status_file,
             all_tables.manual_rows,
+            duplicate_name_resolution_file,
+            all_tables.duplicate_name_resolutions,
             outcome_filter_label=f"Last outcome ({checker_milestone_offset} Year P&G)",
         )
 

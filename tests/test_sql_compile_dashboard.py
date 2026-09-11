@@ -2,10 +2,12 @@ import pandas as pd
 
 from src.sqlCompile_dashboard import (
     DUPLICATE_NAME_MISMATCH_OUTCOME,
+    DUPLICATE_NAME_RESOLUTION_COLUMNS,
     LAST_KNOWN_STATUS_COLUMNS,
     MANUAL_CHECKER_SELECT_COLUMN,
     PG_CHART_BREAKDOWN_CHAPTER,
     PG_CHART_BREAKDOWN_SEMESTER,
+    append_duplicate_name_resolution_rows,
     build_dashboard_rate_table,
     build_last_known_status_template,
     build_manual_checker_queue,
@@ -15,6 +17,7 @@ from src.sqlCompile_dashboard import (
     build_sql_compile_milestone_dashboard,
     consolidate_duplicate_student_outcomes,
     odd_record_editor_to_manual_rows,
+    read_duplicate_name_resolution_rows,
 )
 
 
@@ -323,6 +326,78 @@ def test_duplicate_student_ids_with_name_mismatch_are_flagged_for_manual_checker
     assert row["Needs Manual Form Review"] == "Yes"
     assert "Jordan Lee | Jordan Leigh" in row["Notes"]
     assert aligned.iloc[0]["Last Known Outcome Bucket"] == DUPLICATE_NAME_MISMATCH_OUTCOME
+
+
+def test_duplicate_student_ids_with_saved_name_resolution_use_chosen_name() -> None:
+    outcomes = pd.DataFrame(
+        [
+            {
+                "Cohort Semester": "Fall 2021",
+                "Cohort Chapter": "Beta",
+                "Student ID": "A1",
+                "Student Name": "Jordan Lee",
+                "Last Known Semester": "Spring 2022",
+                "Last Known Chapter": "Beta",
+                "Last Known Status": "A",
+                "Last Known Status Code": "A",
+                "Final Outcome Bucket": "Needs Manual Form Review",
+                "Needs Manual Form Review": "Yes",
+                "Manual Status Applied": "No",
+            },
+            {
+                "Cohort Semester": "Fall 2020",
+                "Cohort Chapter": "Alpha",
+                "Student ID": "A1",
+                "Student Name": "Jordan Leigh",
+                "Last Known Semester": "Spring 2024",
+                "Last Known Chapter": "Alpha",
+                "Last Known Status": "G",
+                "Last Known Status Code": "G",
+                "Final Outcome Bucket": "Graduated",
+                "Needs Manual Form Review": "No",
+                "Manual Status Applied": "Yes",
+            },
+        ]
+    )
+    name_observations = pd.DataFrame(
+        [
+            {"Student ID": "A1", "Student Name": "Jordan Lee", "Observation Count": 1},
+            {"Student ID": "A1", "Student Name": "Jordan Leigh", "Observation Count": 1},
+        ]
+    )
+    resolutions = pd.DataFrame(
+        [{"Student ID": "A1", "Student Name": "Jordan Leigh", "Notes": "Verified from form."}]
+    )
+
+    consolidated = consolidate_duplicate_student_outcomes(outcomes, name_observations, resolutions)
+    template = build_last_known_status_template(consolidated)
+    row = template.iloc[0]
+
+    assert len(template) == 1
+    assert row["Student Name"] == "Jordan Leigh"
+    assert row["Cohort Semester"] == "Fall 2020"
+    assert row["Last Known Outcome Bucket"] == "Graduated"
+    assert row["Needs Manual Form Review"] == "No"
+
+
+def test_duplicate_name_resolution_rows_round_trip(tmp_path) -> None:
+    destination = tmp_path / "duplicate_name_resolutions.csv"
+    rows = pd.DataFrame(
+        [
+            {"Student ID": "A1", "Student Name": "Jordan Lee", "Notes": "Initial pick."},
+            {"Student ID": "A1", "Student Name": "Jordan Leigh", "Notes": "Corrected pick."},
+            {"Student ID": "A2", "Student Name": "", "Notes": "Incomplete row."},
+        ]
+    )
+
+    path, saved = append_duplicate_name_resolution_rows(rows, destination)
+    loaded = read_duplicate_name_resolution_rows(path)
+
+    assert saved == 2
+    assert loaded.columns.tolist() == DUPLICATE_NAME_RESOLUTION_COLUMNS
+    assert loaded.to_dict("records") == [
+        {"Student ID": "A1", "Student Name": "Jordan Leigh", "Notes": "Corrected pick."}
+    ]
 
 
 def test_pg_chart_counts_duplicate_name_mismatch_as_unknown() -> None:
