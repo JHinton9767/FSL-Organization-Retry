@@ -8,7 +8,7 @@ import streamlit as st
 
 from app.charts import COLOR_SEQUENCE, PLOTLY_TEMPLATE, persistence_milestone_chart
 from app.exports import dataframe_to_csv_bytes
-from src.sqlCompile import DEFAULT_OUTPUT_PATH, sqlCompile
+from src.sqlCompile import DEFAULT_OUTPUT_PATH, TABLE_NAME, sqlCompile
 from src.sqlCompile_cohort import (
     DEFAULT_COHORT_OUTPUT_DIR,
     DEFAULT_MANUAL_STATUS_PATH,
@@ -18,6 +18,8 @@ from src.sqlCompile_cohort import (
     build_new_member_cohort_report,
     completed_manual_status_rows,
     write_manual_status_rows,
+    read_sql_compile_table,
+    _semester_sort,
 )
 from src.sqlCompile_dashboard import (
     DEFAULT_DUPLICATE_NAME_RECHECK_PATH,
@@ -48,7 +50,8 @@ from src.sqlCompile_legacy_manual import (
 )
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 from src.sqlCompile_host import data_revision, load_host_config, shared_mode
-from src.sqlCompile_storage import ReviewConflictError
+from src.sqlCompile_reporting import read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
+from src.sqlCompile_storage import ReviewConflictError, read_database
 
 
 st.set_page_config(
@@ -167,6 +170,7 @@ def _cached_load_dashboard_tables(
     dashboard_refresh_token: int,
     zero_member_periods_file_text: str = str(DEFAULT_ZERO_MEMBER_PERIODS_PATH),
     source_revision: tuple = (),
+    reporting_cutoff: str | None = None,
 ):
     del database_mtime_ns, duplicate_name_resolution_mtime_ns, duplicate_name_recheck_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
@@ -176,7 +180,16 @@ def _cached_load_dashboard_tables(
         duplicate_name_recheck_file=Path(duplicate_name_recheck_file_text),
         all_cohorts=True,
         zero_member_periods_file=Path(zero_member_periods_file_text),
+        reporting_cutoff=reporting_cutoff,
     )
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def _cached_reporting_semesters(database_path: str, database_mtime: int) -> list[str]:
+    del database_mtime
+    with read_database(Path(database_path)) as connection:
+        semesters = [row[0] for row in connection.execute(f'SELECT DISTINCT "Semester" FROM "{TABLE_NAME}"')]
+    return sorted([value for value in semesters if _semester_sort(value) < 999999], key=_semester_sort)
 
 
 @st.fragment(run_every=15)
@@ -197,6 +210,7 @@ def _session_cached_milestone_dashboard(
     database_path: Path,
     manual_status_file: Path,
     duplicate_name_resolution_file: Path,
+    reporting_cutoff: str,
 ) -> dict[str, object]:
     key = (
         str(database_path.resolve()),
@@ -210,6 +224,7 @@ def _session_cached_milestone_dashboard(
         str(selected_label),
         str(chart_breakdown),
         tuple(int(offset) for offset in chart_milestone_offsets),
+        reporting_cutoff,
     )
     cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
     if not isinstance(cache, dict):
@@ -225,6 +240,7 @@ def _session_cached_milestone_dashboard(
                 selection_label=selected_label,
                 chart_breakdown=chart_breakdown,
                 chart_milestone_offsets=chart_milestone_offsets,
+                reporting_cutoff=reporting_cutoff,
             )
         while len(cache) > MILESTONE_DASHBOARD_CACHE_LIMIT:
             cache.pop(next(iter(cache)))
@@ -901,7 +917,7 @@ def _pg_chart_controls() -> tuple[str, list[int], str]:
     )
     if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL:
         selected_labels = st.sidebar.multiselect(
-            "Milestones",
+            "Years since joining FSL",
             options=list(PG_MILESTONE_OPTIONS),
             default=list(PG_MILESTONE_OPTIONS),
         )
@@ -914,7 +930,7 @@ def _pg_chart_controls() -> tuple[str, list[int], str]:
         )
 
     milestone_label = st.sidebar.selectbox(
-        "Milestone",
+        "Year since joining FSL",
         options=list(PG_MILESTONE_OPTIONS),
         index=5,
     )
@@ -964,10 +980,10 @@ def _render_rate_charts(
         title = f"Persistence and Graduation by Chapter Joined"
         xaxis_title = "Chapter joined"
     else:
-        title = "1-6 Year Outcome Rates"
-        xaxis_title = "Milestone"
+        title = "Outcome Rates: Years Since Joining FSL"
+        xaxis_title = "Years since joining FSL"
     subtitle = (
-        f"{selected_label} | {chapter_label} chapters | {chart_milestone_label} | "
+        f"{selected_label} | {chapter_label} chapters | {chart_milestone_label} since joining FSL | "
         "Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
     )
     st.plotly_chart(
@@ -1385,24 +1401,51 @@ def main() -> None:
     st.caption("New baseline dashboard powered by the sqlCompile roster database and manual status review file.")
 
     shared = shared_mode()
-    zero_member_periods_file = DEFAULT_ZERO_MEMBER_PERIODS_PATH
+    try:
+        config = load_host_config()
+        reporting_cutoff = read_reporting_cutoff(config.reporting_settings)
+    except (OSError, ValueError) as exc:
+        st.error(f"Reporting configuration needs attention: {exc}")
+        return
+    zero_member_periods_file = config.zero_member_periods
     if shared:
-        try:
-            config = load_host_config()
-        except (OSError, ValueError) as exc:
-            st.error(f"Host configuration needs attention: {exc}")
-            return
         database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file = config.data_paths
         st.sidebar.caption("Shared dashboard | No sign-in")
     else:
-        database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(DEFAULT_OUTPUT_PATH)))
-        manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(DEFAULT_MANUAL_STATUS_PATH)))
+        database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(config.database)))
+        manual_status_file = Path(st.sidebar.text_input("Manual status CSV", value=_path_text(config.manual_status)))
         duplicate_name_resolution_file = Path(
-            st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH))
+            st.sidebar.text_input("Duplicate name choices CSV", value=_path_text(config.name_choices))
         )
         duplicate_name_recheck_file = Path(
-            st.sidebar.text_input("Duplicate name recheck CSV", value=_path_text(DEFAULT_DUPLICATE_NAME_RECHECK_PATH))
+            st.sidebar.text_input("Duplicate name recheck CSV", value=_path_text(config.name_rechecks))
         )
+
+    st.sidebar.caption(f"Data complete through {reporting_cutoff}")
+    if not shared and database_path.exists():
+        with st.sidebar.expander("Reporting cutoff"):
+            try:
+                cutoff_options = _cached_reporting_semesters(str(database_path.resolve()), _mtime_ns(database_path))
+            except Exception as exc:
+                st.error(f"Could not read roster semesters: {exc}")
+                cutoff_options = []
+            if reporting_cutoff not in cutoff_options:
+                cutoff_options = sorted([*cutoff_options, reporting_cutoff], key=_semester_sort)
+            with st.form("sql_compile_reporting_settings"):
+                proposed_cutoff = st.selectbox("Latest complete roster semester", options=cutoff_options,
+                                               index=cutoff_options.index(reporting_cutoff))
+                complete = st.checkbox("I confirm the roster set is complete through this semester")
+                if st.form_submit_button("Save cutoff"):
+                    if not complete:
+                        st.error("Confirm roster completeness before changing the cutoff.")
+                    else:
+                        try:
+                            validate_reporting_cutoff(proposed_cutoff, read_sql_compile_table(database_path))
+                            save_reporting_cutoff(proposed_cutoff, config.reporting_settings)
+                            _request_dashboard_data_refresh()
+                            st.rerun()
+                        except (OSError, ValueError) as exc:
+                            st.error(str(exc))
 
     st.sidebar.subheader("Refresh")
     if not shared and st.sidebar.button("Run sqlCompile", use_container_width=True):
@@ -1425,8 +1468,8 @@ def main() -> None:
     try:
         paths = (database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file)
         snapshot = st.session_state.get(SHARED_SNAPSHOT_KEY) if shared else None
-        if snapshot is not None and snapshot[0] == paths:
-            _, revision, all_tables = snapshot
+        if snapshot is not None and len(snapshot) == 4 and snapshot[0] == paths and snapshot[3] == reporting_cutoff:
+            _, revision, all_tables, _ = snapshot
         else:
             revision = data_revision(paths)
             all_tables = _cached_load_dashboard_tables(
@@ -1440,10 +1483,11 @@ def main() -> None:
                 _dashboard_data_refresh_token(),
                 str(zero_member_periods_file.resolve()),
                 revision if shared else (revision[4],),
+                reporting_cutoff,
             )
             if shared:
                 # Keep drafts and the displayed data stable until an explicit refresh.
-                st.session_state[SHARED_SNAPSHOT_KEY] = (paths, revision, all_tables)
+                st.session_state[SHARED_SNAPSHOT_KEY] = (paths, revision, all_tables, reporting_cutoff)
     except Exception as exc:
         st.error(f"Could not load sqlCompile dashboard data: {exc}")
         return
@@ -1508,6 +1552,7 @@ def main() -> None:
             database_path=database_path,
             manual_status_file=manual_status_file,
             duplicate_name_resolution_file=duplicate_name_resolution_file,
+            reporting_cutoff=reporting_cutoff,
         )
 
     if section == "Persistence & Graduation":

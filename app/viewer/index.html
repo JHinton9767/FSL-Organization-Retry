@@ -19,8 +19,8 @@
         <fieldset><legend>Semester joined</legend><label class="all-option"><input id="all-semesters" type="checkbox" checked> All semesters</label><div id="semesters" class="options"></div></fieldset>
         <fieldset><legend>Chapter joined</legend><input id="chapter-search" type="search" aria-label="Search chapters" placeholder="Search chapters"><label class="all-option"><input id="all-chapters" type="checkbox" checked> All chapters</label><div id="chapters" class="options"></div></fieldset>
         <label class="field-label">Breakdown<select id="breakdown"><option>Overall</option><option>Semester joined</option><option>Chapter joined</option></select></label>
-        <fieldset id="years-field"><legend>Milestones</legend><div id="years" class="year-options"></div></fieldset>
-        <label class="field-label" id="single-year-field" hidden>Milestone<select id="single-year" aria-label="Milestone"></select></label>
+        <fieldset id="years-field"><legend title="Semester-based checkpoints from the FSL join semester, not TXST enrollment. Year 1 includes new members through the cutoff; later years require completed checkpoints.">Years since joining FSL</legend><div id="years" class="year-options"></div></fieldset>
+        <label class="field-label" id="single-year-field" hidden>Year since joining FSL<select id="single-year" aria-label="Year since joining FSL"></select></label>
         <button id="reset" type="button">Reset filters</button>
       </div>
     </details>
@@ -31,7 +31,7 @@
         <div><span>Chapter view</span><strong id="chapter-label"></strong></div>
       </div>
       <section class="chart-section" aria-label="Outcome rates">
-        <div class="chart-heading"><h2 id="chart-title">1-6 Year Outcome Rates</h2><span id="selection-label"></span></div>
+        <div class="chart-heading"><h2 id="chart-title">Outcome Rates: Years Since Joining FSL</h2><span id="selection-label"></span></div>
         <p id="empty" role="status" hidden>No students match the selected semesters and chapters.</p>
         <div class="chart-scroll"><div id="chart" role="img" aria-label="Stacked outcome rate chart"></div></div>
         <p id="chart-error" role="alert" hidden>The chart could not load. Reopen the downloaded HTML file in an approved browser.</p>

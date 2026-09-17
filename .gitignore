@@ -84,3 +84,5 @@ data/inbox/
 **/Grades/
 **/Grade Reports/
 **/Transcripts/
+# Owner-confirmed reporting settings; the example supplies the initial cutoff.
+config/sqlCompile_reporting.json

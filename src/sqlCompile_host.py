@@ -10,6 +10,7 @@ from src.path_config import ROOT
 from src.sqlCompile import DEFAULT_OUTPUT_PATH
 from src.sqlCompile_cohort import DEFAULT_MANUAL_STATUS_PATH, DEFAULT_ZERO_MEMBER_PERIODS_PATH
 from src.sqlCompile_dashboard import DEFAULT_DUPLICATE_NAME_RECHECK_PATH, DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
+from src.sqlCompile_reporting import DEFAULT_REPORTING_SETTINGS
 
 
 DEFAULT_HOST_CONFIG = ROOT / "config" / "sqlCompile_host.json"
@@ -24,6 +25,7 @@ class HostConfig:
     name_choices: Path = DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
     name_rechecks: Path = DEFAULT_DUPLICATE_NAME_RECHECK_PATH
     zero_member_periods: Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH
+    reporting_settings: Path = DEFAULT_REPORTING_SETTINGS
 
     @property
     def data_paths(self) -> tuple[Path, ...]:

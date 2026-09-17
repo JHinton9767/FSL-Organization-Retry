@@ -24,6 +24,13 @@ server, sign-in, or firewall change is needed. It includes semester/chapter
 filters and years 1-6, using aggregate counts without student IDs or names.
 Republish after data changes. See [the read-only viewer guide](docs/readonly_viewer_setup.md).
 
+Both dashboards report years since **joining FSL**, using the owner-confirmed
+**Spring 2026** cutoff until explicitly advanced. Initial Fall 2026 rosters
+remain stored but do not affect reported rates. Publication checks skipped
+rosters, unresolved names, chapter coverage, and large changes from the previous
+published copy before replacing it. Recompile once after this update to record
+the skipped-file audit; older databases correctly report that audit as unknown.
+
 ## Shared Dashboard
 
 For browser access from other computers, use `Start_Shared_SQL_Dashboard.bat`

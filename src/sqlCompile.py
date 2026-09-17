@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Tuple
@@ -44,6 +45,8 @@ STUDENT_NAME_COLUMNS = ["Student ID", "Student Name"]
 STUDENT_NAME_OBSERVATION_TABLE = "sqlCompile_student_name_observations"
 STUDENT_NAME_OBSERVATION_COLUMNS = ["Student ID", "Student Name", "Observation Count"]
 ROSTER_INVENTORY_TABLE = "sqlCompile_roster_inventory"
+COMPILE_AUDIT_TABLE = "sqlCompile_audit"
+COMPILE_ISSUES_TABLE = "sqlCompile_issues"
 ROSTER_INVENTORY_COLUMNS = [
     "Semester",
     "Chapter",
@@ -542,6 +545,8 @@ def write_sqlite(
     student_name_table_name: str = STUDENT_NAME_TABLE,
     student_name_observations: Optional[pd.DataFrame] = None,
     student_name_observation_table_name: str = STUDENT_NAME_OBSERVATION_TABLE,
+    compile_issues: Optional[pd.DataFrame] = None,
+    source_file_count: Optional[int] = None,
 ) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -550,6 +555,14 @@ def write_sqlite(
     placeholders = ", ".join(["?"] * len(OUTPUT_COLUMNS))
 
     with atomic_database_update(destination) as connection:
+        pd.DataFrame([{
+            "Compiled At": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "Source Files": source_file_count,
+            "Issue Count": len(compile_issues) if compile_issues is not None else None,
+        }]).to_sql(COMPILE_AUDIT_TABLE, connection, if_exists="replace", index=False)
+        issue_columns = ["exception_type", "source_file", "source_sheet", "details"]
+        issues = compile_issues.reindex(columns=issue_columns) if compile_issues is not None else pd.DataFrame(columns=issue_columns)
+        issues.to_sql(COMPILE_ISSUES_TABLE, connection, if_exists="replace", index=False)
         connection.execute(f"DROP TABLE IF EXISTS {table_identifier}")
         connection.execute(
             f"CREATE TABLE {table_identifier} ("
@@ -640,6 +653,8 @@ def sqlCompile(
         roster_inventory=roster_inventory,
         student_names=student_names,
         student_name_observations=student_name_observations,
+        compile_issues=issues,
+        source_file_count=source_file_count,
     )
     return SqlCompileResult(
         output_path=destination,

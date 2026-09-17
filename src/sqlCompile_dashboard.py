@@ -23,6 +23,7 @@ from src.sqlCompile_cohort import (
     read_zero_member_periods,
 )
 from src.sqlCompile_storage import append_review_csv, data_lock, read_review_csv, write_review_csv
+from src.sqlCompile_reporting import normalize_reporting_cutoff, through_reporting_cutoff, validate_reporting_cutoff
 from src.path_config import ROOT
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
 
@@ -170,6 +171,7 @@ class SqlCompileDashboardTables:
     duplicate_name_resolutions: pd.DataFrame
     duplicate_name_rechecks: pd.DataFrame
     selected_semesters: list[str]
+    reporting_cutoff: str | None = None
 
 
 def _count_bucket(frame: pd.DataFrame, bucket: str) -> int:
@@ -566,6 +568,7 @@ def build_sql_compile_milestone_dashboard(
     chart_breakdown: str = PG_CHART_BREAKDOWN_OVERALL,
     chart_milestone_offset: int = 6,
     chart_milestone_offsets: Optional[Sequence[int]] = None,
+    reporting_cutoff: str | None = None,
 ) -> dict[str, object]:
     chart_breakdown = _normalize_pg_chart_breakdown(chart_breakdown)
     capped_max_years = max(0, min(int(max_years), 6))
@@ -589,6 +592,9 @@ def build_sql_compile_milestone_dashboard(
     chart_milestone_label = _milestone_selection_label(selected_offsets)
     filtered_outcomes = _filter_by_selected_semesters(outcomes, selected_semesters)
     filtered_outcomes = _filter_by_selected_chapters(filtered_outcomes, selected_chapters)
+    if reporting_cutoff is not None:
+        reporting_cutoff = normalize_reporting_cutoff(reporting_cutoff)
+        filtered_outcomes = through_reporting_cutoff(filtered_outcomes, reporting_cutoff, "Cohort Semester")
     empty = {
         "chart_frame": pd.DataFrame(columns=MILESTONE_CHART_COLUMNS),
         "table_frame": pd.DataFrame(columns=MILESTONE_TABLE_COLUMNS),
@@ -644,7 +650,9 @@ def build_sql_compile_milestone_dashboard(
         if "Included In Outcome" in timeline_work.columns:
             timeline_work = timeline_work.loc[timeline_work["Included In Outcome"].eq("Yes")].copy()
 
-    latest_sort = _latest_timeline_sort(timeline_work)
+    if reporting_cutoff is not None and not timeline_work.empty:
+        timeline_work = through_reporting_cutoff(timeline_work, reporting_cutoff)
+    latest_sort = _cohort_sort(reporting_cutoff) if reporting_cutoff is not None else _latest_timeline_sort(timeline_work)
     if latest_sort == 0:
         latest_sort = max([_cohort_sort(value) for value in cohort_students["Cohort Semester"].tolist()] or [0])
 
@@ -771,7 +779,7 @@ def build_sql_compile_milestone_dashboard(
             axis_label = (
                 _milestone_label(offset, selection_label, eligible_students)
                 if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL
-                else chart_group_label
+                else f"{chart_group_label}<br>{eligible_students:,}<br>eligible students"
             )
             chart_sort = offset if chart_breakdown == PG_CHART_BREAKDOWN_OVERALL else group_index
             chart_counts = chart_group["counts"]
@@ -828,7 +836,8 @@ def build_sql_compile_milestone_dashboard(
             "chart_breakdown": chart_breakdown,
             "chart_milestone": chart_milestone_label,
             "note": (
-                "Rates use only students old enough to reach the selected checkpoint. Bars marked Future are "
+                "Year 1 includes selected new members through the reporting cutoff. Years 2-6 use only "
+                "students old enough to reach the semester-based checkpoint since joining FSL, not enrolling at TXST. Bars marked Future are "
                 "selected cohorts with no eligible students yet. Partially future groups keep those newer students "
                 "out of the percentage denominator but show the future count in the chart data. Resolved outcome "
                 "buckets carry forward across later checkpoints."
@@ -999,6 +1008,7 @@ def load_dashboard_tables(
     all_cohorts: bool = True,
     zero_member_periods_file: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH,
     create_review_files: bool = True,
+    reporting_cutoff: str | None = None,
 ) -> SqlCompileDashboardTables:
     with data_lock(_resolve_path(database_path)):
         compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
@@ -1008,9 +1018,16 @@ def load_dashboard_tables(
     manual_rows = read_manual_status_rows(manual_status_file, create_if_missing=create_review_files)
     duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file, create_if_missing=create_review_files)
     duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file, create_if_missing=create_review_files)
+    calculation_manual_rows = manual_rows
+    if reporting_cutoff is not None:
+        reporting_cutoff = normalize_reporting_cutoff(reporting_cutoff)
+        validate_reporting_cutoff(reporting_cutoff, compiled_rows)
+        compiled_rows = through_reporting_cutoff(compiled_rows, reporting_cutoff)
+        roster_inventory = through_reporting_cutoff(roster_inventory, reporting_cutoff)
+        calculation_manual_rows = through_reporting_cutoff(manual_rows, reporting_cutoff)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
-        manual_rows,
+        calculation_manual_rows,
         roster_inventory=roster_inventory,
         zero_member_periods=read_zero_member_periods(zero_member_periods_file),
         cohort_semesters=cohort_semesters,
@@ -1036,6 +1053,7 @@ def load_dashboard_tables(
         duplicate_name_resolutions=duplicate_name_resolutions,
         duplicate_name_rechecks=duplicate_name_rechecks,
         selected_semesters=selected_semesters,
+        reporting_cutoff=reporting_cutoff,
     )
 
 
@@ -1156,7 +1174,7 @@ def _milestone_name(offset: int) -> str:
 
 def _milestone_label(offset: int, selection_label: str, denominator: int | None = None) -> str:
     label = str(selection_label or SQL_COMPILE_ALL_TIME_LABEL).strip() or SQL_COMPILE_ALL_TIME_LABEL
-    measured = f"<br>n={int(denominator):,}" if denominator is not None else ""
+    measured = f"<br>{int(denominator):,}<br>eligible students" if denominator is not None else ""
     return f"{_milestone_name(offset)}<br>{label}{measured}"
 
 

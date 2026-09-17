@@ -12,6 +12,7 @@ from src.sqlCompile import OUTPUT_COLUMNS, write_sqlite
 from src.sqlCompile_cohort import append_manual_status_rows
 from src.sqlCompile_dashboard import build_sql_compile_milestone_dashboard
 from src.sqlCompile_host import load_host_config
+from src.sqlCompile_reporting import save_reporting_cutoff
 
 
 @pytest.fixture
@@ -30,7 +31,8 @@ def cohort_tables():
                                 "Status Code": code, "Source": source, "Included In Outcome": "Yes"})
     history.append({"Cohort Semester": "Fall 2025", "Student ID": "PRIVATE-HORIZON", "Semester": "Spring 2026",
                     "Status Code": "A", "Source": "sqlCompile", "Included In Outcome": "Yes"})
-    return SimpleNamespace(timeline=pd.DataFrame(history), outcomes=pd.DataFrame(students), selected_semesters=cohorts)
+    return SimpleNamespace(timeline=pd.DataFrame(history), outcomes=pd.DataFrame(students), selected_semesters=cohorts,
+                           reporting_cutoff="Spring 2026")
 
 
 @pytest.fixture
@@ -45,8 +47,10 @@ def publisher_config(tmp_path):
     path = tmp_path / "host.json"
     path.write_text(json.dumps({"database": str(database), "manual_status": str(tmp_path / "manual.csv"),
                                "name_choices": str(tmp_path / "names.csv"), "name_rechecks": str(tmp_path / "rechecks.csv"),
-                               "zero_member_periods": str(tmp_path / "zero.csv")}), encoding="utf-8")
+                               "zero_member_periods": str(tmp_path / "zero.csv"),
+                               "reporting_settings": str(tmp_path / "reporting.json")}), encoding="utf-8")
     config = load_host_config(path)
+    save_reporting_cutoff("Spring 2026", config.reporting_settings)
     append_manual_status_rows(pd.DataFrame([{
         "Student ID": "PRIVATE-ID-1", "Semester": "Spring 2024", "Chapter": "Alpha", "Status": "G",
         "Notes": "PRIVATE-NOTE",
@@ -86,6 +90,7 @@ def test_viewer_matches_python_dashboard_for_all_filters(cohort_tables):
             cohort_tables.timeline, cohort_tables.outcomes, selected["semesters"],
             selected_chapters=selected["chapters"], chart_breakdown=selected["breakdown"],
             chart_milestone_offsets=selected["years"],
+            reporting_cutoff=cohort_tables.reporting_cutoff,
         )
         expected = [{"group": row["Chart Group"], "year": int(row["Milestone Name"].split()[0]),
                      "outcome": row["Outcome"], "count": row["Count"], "share": row["Share"],
@@ -163,7 +168,7 @@ def test_html_is_offline_and_safely_embeds_labels(cohort_tables):
 def test_publisher_keeps_sources_and_applies_saved_corrections(publisher_config, tmp_path):
     config, _ = publisher_config
     before = {path: path.read_bytes() for path in config.data_paths if path.exists()}
-    output, students = viewer.publish_viewer(config, tmp_path / "published.html")
+    output, students = viewer.publish_viewer(config, tmp_path / "published.html", allow_warnings=True)
     assert students == 2
     parser = ScriptInspector()
     parser.feed(output.read_text(encoding="utf-8"))
@@ -193,13 +198,17 @@ def test_failed_publish_preserves_previous_viewer(publisher_config, tmp_path, mo
     output.write_text("previous publication", encoding="utf-8")
     if failure == "changed-source":
         revisions = iter([((1, 1),), ((2, 2),)])
-        monkeypatch.setattr(viewer, "data_revision", lambda paths: next(revisions))
+        monkeypatch.setattr(viewer, "data_revision", lambda paths: next(revisions) if len(paths) > 1 else ((0, 0),))
     else:
-        def locked(*args):
-            raise PermissionError("File is locked")
-        monkeypatch.setattr(viewer.os, "replace", locked)
+        from src import sqlCompile_storage as storage
+        replace = storage.os.replace
+        def locked(source, destination):
+            if destination == output:
+                raise PermissionError("File is locked")
+            return replace(source, destination)
+        monkeypatch.setattr(storage.os, "replace", locked)
     with pytest.raises((RuntimeError, PermissionError)):
-        viewer.publish_viewer(config, output)
+        viewer.publish_viewer(config, output, allow_warnings=True)
     assert output.read_text(encoding="utf-8") == "previous publication"
     assert not list(tmp_path.glob("*.tmp"))
 
@@ -208,7 +217,7 @@ def test_viewer_cli_and_destination_validation(publisher_config, tmp_path, capsy
     config, path = publisher_config
     with pytest.raises(ValueError, match="end in .html"):
         viewer.publish_viewer(config, config.database)
-    assert viewer.main(["--host-config", str(path), "--output", str(tmp_path / "cli.html")]) == 0
+    assert viewer.main(["--host-config", str(path), "--output", str(tmp_path / "cli.html"), "--allow-warnings"]) == 0
     assert "Cohort students: 2" in capsys.readouterr().out
 
 

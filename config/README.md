@@ -6,6 +6,13 @@ network port. See [shared dashboard setup](../docs/shared_dashboard_setup.md).
 This is separate from the roster source configuration below. Do not replace
 existing correction CSVs when updating code or configuring a new host.
 
+`sqlCompile_reporting.example.json` supplies the owner-confirmed Spring 2026
+cutoff. Owner changes are saved to the ignored `sqlCompile_reporting.json`.
+Both the editable dashboard and publisher use this setting; a shared host can
+override its location with `reporting_settings`. Initial Fall 2026 records stay
+stored but are excluded from reporting until the owner confirms completeness
+and advances the cutoff. See [the viewer guide](../docs/readonly_viewer_setup.md).
+
 The repository should track code, app configuration, tests, and templates only.
 Raw student files, roster PDFs, grade reports, generated exports, and caches
 should stay outside Git.

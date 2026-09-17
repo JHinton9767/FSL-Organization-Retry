@@ -28,7 +28,7 @@
   for (let year = 1; year <= 6; year++) byId("single-year").add(new Option(`${year} Year`, String(year)));
   byId("single-year").value = "6";
   byId("published").textContent = `Published ${new Date(payload.published).toLocaleString()}`;
-  byId("data-through").textContent = `Data through ${payload.dataThrough}`;
+  byId("data-through").textContent = `Data complete through ${payload.dataThrough}`;
 
   for (const id of ["semesters", "chapters"]) {
     byId(`all-${id}`).addEventListener("change", event => {
@@ -94,7 +94,7 @@
     const chapterLabel = chapters.length === payload.chapters.length ? "ALL" : chapters.length === 1 ? chapters[0] : `${chapters.length} chapters`;
     byId("cohort-label").textContent = cohortLabel;
     byId("chapter-label").textContent = chapterLabel;
-    byId("chart-title").textContent = breakdown === "Overall" ? "1-6 Year Outcome Rates" : `Outcome Rates by ${breakdown}`;
+    byId("chart-title").textContent = breakdown === "Overall" ? "Outcome Rates: Years Since Joining FSL" : `Outcome Rates by ${breakdown}`;
     byId("selection-label").textContent = `${cohortLabel} | ${chapterLabel} | ${years.map(year => `${year} Year`).join(", ")}`;
     byId("empty").hidden = result.groups.length > 0;
     byId("empty").textContent = years.length ? "No students match the selected semesters and chapters." : "No milestones selected.";
@@ -104,7 +104,7 @@
     if (!result.groups.length) return;
     byId("chart").style.minWidth = `${Math.max(540, result.groups.length * 96)}px`;
     const groupIds = new Map(result.groups.map((group, index) => [group.label, String(index)]));
-    const labels = result.groups.map(group => `${wrap(group.label)}<br>n=${format(group.eligible)}${group.future ? `<br>${format(group.future)} future` : ""}`);
+    const labels = result.groups.map(group => `${wrap(group.label)}<br>${format(group.eligible)}<br>eligible students${group.future ? `<br>${format(group.future)} future` : ""}`);
     const traces = payload.outcomes.map(outcome => {
       const rows = result.rows.filter(row => row.outcome === outcome);
       if (!rows.length) return null;
@@ -122,7 +122,7 @@
         barmode: "stack", bargap: 0.18, height: 660,
         font: {family: "Segoe UI, Arial, sans-serif", color: "#17213a"},
         paper_bgcolor: "white", plot_bgcolor: "white",
-        margin: {l: 60, r: 18, t: 25, b: 185},
+        margin: {l: 60, r: 18, t: 25, b: 205},
         xaxis: {type: "category", categoryorder: "array", categoryarray: [...groupIds.values()], tickmode: "array", tickvals: [...groupIds.values()], ticktext: labels, tickfont: {size: 11}, tickangle: 0, fixedrange: true},
         yaxis: {range: [0, 1], tickformat: ".0%", title: {text: "Share of eligible students", font: {size: 12}}, gridcolor: "#e3e8f0", fixedrange: true},
         legend: {orientation: "h", x: 0, y: -0.3, yanchor: "top", font: {size: 11}, itemclick: false, itemdoubleclick: false},
