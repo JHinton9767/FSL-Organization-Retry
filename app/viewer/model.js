@@ -1,8 +1,14 @@
 "use strict";
 
-function aggregateViewer(payload, semesters, chapters, years, breakdown) {
+function chaptersForCouncils(payload, chapters, councils) {
+  if (councils === null) return [...chapters];
+  const selected = new Set(councils);
+  return chapters.filter(chapter => selected.has(payload.chapterCouncils[chapter]));
+}
+
+function aggregateViewer(payload, semesters, chapters, years, breakdown, councils = null) {
   const selectedSemesters = new Set(semesters);
-  const selectedChapters = new Set(chapters);
+  const selectedChapters = new Set(chaptersForCouncils(payload, chapters, councils));
   const offsets = breakdown === "Overall" ? years : years.slice(0, 1);
   const groups = new Map();
   let students = 0;
@@ -36,4 +42,4 @@ function aggregateViewer(payload, semesters, chapters, years, breakdown) {
   return {students, groups: ordered, rows};
 }
 
-if (typeof module !== "undefined") module.exports = {aggregateViewer};
+if (typeof module !== "undefined") module.exports = {aggregateViewer, chaptersForCouncils};

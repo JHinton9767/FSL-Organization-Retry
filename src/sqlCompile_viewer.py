@@ -15,6 +15,7 @@ from src.path_config import ROOT
 from src.sqlCompile_cohort import _semester_sort, read_sql_compile_table
 from src.sqlCompile_dashboard import SqlCompileDashboardTables, build_sql_compile_milestone_dashboard, load_dashboard_tables
 from src.sqlCompile_host import HostConfig, data_revision, load_host_config
+from src.sqlCompile_councils import COUNCILS, council_for_chapter
 from src.sqlCompile_publication import build_publication_check, read_previous_publication
 from src.sqlCompile_reporting import REPORTING_EXAMPLE, read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
 from src.sqlCompile_storage import atomic_write_text, data_lock
@@ -49,6 +50,8 @@ def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
         "dataThrough": latest,
         "semesters": semesters,
         "chapters": sorted({row[1] for row in units}, key=str.casefold),
+        "councils": list(COUNCILS),
+        "chapterCouncils": {chapter: council_for_chapter(chapter) for chapter in sorted({row[1] for row in units})},
         "outcomes": PERSISTENCE_CHART_OUTCOME_ORDER,
         "colors": PERSISTENCE_OUTCOME_COLORS,
         "units": units,

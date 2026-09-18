@@ -17,6 +17,8 @@
       <summary>Filters</summary>
       <div class="filter-body">
         <fieldset><legend>Semester joined</legend><label class="all-option"><input id="all-semesters" type="checkbox" checked> All semesters</label><div id="semesters" class="options"></div></fieldset>
+        <label class="field-label">Council<select id="council-mode"><option>All councils</option></select></label>
+        <fieldset id="councils-field" hidden><legend>Councils</legend><div id="councils" class="year-options"></div></fieldset>
         <fieldset><legend>Chapter joined</legend><input id="chapter-search" type="search" aria-label="Search chapters" placeholder="Search chapters"><label class="all-option"><input id="all-chapters" type="checkbox" checked> All chapters</label><div id="chapters" class="options"></div></fieldset>
         <label class="field-label">Breakdown<select id="breakdown"><option>Overall</option><option>Semester joined</option><option>Chapter joined</option></select></label>
         <fieldset id="years-field"><legend title="Semester-based checkpoints from the FSL join semester, not TXST enrollment. Year 1 includes new members through the cutoff; later years require completed checkpoints.">Years since joining FSL</legend><div id="years" class="year-options"></div></fieldset>
@@ -28,6 +30,7 @@
       <div class="metrics" aria-live="polite">
         <div><span>Cohort size</span><strong id="cohort-size"></strong></div>
         <div><span>Selected cohort</span><strong id="cohort-label"></strong></div>
+        <div><span>Council view</span><strong id="council-label"></strong></div>
         <div><span>Chapter view</span><strong id="chapter-label"></strong></div>
       </div>
       <section class="chart-section" aria-label="Outcome rates">

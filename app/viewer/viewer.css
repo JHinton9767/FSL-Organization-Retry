@@ -28,7 +28,7 @@ button:hover {background: #eaedf1;}
 .year-options label {display: flex; gap: 7px; align-items: center;}
 .field-label select {margin-top: 8px;}
 main {min-width: 0; padding: 26px 30px;}
-.metrics {display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; padding-bottom: 30px;}
+.metrics {display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; padding-bottom: 30px;}
 .metrics span {display: block; font-size: 13px; margin-bottom: 8px;}
 .metrics strong {display: block; font-size: 26px; line-height: 1.2; font-weight: 400; overflow-wrap: anywhere;}
 .chart-heading h2 {font-size: 18px; margin: 0 0 6px;}
@@ -50,6 +50,6 @@ th {position: sticky; top: 0; background: #f5f6f8;}
   .filters {border-right: 0; border-bottom: 1px solid #dce0e6;}
   .filter-body {grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px;}
   main {padding: 24px 16px;}
-  .metrics {gap: 14px;}
+  .metrics {grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;}
   .metrics strong {font-size: 20px;}
 }

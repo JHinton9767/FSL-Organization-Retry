@@ -6,6 +6,7 @@
   const format = number => number.toLocaleString("en-US");
   const escape = value => String(value).replace(/[&<>"']/g, char => ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}[char]));
   const pickers = {};
+  const selected = id => pickers[id].filter(input => input.checked).map(input => input.value);
   let result;
   let renderSequence = 0;
 
@@ -18,12 +19,14 @@
       input.checked = true;
       label.append(input, document.createTextNode(id === "years" ? `${value} Year` : value));
       byId(id).append(label);
-      input.addEventListener("change", update);
+      input.addEventListener("change", id === "councils" ? councilChanged : update);
       return input;
     });
   }
   addPicker("semesters", payload.semesters);
   addPicker("chapters", payload.chapters);
+  addPicker("councils", payload.councils);
+  for (const council of [...payload.councils, "Council group"]) byId("council-mode").add(new Option(council, council));
   addPicker("years", [1, 2, 3, 4, 5, 6]);
   for (let year = 1; year <= 6; year++) byId("single-year").add(new Option(`${year} Year`, String(year)));
   byId("single-year").value = "6";
@@ -32,24 +35,43 @@
 
   for (const id of ["semesters", "chapters"]) {
     byId(`all-${id}`).addEventListener("change", event => {
-      for (const input of pickers[id]) input.checked = event.target.checked;
+      for (const input of pickers[id]) if (!input.disabled) input.checked = event.target.checked;
       update();
     });
   }
-  byId("chapter-search").addEventListener("input", event => {
-    const query = event.target.value.trim().toLowerCase();
-    for (const input of pickers.chapters) input.parentElement.hidden = !input.value.toLowerCase().includes(query);
-  });
+  byId("chapter-search").addEventListener("input", applyChapterVisibility);
+  byId("council-mode").addEventListener("change", councilChanged);
   byId("breakdown").addEventListener("change", update);
   byId("single-year").addEventListener("change", update);
   byId("reset").addEventListener("click", () => {
     for (const inputs of Object.values(pickers)) for (const input of inputs) input.checked = true;
     for (const input of pickers.chapters) input.parentElement.hidden = false;
     byId("chapter-search").value = "";
+    byId("council-mode").value = "All councils";
     byId("breakdown").value = "Overall";
     byId("single-year").value = "6";
     update();
   });
+
+  function selectedCouncils() {
+    const mode = byId("council-mode").value;
+    return mode === "All councils" ? null : mode === "Council group" ? selected("councils") : [mode];
+  }
+
+  function applyChapterVisibility() {
+    const allowed = new Set(chaptersForCouncils(payload, payload.chapters, selectedCouncils()));
+    const query = byId("chapter-search").value.trim().toLowerCase();
+    for (const input of pickers.chapters) {
+      input.disabled = !allowed.has(input.value);
+      input.parentElement.hidden = input.disabled || !input.value.toLowerCase().includes(query);
+    }
+  }
+
+  function councilChanged() {
+    for (const input of pickers.chapters) input.checked = true;
+    byId("chapter-search").value = "";
+    update();
+  }
 
   function renderTable() {
     byId("chart-rows").replaceChildren();
@@ -77,27 +99,34 @@
 
   async function update() {
     const sequence = ++renderSequence;
-    const selected = id => pickers[id].filter(input => input.checked).map(input => input.value);
-    const semesters = selected("semesters"), chapters = selected("chapters");
+    const councils = selectedCouncils();
+    const availableChapters = chaptersForCouncils(payload, payload.chapters, councils);
+    const semesters = selected("semesters"), chapters = chaptersForCouncils(payload, selected("chapters"), councils);
+    applyChapterVisibility();
+    byId("councils-field").hidden = byId("council-mode").value !== "Council group";
     const breakdown = byId("breakdown").value;
     const years = breakdown === "Overall" ? selected("years").map(Number) : [Number(byId("single-year").value)];
     for (const id of ["semesters", "chapters"]) {
-      const count = selected(id).length;
-      byId(`all-${id}`).checked = count === pickers[id].length;
-      byId(`all-${id}`).indeterminate = count > 0 && count < pickers[id].length;
+      const count = id === "chapters" ? chapters.length : semesters.length;
+      const total = id === "chapters" ? availableChapters.length : payload.semesters.length;
+      byId(`all-${id}`).checked = total > 0 && count === total;
+      byId(`all-${id}`).indeterminate = count > 0 && count < total;
+      byId(`all-${id}`).disabled = !total;
     }
     byId("years-field").hidden = breakdown !== "Overall";
     byId("single-year-field").hidden = breakdown === "Overall";
-    result = aggregateViewer(payload, semesters, chapters, years, breakdown);
+    result = aggregateViewer(payload, semesters, chapters, years, breakdown, councils);
     byId("cohort-size").textContent = format(result.students);
     const cohortLabel = semesters.length === payload.semesters.length ? "All Time" : semesters.length === 1 ? semesters[0] : `${semesters.length} semesters`;
-    const chapterLabel = chapters.length === payload.chapters.length ? "ALL" : chapters.length === 1 ? chapters[0] : `${chapters.length} chapters`;
+    const chapterLabel = !chapters.length ? "None" : chapters.length === availableChapters.length ? "ALL" : chapters.length === 1 ? chapters[0] : `${chapters.length} chapters`;
+    const councilLabel = councils === null ? "ALL" : councils.join(" + ") || "None";
     byId("cohort-label").textContent = cohortLabel;
     byId("chapter-label").textContent = chapterLabel;
+    byId("council-label").textContent = councilLabel;
     byId("chart-title").textContent = breakdown === "Overall" ? "Outcome Rates: Years Since Joining FSL" : `Outcome Rates by ${breakdown}`;
-    byId("selection-label").textContent = `${cohortLabel} | ${chapterLabel} | ${years.map(year => `${year} Year`).join(", ")}`;
+    byId("selection-label").textContent = `${cohortLabel} | ${councilLabel} councils | ${chapterLabel} chapters | ${years.map(year => `${year} Year`).join(", ")}`;
     byId("empty").hidden = result.groups.length > 0;
-    byId("empty").textContent = years.length ? "No students match the selected semesters and chapters." : "No milestones selected.";
+    byId("empty").textContent = years.length ? "No students match the selected semesters, councils, and chapters." : "No milestones selected.";
     byId("chart").hidden = !result.groups.length;
     byId("chart-error").hidden = true;
     renderTable();

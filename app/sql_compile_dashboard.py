@@ -19,6 +19,9 @@ from src.sqlCompile_cohort import (
     completed_manual_status_rows,
     write_manual_status_rows,
     read_sql_compile_table,
+    read_roster_inventory_table,
+    read_manual_status_rows,
+    read_zero_member_periods,
     _semester_sort,
 )
 from src.sqlCompile_dashboard import (
@@ -40,6 +43,7 @@ from src.sqlCompile_dashboard import (
     build_manual_checker_queue,
     build_pg_aligned_manual_checker_template,
     build_sql_compile_milestone_dashboard,
+    build_outcome_distribution,
     load_dashboard_tables,
     odd_record_editor_to_manual_rows,
 )
@@ -51,7 +55,8 @@ from src.sqlCompile_legacy_manual import (
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER
 from src.sqlCompile_host import data_revision, load_host_config, shared_mode
 from src.sqlCompile_reporting import read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
-from src.sqlCompile_storage import ReviewConflictError, read_database
+from src.sqlCompile_storage import ReviewConflictError, read_database, data_lock
+from src.sqlCompile_councils import COUNCILS, chapters_for_councils, build_unmapped_organization_review
 
 
 st.set_page_config(
@@ -64,6 +69,7 @@ st.set_page_config(
 
 STATUS_OPTIONS = ["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"]
 SECTION_OPTIONS = ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
+ORGANIZATION_REVIEW_SECTION = "Organization Review"
 SECTION_KEY = "sql_compile_dashboard_section"
 DASHBOARD_DATA_REFRESH_KEY = "sql_compile_dashboard_data_refresh_token"
 SHARED_SNAPSHOT_KEY = "sql_compile_shared_snapshot"
@@ -190,6 +196,42 @@ def _cached_reporting_semesters(database_path: str, database_mtime: int) -> list
     with read_database(Path(database_path)) as connection:
         semesters = [row[0] for row in connection.execute(f'SELECT DISTINCT "Semester" FROM "{TABLE_NAME}"')]
     return sorted([value for value in semesters if _semester_sort(value) < 999999], key=_semester_sort)
+
+
+@st.cache_data(show_spinner="Checking organization council assignments...", max_entries=4)
+def _cached_organization_review(
+    database: str, manual: str, zero_member: str, source_revision: tuple, reporting_cutoff: str,
+) -> pd.DataFrame:
+    del source_revision
+    with data_lock(Path(database)):
+        compiled = read_sql_compile_table(database)
+        inventory = read_roster_inventory_table(database)
+    return build_unmapped_organization_review(
+        compiled, inventory, read_manual_status_rows(manual, create_if_missing=False),
+        read_zero_member_periods(zero_member), reporting_cutoff,
+    )
+
+
+def _render_organization_review(database: Path, manual: Path, zero_member: Path, reporting_cutoff: str) -> None:
+    st.subheader("Organizations Missing Council Assignments")
+    st.caption(f"Chapter Kicked evidence through {reporting_cutoff}. An unmapped council does not establish that a chapter was removed.")
+    try:
+        review = _cached_organization_review(
+            str(database.resolve()), str(manual.resolve()), str(zero_member.resolve()),
+            data_revision((database, manual, zero_member)), reporting_cutoff,
+        )
+    except Exception as exc:
+        st.error(f"Could not load organization review: {exc}")
+        return
+    if review.empty:
+        st.success("All observed organizations have council assignments.")
+        return
+    st.metric("Unmapped organizations", f"{len(review):,}")
+    if st.checkbox("Only organizations with Chapter Kicked evidence"):
+        review = review.loc[review["Chapter Kicked Evidence"].ne("None through cutoff")]
+    st.dataframe(review, use_container_width=True, hide_index=True)
+    st.download_button("Download Organization Review", data=dataframe_to_csv_bytes(review),
+                       file_name="unmapped_organization_review.csv", mime="text/csv")
 
 
 @st.fragment(run_every=15)
@@ -886,6 +928,16 @@ def _selected_chapters(outcomes: pd.DataFrame) -> list[str]:
     return sorted(value for value in values.unique().tolist() if value)
 
 
+def _council_filter() -> tuple[list[str] | None, str]:
+    mode = st.sidebar.selectbox("Council", options=["All councils", *COUNCILS, "Council group"])
+    if mode == "All councils":
+        return None, "ALL"
+    if mode == "Council group":
+        selected = st.sidebar.multiselect("Councils", options=list(COUNCILS), default=list(COUNCILS))
+        return selected, " + ".join(selected) or "None"
+    return [mode], mode
+
+
 def _chapter_filter(options: list[str]) -> tuple[list[str], str]:
     if not options:
         return [], "No Chapters"
@@ -965,10 +1017,11 @@ def _render_rate_charts(
     chapter_label: str,
     chart_breakdown: str,
     chart_milestone_label: str,
+    council_label: str,
 ) -> None:
     meta = milestone_dashboard.get("meta", {})
     if int(meta.get("students", 0) or 0) <= 0:
-        st.warning("No new-member cohorts were available. Run `python sqlCompile.py --all-semesters` after your roster path is configured.")
+        st.info("No students match the selected semesters, councils, and chapters.")
         return
 
     chart_frame = milestone_dashboard.get("chart_frame", pd.DataFrame())
@@ -983,7 +1036,7 @@ def _render_rate_charts(
         title = "Outcome Rates: Years Since Joining FSL"
         xaxis_title = "Years since joining FSL"
     subtitle = (
-        f"{selected_label} | {chapter_label} chapters | {chart_milestone_label} since joining FSL | "
+        f"{selected_label} | {council_label} councils | {chapter_label} chapters | {chart_milestone_label} since joining FSL | "
         "Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
     )
     st.plotly_chart(
@@ -1495,10 +1548,20 @@ def main() -> None:
     if shared:
         _shared_change_notice(paths, revision)
 
+    section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, ORGANIZATION_REVIEW_SECTION]
+    section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)
+    if not shared and section == ORGANIZATION_REVIEW_SECTION:
+        _render_organization_review(database_path, manual_status_file, zero_member_periods_file, reporting_cutoff)
+        return
     cohort_options = _selected_cohorts(all_tables.rate_table)
     selected_cohorts, selected_label = _cohort_filter(cohort_options)
-    section = st.radio("Dashboard section", options=SECTION_OPTIONS, horizontal=True, key=SECTION_KEY)
     base_outcomes = all_tables.outcomes.loc[all_tables.outcomes["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcomes.empty else all_tables.outcomes.iloc[0:0].copy()
+    council_label = "ALL"
+    if section != "Manual Rows":
+        selected_councils, council_label = _council_filter()
+        council_chapters = chapters_for_councils(_selected_chapters(base_outcomes), selected_councils)
+        if selected_councils is not None:
+            base_outcomes = _filter_by_chapters(base_outcomes, council_chapters)
     selected_chapters = _selected_chapters(base_outcomes)
     chapter_label = "ALL"
     chart_breakdown = PG_CHART_BREAKDOWN_OVERALL
@@ -1535,7 +1598,7 @@ def main() -> None:
     with kpis[1]:
         st.metric("Selected cohort", selected_label)
     with kpis[2]:
-        st.metric("Council view", "ALL")
+        st.metric("Council view", council_label)
     with kpis[3]:
         st.metric("Chapter view", chapter_label)
 
@@ -1564,10 +1627,11 @@ def main() -> None:
             chapter_label=chapter_label,
             chart_breakdown=chart_breakdown,
             chart_milestone_label=chart_milestone_label,
+            council_label=council_label,
         )
 
     elif section == "Outcome Mix":
-        distribution = all_tables.outcome_distribution.loc[all_tables.outcome_distribution["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.outcome_distribution.empty else all_tables.outcome_distribution.iloc[0:0].copy()
+        distribution = build_outcome_distribution(outcomes)
         _render_outcome_distribution(distribution)
         if not outcomes.empty:
             st.dataframe(outcomes, use_container_width=True, hide_index=True)

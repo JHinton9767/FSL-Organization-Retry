@@ -151,7 +151,7 @@ being silently accepted as a comparison.
 ## Coworker use
 
 Double-click `FSL_Dashboard.html`, or choose **Open with > Microsoft Edge** or
-**Google Chrome**. Select any join semesters, chapters, and years 1-6. The
+**Google Chrome**. Select any join semesters, councils, chapters, and years 1-6. The
 chart can also compare semesters or chapters at one selected year. Each
 person's selections are independent and never change anyone else's view.
 
@@ -160,6 +160,50 @@ existing P&G dashboard calculations. With mixed-age cohorts, future students
 are excluded from that year's rate denominator and counted below the bar. A
 wholly future group is gray. The optional chart-data table only reflects the
 visible chart; there are no student-level lists or editing controls.
+
+## Council groups and owner organization review
+
+Council assignments are hardcoded from the owner's supplied list in
+`src/sqlCompile_councils.py`: IFC (18 organizations), MGC (7), NPHC (9), and
+PHC (8). The same roster-name normalization handles long legal names, short
+names, punctuation, and capitalization. No additional organizations or council
+assignments are guessed, and being on this list does not establish campus status.
+
+The **Council** selector in both dashboards offers all councils, one council,
+or a **Council group** combining several. Council selection uses the student's
+cohort/join chapter, matching the existing chapter filter. Individual chapter
+selection remains available within the selected councils. Switching councils
+resets incompatible chapter selections. Semester choices, cutoff eligibility,
+and outcome rules remain unchanged.
+
+**All councils** retains organizations without a council assignment. Choosing
+all four named councils explicitly includes mapped organizations only. This
+distinction prevents unassigned historical chapters from silently disappearing
+from the all-community totals. The editable dashboard also applies council
+filters to the Manual Checker and Outcome Mix. The Manual Rows editor remains
+unfiltered so saving never replaces the correction ledger with a partial view.
+
+In the owner's normal, non-shared editable dashboard, select **Organization
+Review** under Dashboard section. It lists unmapped organizations from the
+compiled roster records, roster inventory, and named manual corrections, even
+when an organization has no new-member cohort. It includes observed name
+variants, first/last roster semesters, student counts, and recorded CK statuses
+or inferred roster-disappearance evidence. The list is independent of the P&G
+cohort/council filters and can be downloaded for the owner to supply additional
+assignments.
+
+The review can identify new names in initial rosters after the reporting cutoff,
+but removal evidence is limited to the cutoff and respects zero-member
+exceptions. An unmapped organization is **not automatically Chapter Kicked**.
+Recorded CK is stored status evidence, not independent verification; roster
+disappearance is explicitly labeled as inferred. Missing/unrecognized chapter
+labels should be corrected at their source, not assigned an invented council.
+
+Organization Review is absent from shared-mode dashboards and the offline
+community viewer. Its evidence notes and inventory-only organizations are not
+embedded in the published HTML. Existing aggregate cohort data for unmapped
+chapters remains available under All councils. New council assignments require
+republishing the viewer, but do not require recompiling unchanged Excel files.
 
 ## Refreshing the data
 

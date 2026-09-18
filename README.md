@@ -31,6 +31,12 @@ rosters, unresolved names, chapter coverage, and large changes from the previous
 published copy before replacing it. Recompile once after this update to record
 the skipped-file audit; older databases correctly report that audit as unknown.
 
+Council filters use the owner's 42 hardcoded IFC/MGC/NPHC/PHC assignments and
+support one council or combined groups. The normal editable dashboard's
+**Organization Review** lists unmapped historical organizations and any recorded
+or inferred Chapter Kicked evidence. This review is not included in the shared
+or read-only community dashboard; All councils still retains unmapped cohorts.
+
 ## Shared Dashboard
 
 For browser access from other computers, use `Start_Shared_SQL_Dashboard.bat`

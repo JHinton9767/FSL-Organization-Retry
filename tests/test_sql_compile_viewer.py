@@ -67,7 +67,7 @@ def javascript_results(payload, selections):
         const {aggregateViewer} = require(process.argv[1]);
         const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
         process.stdout.write(JSON.stringify(input.selections.map(s =>
-            aggregateViewer(input.payload, s.semesters, s.chapters, s.years, s.breakdown))));
+            aggregateViewer(input.payload, s.semesters, s.chapters, s.years, s.breakdown, s.councils))));
     """
     result = subprocess.run([node, "-e", code, str(viewer.ASSETS / "model.js")],
                             input=json.dumps({"payload": payload, "selections": selections}),
@@ -113,7 +113,7 @@ def test_empty_milestone_selection_does_not_show_stale_chart(cohort_tables):
 
 def test_payload_contains_only_aggregate_data(cohort_tables):
     payload = viewer.build_viewer_payload(cohort_tables)
-    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "outcomes", "colors", "units"}
+    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units"}
     assert "PRIVATE-" not in json.dumps(payload)
     assert payload["dataThrough"] == "Spring 2026"
     assert len(payload["units"]) < len(cohort_tables.outcomes) * 6
