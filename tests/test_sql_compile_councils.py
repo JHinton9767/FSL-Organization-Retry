@@ -20,9 +20,20 @@ from src.sqlCompile_reporting import save_reporting_cutoff
 from src.sqlCompile_viewer import ASSETS, build_viewer_payload, render_viewer
 
 
-def test_council_assignments_match_all_42_owner_supplied_names():
-    assert {council: len(chapters) for council, chapters in COUNCIL_ORGANIZATIONS.items()} == {"IFC": 18, "MGC": 7, "NPHC": 9, "PHC": 8}
-    assert len(CHAPTER_COUNCILS) == 42
+NEW_ASSIGNMENTS = [
+    ("Alpha Epsilon Pi", "IFC"), ("Alpha Psi Lambda", "MGC"),
+    ("Alpha Tau Omega", "IFC"), ("Delta Xi Nu", "MGC"),
+    ("Kappa Alpha", "IFC"), ("Order of Omega", "Other"),
+    ("Phi Iota Alpha", "MGC"), ("Phi Kappa Psi", "IFC"),
+    ("Sigma Iota Alpha", "MGC"), ("Sigma Tau Gamma", "IFC"),
+    ("Beta Upsilon Chi", "IFC"), ("Omega Phi Gamma", "MGC"),
+    ("Phi Delta Delta", "Other"),
+]
+
+
+def test_council_assignments_match_all_55_owner_supplied_names():
+    assert {council: len(chapters) for council, chapters in COUNCIL_ORGANIZATIONS.items()} == {"IFC": 24, "MGC": 12, "NPHC": 9, "PHC": 8, "Other": 2}
+    assert len(CHAPTER_COUNCILS) == 55
     for council, names in COUNCIL_ORGANIZATIONS.items():
         for name in names:
             assert council_for_chapter(name) == council
@@ -35,19 +46,21 @@ def test_council_assignments_match_all_42_owner_supplied_names():
     ("Phi Kappa Tau-Gamma Psi", "IFC"), ("Kappa Alpha Order", "IFC"),
     ("Kappa Alpha Psi Fraternity, Inc.", "NPHC"), ("Iota Phi Theta", "NPHC"),
     ("Alpha Sigma Rho", "MGC"), ("Alpha Sigma Phi", "IFC"),
-    ("Alpha Gamma Delta", "PHC"), ("Sigma Iota Alpha", UNMAPPED_COUNCIL),
+    ("Alpha Gamma Delta", "PHC"), ("Sigma Iota Alpha (Sigma Iota Alpha)", "MGC"),
     ("Theta Xi", UNMAPPED_COUNCIL), ("Unknown", UNMAPPED_COUNCIL), (None, UNMAPPED_COUNCIL),
-])
+] + NEW_ASSIGNMENTS)
 def test_council_normalization_does_not_guess_unlisted_organizations(name, council):
     assert council_for_chapter(name) == council
 
 
 def test_all_councils_includes_unmapped_but_specific_groups_do_not():
-    chapters = ["Sigma Iota Alpha", "Alpha Sigma Phi", "Zeta Tau Alpha", "Iota Phi Theta"]
+    chapters = ["Theta Xi", "Sigma Iota Alpha", "Alpha Sigma Phi", "Zeta Tau Alpha", "Iota Phi Theta", "Order of Omega", "Phi Delta Delta"]
     assert chapters_for_councils(chapters, None) == chapters
     assert chapters_for_councils(chapters, ["IFC", "PHC"]) == ["Alpha Sigma Phi", "Zeta Tau Alpha"]
     assert chapters_for_councils(chapters, []) == []
-    assert "Sigma Iota Alpha" not in chapters_for_councils(chapters, COUNCILS)
+    assert "Theta Xi" not in chapters_for_councils(chapters, COUNCILS)
+    assert chapters_for_councils(chapters, ["Other"]) == ["Order of Omega", "Phi Delta Delta"]
+    assert chapters_for_councils(chapters, ["MGC", "Other"]) == ["Sigma Iota Alpha", "Order of Omega", "Phi Delta Delta"]
 
 
 @pytest.fixture
@@ -66,7 +79,10 @@ def council_host(tmp_path, monkeypatch):
         ("Zeta Tau Alpha", "PRIVATE-PHC", "Fall 2025", "A"),
         ("Sigma Lambda Gamma Sorority, Inc.", "PRIVATE-MGC", "Fall 2025", "A"),
         ("Iota Phi Theta Fraternity, Inc.", "PRIVATE-NPHC", "Fall 2020", "RS"),
-        ("Sigma Iota Alpha", "PRIVATE-UNMAPPED", "Fall 2020", "CK"),
+        ("Sigma Iota Alpha", "PRIVATE-MGC-2", "Fall 2020", "CK"),
+        ("Order of Omega", "PRIVATE-OTHER-1", "Fall 2020", "G"),
+        ("Phi Delta Delta", "PRIVATE-OTHER-2", "Fall 2025", "A"),
+        ("Delta Beta", "PRIVATE-UNMAPPED", "Fall 2020", "CK"),
     ]:
         rows.extend([[semester, chapter, student, "N"], ["Spring 2026", chapter, student, status]])
     rows.append(["Fall 2015", "Theta Xi", "PRIVATE-NO-COHORT", "A"])
@@ -93,9 +109,9 @@ def test_browser_council_filters_match_python_for_all_milestones_and_breakdowns(
     payload = build_viewer_payload(tables)
     selections = [
         {"councils": councils, "semesters": semesters, "chapters": chapters, "breakdown": breakdown, "years": years}
-        for councils in [None, [], ["IFC"], ["MGC"], ["NPHC"], ["PHC"], ["IFC", "PHC"], list(COUNCILS)]
+        for councils in [None, [], ["IFC"], ["MGC"], ["NPHC"], ["PHC"], ["Other"], ["IFC", "PHC"], ["MGC", "Other"], list(COUNCILS)]
         for semesters in [payload["semesters"], ["Fall 2025"]]
-        for chapters in [payload["chapters"], ["Phi Gamma Delta"], ["Sigma Iota Alpha"]]
+        for chapters in [payload["chapters"], ["Phi Gamma Delta"], ["Sigma Iota Alpha"], ["Order of Omega"], ["Delta Beta"]]
         for breakdown, years in [("Overall", [1, 2, 3, 4, 5, 6]), ("Semester joined", [6]), ("Chapter joined", [1])]
     ]
     script = """
@@ -127,7 +143,10 @@ def test_community_payload_contains_mapping_but_not_owner_review(council_host):
     payload = build_viewer_payload(tables)
     assert payload["councils"] == list(COUNCILS)
     assert payload["chapterCouncils"]["Iota Phi Theta Fraternity, Inc."] == "NPHC"
-    assert payload["chapterCouncils"]["Sigma Iota Alpha"] == UNMAPPED_COUNCIL
+    assert payload["chapterCouncils"]["Sigma Iota Alpha"] == "MGC"
+    assert payload["chapterCouncils"]["Order of Omega"] == "Other"
+    assert payload["chapterCouncils"]["Phi Delta Delta"] == "Other"
+    assert payload["chapterCouncils"]["Delta Beta"] == UNMAPPED_COUNCIL
     html = render_viewer(payload)
     assert 'id="council-mode"' in html
     assert "Organization Review" not in html
@@ -140,8 +159,8 @@ def test_community_payload_contains_mapping_but_not_owner_review(council_host):
 def test_unmapped_review_distinguishes_recorded_inferred_and_no_removal_evidence():
     compiled = pd.DataFrame([
         ["Fall 2015", "Theta Xi", "PRIVATE-1", "A"],
-        ["Fall 2025", "Sigma Iota Alpha", "PRIVATE-2", "CK"],
-        ["Spring 2026", "Sigma Iota Alpha", "PRIVATE-2", "A"],
+        ["Fall 2025", "Phi Alpha Theta", "PRIVATE-2", "CK"],
+        ["Spring 2026", "Phi Alpha Theta", "PRIVATE-2", "A"],
         ["Spring 2026", "Alpha Kappa Lambda", "PRIVATE-3", "A"],
         ["Fall 2026", "Delta Beta", "PRIVATE-4", "N"],
         ["Spring 2026", "Alpha Sigma Phi", "PRIVATE-KNOWN", "A"],
@@ -154,13 +173,28 @@ def test_unmapped_review_distinguishes_recorded_inferred_and_no_removal_evidence
     zero = pd.DataFrame(columns=ZERO_MEMBER_PERIOD_COLUMNS)
     original = compiled.copy(deep=True)
     review = build_unmapped_organization_review(compiled, inventory, manual, zero, "Spring 2026").set_index("Organization")
-    assert set(review.index) == {"Theta Xi", "Sigma Iota Alpha", "Alpha Kappa Lambda", "Delta Beta"}
+    assert set(review.index) == {"Theta Xi", "Phi Alpha Theta", "Alpha Kappa Lambda", "Delta Beta"}
     assert review.loc["Theta Xi", "Chapter Kicked Evidence"] == "Inferred roster disappearance"
-    assert review.loc["Sigma Iota Alpha", "Chapter Kicked Evidence"] == "Recorded CK status"
+    assert review.loc["Phi Alpha Theta", "Chapter Kicked Evidence"] == "Recorded CK status"
     assert review.loc["Alpha Kappa Lambda", "Chapter Kicked Evidence"] == "None through cutoff"
     assert review.loc["Delta Beta", "Records After Cutoff"] == "Yes"
     assert review.loc["Delta Beta", "Chapter Kicked Evidence"] == "None through cutoff"
     assert "PRIVATE-" not in review.to_csv()
+    pd.testing.assert_frame_equal(compiled, original)
+
+
+def test_new_assignments_leave_owner_review_without_changing_roster_outcomes():
+    compiled = pd.DataFrame([
+        ["Spring 2026", chapter, f"PRIVATE-{index}", "CK"]
+        for index, (chapter, _) in enumerate(NEW_ASSIGNMENTS)
+    ] + [["Spring 2026", "Theta Xi", "PRIVATE-UNMAPPED", "CK"]], columns=OUTPUT_COLUMNS)
+    inventory = compiled[["Semester", "Chapter"]].assign(**{"Student Rows": 1})
+    original = compiled.copy(deep=True)
+    review = build_unmapped_organization_review(
+        compiled, inventory, pd.DataFrame(columns=MANUAL_STATUS_COLUMNS),
+        pd.DataFrame(columns=ZERO_MEMBER_PERIOD_COLUMNS), "Spring 2026",
+    )
+    assert review["Organization"].tolist() == ["Theta Xi"]
     pd.testing.assert_frame_equal(compiled, original)
 
 
@@ -182,7 +216,7 @@ def test_owner_filters_chart_and_checker_and_can_review_all_unmapped_organizatio
     _, _ = council_host
     app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
     assert not app.exception and not app.error
-    assert app.metric[0].value == "6"
+    assert app.metric[0].value == "9"
     next(widget for widget in app.selectbox if widget.label == "Council").set_value("IFC").run()
     assert not app.exception and not app.error
     assert app.metric[0].value == "2"
@@ -196,7 +230,7 @@ def test_owner_filters_chart_and_checker_and_can_review_all_unmapped_organizatio
     assert app.metric[0].value == "2"
     app.radio(key="sql_compile_dashboard_section").set_value("Organization Review").run()
     assert not app.exception and not app.error
-    assert set(app.dataframe[0].value["Organization"]) == {"Sigma Iota Alpha", "Theta Xi", "Alpha Kappa Lambda"}
+    assert set(app.dataframe[0].value["Organization"]) == {"Delta Beta", "Theta Xi", "Alpha Kappa Lambda"}
     assert not any(widget.label == "Council" for widget in app.selectbox)
 
 
@@ -225,3 +259,18 @@ def test_shared_dashboard_has_council_filter_but_no_owner_review(council_host, m
     assert not app.exception and not app.error
     assert app.metric[0].value == "1"
     assert app.metric[2].value == "NPHC"
+
+
+def test_other_group_and_combined_councils_filter_the_dashboard(council_host):
+    app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
+    next(widget for widget in app.selectbox if widget.label == "Council").set_value("Other").run()
+    assert not app.exception and not app.error
+    assert app.metric[0].value == "2"
+    assert app.metric[2].value == "Other"
+    app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
+    assert not app.exception and not app.error
+    assert set(app.session_state["sql_compile_manual_checker_rows"]["Cohort Chapter"]) == {"Order of Omega", "Phi Delta Delta"}
+    next(widget for widget in app.selectbox if widget.label == "Council").set_value("Council group").run()
+    next(widget for widget in app.multiselect if widget.label == "Councils").set_value(["MGC", "Other"]).run()
+    assert not app.exception and not app.error
+    assert app.metric[0].value == "4"

@@ -164,8 +164,10 @@ visible chart; there are no student-level lists or editing controls.
 ## Council groups and owner organization review
 
 Council assignments are hardcoded from the owner's supplied list in
-`src/sqlCompile_councils.py`: IFC (18 organizations), MGC (7), NPHC (9), and
-PHC (8). The same roster-name normalization handles long legal names, short
+`src/sqlCompile_councils.py`: IFC, MGC, NPHC, PHC, and Other. Other contains
+Order of Omega and Phi Delta Delta. Both Kappa Alpha and Kappa Alpha Order
+map to IFC without rewriting source chapter names. The same roster-name
+normalization handles long legal names, short
 names, punctuation, and capitalization. No additional organizations or council
 assignments are guessed, and being on this list does not establish campus status.
 
@@ -177,7 +179,8 @@ resets incompatible chapter selections. Semester choices, cutoff eligibility,
 and outcome rules remain unchanged.
 
 **All councils** retains organizations without a council assignment. Choosing
-all four named councils explicitly includes mapped organizations only. This
+all named groups explicitly includes mapped organizations only. Other is an
+explicit assignment, not a catch-all for unmapped organizations. This
 distinction prevents unassigned historical chapters from silently disappearing
 from the all-community totals. The editable dashboard also applies council
 filters to the Manual Checker and Outcome Mix. The Manual Rows editor remains

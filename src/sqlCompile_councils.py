@@ -19,13 +19,15 @@ COUNCIL_ORGANIZATIONS = {
         "Kappa Delta Rho", "Kappa Sigma", "Lambda Chi Alpha", "Phi Delta Theta",
         "Phi Gamma Delta", "Phi Kappa Sigma", "Phi Kappa Tau", "Pi Kappa Alpha",
         "Pi Kappa Phi", "Sigma Alpha Epsilon", "Sigma Chi", "Sigma Nu",
-        "Sigma Phi Epsilon", "Theta Chi",
+        "Sigma Phi Epsilon", "Theta Chi", "Alpha Epsilon Pi", "Alpha Tau Omega",
+        "Kappa Alpha", "Phi Kappa Psi", "Sigma Tau Gamma", "Beta Upsilon Chi",
     ),
     "MGC": (
         "Alpha Sigma Rho Sorority, Inc.", "Kappa Delta Chi, Sorority, Inc.",
         "Lambda Delta Psi Sorority, Inc.", "Omega Delta Phi Fraternity, Inc.",
         "Sigma Delta Lambda Sorority, Inc.", "Sigma Lambda Beta Fraternity, Inc.",
-        "Sigma Lambda Gamma Sorority, Inc.",
+        "Sigma Lambda Gamma Sorority, Inc.", "Alpha Psi Lambda", "Delta Xi Nu",
+        "Phi Iota Alpha", "Sigma Iota Alpha", "Omega Phi Gamma",
     ),
     "NPHC": (
         "Alpha Phi Alpha Fraternity, Inc.", "Alpha Kappa Alpha Sorority, Inc.",
@@ -38,6 +40,7 @@ COUNCIL_ORGANIZATIONS = {
         "Alpha Delta Pi", "Alpha Gamma Delta", "Alpha Xi Delta", "Chi Omega",
         "Delta Gamma", "Delta Zeta", "Gamma Phi Beta", "Zeta Tau Alpha",
     ),
+    "Other": ("Order of Omega", "Phi Delta Delta"),
 }
 COUNCILS = tuple(COUNCIL_ORGANIZATIONS)
 UNMAPPED_COUNCIL = "Unmapped"
