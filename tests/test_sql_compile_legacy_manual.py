@@ -1,12 +1,14 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from src.sqlCompile_cohort import read_manual_status_rows
 from src.sqlCompile_legacy_manual import (
     import_legacy_manual_decisions,
     legacy_status_to_sql_status,
     load_legacy_manual_decision_rows,
+    main,
 )
 
 
@@ -17,6 +19,37 @@ def test_legacy_status_to_sql_status_maps_old_dashboard_outcomes() -> None:
     assert legacy_status_to_sql_status("Resigned") == "RS"
     assert legacy_status_to_sql_status("Inactive/Suspended") == "S"
     assert legacy_status_to_sql_status("Dropped/Inactive") == "D"
+
+
+def test_ambiguous_graduation_statuses_are_reviewable_without_erasing_saved_work(tmp_path):
+    source = tmp_path / "outcome_overrides.csv"
+    pd.DataFrame([{"student_id": "A00000001", "organization_join_term": "Fall 2020",
+                   "organization_name": "Alpha Sigma Phi", "final_status_term": "Spring 2024",
+                   "final_status": "Not Graduated"}]).to_csv(source, index=False)
+    destination = tmp_path / "manual.csv"
+    existing = pd.DataFrame([{"Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha Sigma Phi",
+                              "Semester": "Spring 2024", "Chapter": "Alpha Sigma Phi", "Student ID": "A00000001",
+                              "Status": "G", "Notes": "Earlier imported decision to verify"}])
+    existing.to_csv(destination, index=False)
+    loaded = load_legacy_manual_decision_rows(source)
+    assert loaded.rows.empty
+    assert loaded.rejected_statuses["Student ID"].tolist() == ["A00000001"]
+    assert loaded.rejected_statuses["Legacy Status"].tolist() == ["Not Graduated"]
+    result = import_legacy_manual_decisions(source, destination)
+    assert result.saved_rows == 0
+    pd.testing.assert_frame_equal(read_manual_status_rows(destination), existing)
+    original = destination.read_bytes()
+    review = tmp_path / "review.csv"
+    assert main(["--legacy-path", str(source), "--manual-status-file", str(destination),
+                 "--dry-run", "--review-output", str(review)]) == 0
+    assert pd.read_csv(review)["Legacy Status"].tolist() == ["Not Graduated"]
+    assert destination.read_bytes() == original
+    for protected in [source, destination]:
+        before = protected.read_bytes()
+        with pytest.raises(SystemExit):
+            main(["--legacy-path", str(source), "--manual-status-file", str(destination),
+                  "--dry-run", "--review-output", str(protected)])
+        assert protected.read_bytes() == before
 
 
 def test_load_legacy_manual_decision_rows_converts_old_registry_files(tmp_path: Path) -> None:
@@ -119,7 +152,7 @@ def test_load_legacy_manual_decision_rows_auto_detects_manual_check_exports(tmp_
             "Chapter": "Zeta Tau Alpha",
             "Student ID": "A00000006",
             "Status": "AL",
-            "Notes": "Imported from legacy Manual checks form.csv. Saved as Early Alumni.",
+            "Notes": "Imported from legacy Manual checks form.csv. Legacy status: Early Alumni | Saved as Early Alumni.",
         }
     ]
     assert loaded.source_counts["manual_review_actions"] == 2
@@ -150,6 +183,6 @@ def test_import_legacy_manual_decisions_appends_to_sql_compile_manual_file(tmp_p
             "Chapter": "Alpha Sigma Phi",
             "Student ID": "A00000001",
             "Status": "D",
-            "Notes": "Imported from legacy outcome_overrides.csv.",
+            "Notes": "Imported from legacy outcome_overrides.csv. Legacy status: Dropped",
         }
     ]

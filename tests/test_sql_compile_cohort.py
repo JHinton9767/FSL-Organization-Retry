@@ -227,7 +227,7 @@ def test_new_member_cohort_marks_students_lost_with_disappeared_chapter() -> Non
     assert summary_lookup.loc[("Known Non-Graduate Exit Rate", "Known Non-Graduate Exit"), "Student Count"] == 2
 
 
-def test_new_member_cohort_marks_midsemester_chapter_disappearance_from_roster_passes() -> None:
+def test_unequal_roster_pass_counts_do_not_establish_midsemester_chapter_removal() -> None:
     compiled = pd.DataFrame(
         [
             {"Semester": "Fall 2025", "Chapter": "Alpha Sigma Phi", "Student ID": "A1", "Status": "N"},
@@ -250,7 +250,7 @@ def test_new_member_cohort_marks_midsemester_chapter_disappearance_from_roster_p
     )
 
     indexed = outcomes.set_index("Student ID")
-    assert indexed.loc["A1", "Final Outcome Bucket"] == "Chapter Kicked"
+    assert indexed.loc["A1", "Final Outcome Bucket"] == "New Member / No Later Status"
     assert indexed.loc["B1", "Final Outcome Bucket"] == "New Member / No Later Status"
     assert review.empty
 

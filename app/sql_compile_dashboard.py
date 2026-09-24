@@ -870,6 +870,12 @@ def _render_legacy_manual_importer(manual_status_file: Path) -> None:
         )
         st.dataframe(source_summary, use_container_width=True, hide_index=True, height=250)
 
+        if not loaded.rejected_statuses.empty:
+            st.warning(f"{len(loaded.rejected_statuses):,} legacy statuses need review and will not be imported. Check any earlier imported graduation decisions for these IDs.")
+            st.dataframe(loaded.rejected_statuses, use_container_width=True, hide_index=True)
+            st.download_button("Download Legacy Status Review", data=dataframe_to_csv_bytes(loaded.rejected_statuses),
+                               file_name="legacy_status_review.csv", mime="text/csv")
+
         if loaded.rows.empty:
             st.info("No completed legacy outcome decisions were found at that path.")
             return
@@ -1547,6 +1553,9 @@ def main() -> None:
 
     if shared:
         _shared_change_notice(paths, revision)
+
+    if not all_tables.new_member_evidence_complete:
+        st.warning("This database predates the join-evidence fix. Recompile all Excel rosters before using these rates; students who joined and exited in the same semester may be missing.")
 
     section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, ORGANIZATION_REVIEW_SECTION]
     section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)

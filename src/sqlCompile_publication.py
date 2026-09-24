@@ -99,6 +99,8 @@ def publication_changes(current: dict, previous: dict | None) -> list[str]:
 
 def build_publication_check(config, tables, payload: dict, previous: dict | None) -> dict:
     warnings = []
+    if not tables.new_member_evidence_complete:
+        warnings.append("Original new-member evidence is unavailable. Recompile all Excel rosters with the updated compiler before relying on these rates; same-semester exits may be missing from cohorts.")
     cutoff = payload["dataThrough"]
     compiled = read_sql_compile_table(config.database)
     roster = read_roster_inventory_table(config.database)
@@ -156,6 +158,7 @@ def build_publication_check(config, tables, payload: dict, previous: dict | None
     return {
         "checked_at": payload["published"], "reporting_cutoff": cutoff,
         "cohort_students": sum(row[4] for row in payload["units"] if row[2] == 1),
+        "new_member_evidence_complete": tables.new_member_evidence_complete,
         "source_files": int(audit["Source Files"]) if audit is not None and pd.notna(audit.get("Source Files")) else None,
         "skipped_sheet_file_issues": skipped, "unresolved_duplicate_ids": int(mismatches), "name_rechecks": int(rechecks),
         "missing_chapter_rows": missing_chapters, "invalid_semester_rows": invalid_terms,

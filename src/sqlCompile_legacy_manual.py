@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -56,6 +56,7 @@ class LegacyManualDecisionLoad:
     source_counts: dict[str, int]
     converted_counts: dict[str, int]
     searched_paths: dict[str, list[Path]]
+    rejected_statuses: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @property
     def skipped_counts(self) -> dict[str, int]:
@@ -111,7 +112,7 @@ def _is_truthy(value: object) -> bool:
 
 def legacy_status_to_sql_status(value: object) -> str:
     text = clean_text(value)
-    if not text:
+    if not text or "?" in text:
         return ""
 
     direct = normalize_status_code(text)
@@ -121,8 +122,11 @@ def legacy_status_to_sql_status(value: object) -> str:
     upper = text.upper()
     if "CHAPTER" in upper and "KICK" in upper:
         return "CK"
-    if "GRAD" in upper or "DEGREE" in upper:
+    compact = re.sub(r"[^A-Z0-9]+", "", upper)
+    if compact in {"GRADUATEDCONFIRMED", "CONFIRMEDGRADUATED", "GRADUATIONCONFIRMED", "DEGREEAWARDED", "AWARDEDDEGREE"}:
         return "G"
+    if "GRAD" in upper or "DEGREE" in upper:
+        return ""
     if "EARLY" in upper and "ALUM" in upper:
         return "AL"
     if "REVOK" in upper:
@@ -168,7 +172,7 @@ def _manual_row(
         "Chapter": chapter_text or cohort_chapter_text,
         "Student ID": normalize_banner_id(clean_text(student_id)),
         "Status": legacy_status_to_sql_status(status),
-        "Notes": _note(source_name, notes),
+        "Notes": _note(source_name, f"Legacy status: {clean_text(status)}", notes),
     }
 
 
@@ -198,7 +202,7 @@ def _convert_manual_roster_corrections(frame: pd.DataFrame, source_name: str) ->
                 cohort_chapter=_first_value(row, "organization_name", "corrected_organization_name"),
                 semester=_first_value(row, "final_status_term", "leaving_organization_term", "organization_join_term"),
                 chapter=_first_value(row, "corrected_organization_name", "organization_name"),
-                status=_row_value(row, "final_status"),
+                status=_legacy_row_status(row, "manual_roster_corrections"),
             )
         )
     return _dedupe_manual_rows(pd.DataFrame(rows, columns=MANUAL_STATUS_COLUMNS))
@@ -230,7 +234,7 @@ def _convert_outcome_overrides(frame: pd.DataFrame, source_name: str) -> pd.Data
             cohort_chapter=_row_value(row, "organization_name"),
             semester=_first_value(row, "final_status_term", "status_term", "term"),
             chapter=_row_value(row, "organization_name"),
-            status=_first_value(row, "final_status", "status", "outcome", "outcome_bucket"),
+            status=_legacy_row_status(row, "outcome_overrides"),
             notes=_first_value(row, "reason", "evidence_source", "notes"),
         )
         for _, row in frame.iterrows()
@@ -272,7 +276,7 @@ def _convert_manual_adjustments(frame: pd.DataFrame, source_name: str) -> pd.Dat
                 student_id=student_id,
                 semester=_first_value(row, "original_value", "term", "final_status_term", "manual_adjusted_term"),
                 chapter=chapter_lookup.get(student_id, ""),
-                status=_row_value(row, "adjusted_value"),
+                status=_legacy_row_status(row, "manual_adjustments"),
                 notes=_first_value(row, "reason", "evidence", "reviewer"),
             )
         )
@@ -285,14 +289,28 @@ def _status_from_review_note(row: pd.Series) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _legacy_row_status(row: pd.Series, source: str) -> str:
+    if source == "graduation_evidence":
+        return "G"
+    if source == "manual_roster_corrections":
+        return _row_value(row, "final_status")
+    if source == "outcome_overrides":
+        return _first_value(row, "final_status", "status", "outcome", "outcome_bucket")
+    if source == "manual_adjustments":
+        if _row_value(row, "active").lower() in {"no", "n", "false", "0", "inactive"}:
+            return ""
+        return _row_value(row, "adjusted_value") if _row_value(row, "field_to_override", "field").lower() in OUTCOME_FIELD_NAMES else ""
+    adjusted = _first_value(row, "manual_adjusted_outcome", "manual_outcome", "adjusted_value") or _status_from_review_note(row)
+    if adjusted:
+        return adjusted
+    corrected = _row_value(row, "review_status").lower() == "corrected"
+    return _row_value(row, "latest_outcome_bucket") if corrected and _is_truthy(_row_value(row, "has_manual_correction")) else ""
+
+
 def _convert_manual_review_queue(frame: pd.DataFrame, source_name: str) -> pd.DataFrame:
     rows: list[dict[str, str]] = []
     for _, row in frame.iterrows():
-        adjusted_status = _first_value(row, "manual_adjusted_outcome", "manual_outcome", "adjusted_value") or _status_from_review_note(row)
-        if not adjusted_status:
-            has_correction = _row_value(row, "has_manual_correction").lower() in {"yes", "true", "1"}
-            corrected = _row_value(row, "review_status").lower() == "corrected"
-            adjusted_status = _row_value(row, "latest_outcome_bucket") if has_correction and corrected else ""
+        adjusted_status = _legacy_row_status(row, "manual_review_queue")
         rows.append(
             _manual_row(
                 source_name=source_name,
@@ -452,6 +470,7 @@ def load_legacy_manual_decision_rows(legacy_path: str | Path = ROOT / "config") 
     converted_frames: list[pd.DataFrame] = []
     source_counts: dict[str, int] = {source_name: 0 for source_name in LEGACY_MANUAL_FILE_NAMES}
     converted_counts: dict[str, int] = {source_name: 0 for source_name in LEGACY_MANUAL_FILE_NAMES}
+    rejected_statuses = []
 
     for source_name, paths in discovered_paths.items():
         for path in paths:
@@ -467,6 +486,15 @@ def load_legacy_manual_decision_rows(legacy_path: str | Path = ROOT / "config") 
                 if path not in searched_paths[actual_source_name]:
                     searched_paths[actual_source_name].append(path)
             source_counts[actual_source_name] = source_counts.get(actual_source_name, 0) + int(len(frame))
+            for row_number, (_, row) in enumerate(frame.iterrows(), start=2):
+                status = _legacy_row_status(row, actual_source_name)
+                if status and not legacy_status_to_sql_status(status):
+                    rejected_statuses.append({
+                        "Legacy File": str(path), "Source Row": row_number,
+                        "Student ID": _first_banner_id(row, "student_id", "student id", "normalized_student_id", "banner id"),
+                        "Legacy Status": status,
+                        "Reason": "Unrecognized or unconfirmed status. Not imported; review any earlier imported decision for this ID.",
+                    })
             converted = converter(frame, path.name)
             converted_counts[actual_source_name] = converted_counts.get(actual_source_name, 0) + int(len(converted))
             if not converted.empty:
@@ -478,6 +506,7 @@ def load_legacy_manual_decision_rows(legacy_path: str | Path = ROOT / "config") 
         source_counts=source_counts,
         converted_counts=converted_counts,
         searched_paths=searched_paths,
+        rejected_statuses=pd.DataFrame(rejected_statuses, columns=["Legacy File", "Source Row", "Student ID", "Legacy Status", "Reason"]),
     )
 
 
@@ -499,25 +528,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--legacy-path", default=str(ROOT), help="Legacy project root, config folder, canonical output folder, or one legacy CSV/XLSX file.")
     parser.add_argument("--manual-status-file", default=str(DEFAULT_MANUAL_STATUS_PATH), help="Destination sqlCompile manual status CSV.")
     parser.add_argument("--preview-output", default="", help="Optional CSV path where importable rows should be written for review.")
+    parser.add_argument("--review-output", default="", help="Optional CSV of rejected/ambiguous legacy statuses, including IDs to check for previously imported decisions.")
     parser.add_argument("--dry-run", action="store_true", help="Preview importable rows without appending them.")
     args = parser.parse_args(argv)
 
     loaded = load_legacy_manual_decision_rows(args.legacy_path)
     print(f"Legacy path scanned: {Path(args.legacy_path)}")
     print(f"Importable sqlCompile manual rows: {len(loaded.rows):,}")
+    if not loaded.rejected_statuses.empty:
+        print(f"Statuses requiring review: {len(loaded.rejected_statuses):,}. These were not imported. Check earlier imported decisions for these IDs; use --review-output to save the list.")
     for source_name in LEGACY_MANUAL_FILE_NAMES:
         checked = len(loaded.searched_paths.get(source_name, []))
         print(
             f"{source_name}: {loaded.converted_counts.get(source_name, 0):,} converted "
             f"from {loaded.source_counts.get(source_name, 0):,} source row(s) across {checked:,} checked file(s)"
         )
-    if args.preview_output:
-        preview_path = Path(args.preview_output).expanduser()
-        if not preview_path.is_absolute():
-            preview_path = Path.cwd() / preview_path
-        preview_path.parent.mkdir(parents=True, exist_ok=True)
-        loaded.rows.to_csv(preview_path, index=False)
-        print(f"Preview rows written to: {preview_path}")
+    protected = {Path(args.manual_status_file).expanduser().resolve()}
+    protected.update(path.resolve() for paths in loaded.searched_paths.values() for path in paths)
+    exports = []
+    for destination, frame, label in [
+        (args.preview_output, loaded.rows, "Preview rows"),
+        (args.review_output, loaded.rejected_statuses, "Legacy status review"),
+    ]:
+        if destination:
+            path = Path(destination).expanduser().resolve()
+            if path in protected:
+                parser.error("Preview/review output must not replace a legacy source or the saved manual-status file.")
+            exports.append((path, frame, label))
+    for path, frame, label in exports:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(path, index=False)
+        print(f"{label} written to: {path}")
     if args.dry_run:
         return 0
 

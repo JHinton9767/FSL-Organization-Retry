@@ -34,6 +34,7 @@ from src.build_master_roster import (
     source_file_label,
 )
 from src.path_config import ROOT, load_path_config
+from src.persistence_outcomes import persistence_outcome_from_status
 from src.sqlCompile_storage import atomic_database_update
 from src.shared_utils import clean_text
 
@@ -44,6 +45,8 @@ STUDENT_NAME_TABLE = "sqlCompile_student_names"
 STUDENT_NAME_COLUMNS = ["Student ID", "Student Name"]
 STUDENT_NAME_OBSERVATION_TABLE = "sqlCompile_student_name_observations"
 STUDENT_NAME_OBSERVATION_COLUMNS = ["Student ID", "Student Name", "Observation Count"]
+NEW_MEMBER_OBSERVATION_TABLE = "sqlCompile_new_member_observations"
+NEW_MEMBER_OBSERVATION_COLUMNS = ["Semester", "Chapter", "Student ID"]
 ROSTER_INVENTORY_TABLE = "sqlCompile_roster_inventory"
 COMPILE_AUDIT_TABLE = "sqlCompile_audit"
 COMPILE_ISSUES_TABLE = "sqlCompile_issues"
@@ -144,10 +147,30 @@ def excel_files(roots: Sequence[Path]) -> List[Path]:
 def _source_label(path: Path, roots: Sequence[Path]) -> str:
     for root in roots:
         try:
-            return source_file_label(path, root)
-        except Exception:
+            return str(path.relative_to(root))
+        except ValueError:
             continue
     return source_file_label(path)
+
+
+def _roster_path_details(path: Path, roots: Sequence[Path]) -> Tuple[str, float, str, int]:
+    context = [path.name]
+    for root in roots:
+        try:
+            context = [*reversed(path.relative_to(root).parts), root.name]
+        except ValueError:
+            continue
+        break
+
+    # Prefer the filename/nearest roster folder, never unrelated ancestors.
+    version, version_priority = "Regular", 1
+    month, month_priority = "", 0
+    for part in context:
+        if version == "Regular":
+            version, version_priority = roster_file_version_details(part)
+        if not month:
+            month, month_priority = roster_file_month_details(part)
+    return version, version_priority, month, month_priority
 
 
 def _find_compile_header_row(table_rows: Sequence[Tuple[object, ...]]) -> Tuple[Optional[int], dict[str, int]]:
@@ -284,8 +307,7 @@ def _load_sheet_rows(
 
     semester, term_code, term_sort = _term_details(path, table_rows, header_row_idx)
     current_chapter = _default_chapter(path, sheet_name, table_rows, header_row_idx)
-    roster_file_version, roster_file_version_priority = roster_file_version_details(" ".join(path.parts))
-    roster_file_month, roster_file_month_priority = roster_file_month_details(" ".join(path.parts))
+    roster_file_version, roster_file_version_priority, roster_file_month, roster_file_month_priority = _roster_path_details(path, roots)
     header_row = table_rows[header_row_idx - 1] if header_row_idx and header_row_idx <= len(table_rows) else ()
     row_results: List[dict] = []
 
@@ -372,6 +394,16 @@ def resolve_semester_statuses(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
+    rows = rows.copy()
+    keys = ["_term_code", "Semester", "Student ID"]
+    # Only a demonstrably later roster pass/month can clear a provisional I/S.
+    passes = rows[["_source_version_priority", "_source_month_priority"]].apply(pd.to_numeric, errors="coerce").fillna(0)
+    rows["_pass_order"] = pd.factorize(pd.MultiIndex.from_frame(passes), sort=True)[0]
+    rows["_reactivation_order"] = rows["_pass_order"].where(rows["_status_priority"].isin([1, 2]), -1)
+    latest_active = rows.groupby(keys, dropna=False)["_reactivation_order"].transform("max")
+    provisional = rows["Status"].map(persistence_outcome_from_status).eq("Inactive/Suspended")
+    rows = rows.loc[~(provisional & latest_active.gt(rows["_pass_order"]))]
+
     ordered = rows.sort_values(
         by=[
             "Student ID",
@@ -388,7 +420,7 @@ def resolve_semester_statuses(rows: pd.DataFrame) -> pd.DataFrame:
         ascending=[True, True, True, False, False, False, False, True, True, True],
         na_position="last",
     )
-    deduped = ordered.drop_duplicates(subset=["_term_code", "Semester", "Student ID"], keep="first").copy()
+    deduped = ordered.drop_duplicates(subset=keys, keep="first").copy()
     final = deduped.sort_values(["_term_sort", "Semester", "Chapter", "Student ID"], na_position="last")
     return final.loc[:, OUTPUT_COLUMNS].reset_index(drop=True)
 
@@ -451,6 +483,21 @@ def build_roster_inventory(rows: pd.DataFrame) -> pd.DataFrame:
     result = result.loc[:, ROSTER_INVENTORY_COLUMNS].copy()
     result["_sort"] = result["Semester"].map(lambda value: sort_term_code(parse_term_code(value)[0]) if parse_term_code(value)[0] else 999999)
     return result.sort_values(["_sort", "Semester", "Chapter", "Roster Pass Priority", "Source File", "Source Sheet"]).drop(columns=["_sort"]).reset_index(drop=True)
+
+
+def build_new_member_observations(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=NEW_MEMBER_OBSERVATION_COLUMNS)
+    new_members = rows.loc[rows["Status"].map(_status_priority).eq(2)].copy()
+    new_members["_join_sort"] = new_members["Semester"].map(lambda term: sort_term_code(parse_term_code(term)[0]))
+    source_order = [column for column in [
+        "_join_sort", "_source_version_priority", "_source_month_priority",
+        "_source_file", "_source_sheet", "_source_row_index", "Chapter", "Student ID",
+    ] if column in new_members]
+    # Preserve the first observed join chapter independently of the winning semester status.
+    return new_members.sort_values(source_order, kind="stable").drop_duplicates(
+        ["Semester", "Chapter", "Student ID"], keep="first",
+    ).loc[:, NEW_MEMBER_OBSERVATION_COLUMNS].reset_index(drop=True)
 
 
 def build_student_name_lookup(rows: pd.DataFrame) -> pd.DataFrame:
@@ -547,6 +594,7 @@ def write_sqlite(
     student_name_observation_table_name: str = STUDENT_NAME_OBSERVATION_TABLE,
     compile_issues: Optional[pd.DataFrame] = None,
     source_file_count: Optional[int] = None,
+    new_member_observations: Optional[pd.DataFrame] = None,
 ) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -581,6 +629,11 @@ def write_sqlite(
             f"CREATE INDEX IF NOT EXISTS {_quote_identifier(f'idx_{table_name}_student_semester')} "
             f"ON {table_identifier} ({_quote_identifier('Student ID')}, {_quote_identifier('Semester')})"
         )
+        connection.execute(f"DROP TABLE IF EXISTS {_quote_identifier(NEW_MEMBER_OBSERVATION_TABLE)}")
+        if new_member_observations is not None:
+            new_member_observations.loc[:, NEW_MEMBER_OBSERVATION_COLUMNS].to_sql(
+                NEW_MEMBER_OBSERVATION_TABLE, connection, if_exists="replace", index=False,
+            )
         if roster_inventory is not None:
             inventory = roster_inventory.copy()
             for column in ROSTER_INVENTORY_COLUMNS:
@@ -655,6 +708,7 @@ def sqlCompile(
         student_name_observations=student_name_observations,
         compile_issues=issues,
         source_file_count=source_file_count,
+        new_member_observations=build_new_member_observations(source_rows),
     )
     return SqlCompileResult(
         output_path=destination,

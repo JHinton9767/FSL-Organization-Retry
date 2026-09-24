@@ -4,12 +4,14 @@ import argparse
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from src.build_canonical_pipeline import parse_term_code, sort_term_code
+from src.build_master_roster import normalize_chapter_name
 from src.path_config import ROOT
 from src.shared_utils import clean_text
 from src.sqlCompile_storage import (
@@ -22,6 +24,8 @@ from src.sqlCompile_storage import (
 from src.sqlCompile import (
     DEFAULT_OUTPUT_PATH,
     OUTPUT_COLUMNS,
+    NEW_MEMBER_OBSERVATION_COLUMNS,
+    NEW_MEMBER_OBSERVATION_TABLE,
     ROSTER_INVENTORY_COLUMNS,
     ROSTER_INVENTORY_TABLE,
     STUDENT_NAME_COLUMNS,
@@ -99,8 +103,11 @@ def _semester_sort(value: object) -> int:
     return sort_term_code(code) if code else 999999
 
 
+@lru_cache(maxsize=1024)
 def _normalize_chapter_key(value: object) -> str:
-    return re.sub(r"[^a-z0-9]+", "", clean_text(value).lower())
+    text = clean_text(value)
+    normalized = normalize_chapter_name(text)
+    return re.sub(r"[^a-z0-9]+", "", (text if normalized == "Unknown" else normalized).lower())
 
 
 def _slug(value: str) -> str:
@@ -262,6 +269,19 @@ def read_roster_inventory_table(
     return _ensure_roster_inventory_columns(frame)
 
 
+def read_new_member_observations(database_path: str | Path) -> Optional[pd.DataFrame]:
+    with read_database(_resolve_path(database_path)) as connection:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (NEW_MEMBER_OBSERVATION_TABLE,),
+        ).fetchone()
+        if not exists:
+            return None
+        frame = pd.read_sql_query(f"SELECT * FROM {_quote_identifier(NEW_MEMBER_OBSERVATION_TABLE)} ORDER BY rowid", connection)
+    if not set(NEW_MEMBER_OBSERVATION_COLUMNS).issubset(frame.columns):
+        raise ValueError("The original join-evidence table is incomplete. Recompile the Excel rosters.")
+    return _ensure_columns(frame, NEW_MEMBER_OBSERVATION_COLUMNS)
+
+
 def read_student_name_table(
     database_path: str | Path = DEFAULT_OUTPUT_PATH,
     table_name: str = STUDENT_NAME_TABLE,
@@ -327,6 +347,7 @@ def _prepared_manual_rows(frame: pd.DataFrame) -> pd.DataFrame:
     prepared["_status_code"] = prepared["Status"].map(normalize_status_code)
     prepared["_source"] = "manual_status"
     prepared["_manual_priority"] = 2
+    prepared["_manual_sequence"] = range(len(prepared))
     return prepared
 
 
@@ -386,23 +407,24 @@ def _selected_cohort_semesters(prepared: pd.DataFrame, cohort_semesters: Optiona
     raise ValueError("Pass at least one --cohort-semester, or use --all-cohorts.")
 
 
-def _manual_rows_for_cohort(manual: pd.DataFrame, cohort_label: str, cohort_students: pd.DataFrame) -> pd.DataFrame:
+def _manual_rows_for_cohort(manual: pd.DataFrame, cohort_students: pd.DataFrame, memberships: pd.DataFrame) -> pd.DataFrame:
     if manual.empty:
         return manual.copy()
 
-    student_chapter_key: Dict[str, str] = dict(zip(cohort_students["Student ID"], cohort_students["_cohort_chapter_key"]))
-    filtered = manual.loc[manual["Student ID"].isin(student_chapter_key)].copy()
+    student_ids = set(cohort_students["Student ID"])
+    filtered = manual.loc[manual["Student ID"].isin(student_ids)].copy()
     if filtered.empty:
         return filtered
 
-    semester_matches = filtered["_cohort_semester_normalized"].eq("") | filtered["_cohort_semester_normalized"].eq(cohort_label)
-    chapter_matches = filtered.apply(
-        lambda row: not row["_cohort_chapter_key"]
-        or row["_cohort_chapter_key"] == student_chapter_key.get(row["Student ID"], ""),
-        axis=1,
-    )
-    filtered = filtered.loc[semester_matches & chapter_matches].copy()
-    return filtered
+    # Retain decisions scoped to any observed join, including a later duplicate cohort.
+    allowed = set()
+    for student_id, semester, chapter in memberships.loc[
+        memberships["Student ID"].isin(student_ids), ["Student ID", "_semester_normalized", "Chapter"],
+    ].itertuples(index=False, name=None):
+        chapter_key = _normalize_chapter_key(chapter)
+        allowed.update((student_id, term, key) for term in (semester, "") for key in (chapter_key, ""))
+    keys = pd.MultiIndex.from_frame(filtered[["Student ID", "_cohort_semester_normalized", "_cohort_chapter_key"]])
+    return filtered.loc[keys.isin(allowed)].copy()
 
 
 def _timeline_rows_for_cohort(
@@ -411,6 +433,7 @@ def _timeline_rows_for_cohort(
     chapter_disappearance_events: Dict[str, List[dict]],
     cohort_label: str,
     cohort_source_rows: pd.DataFrame,
+    memberships: pd.DataFrame,
 ) -> pd.DataFrame:
     cohort_sort = _semester_sort(cohort_label)
     cohort_students = (
@@ -419,7 +442,6 @@ def _timeline_rows_for_cohort(
         .rename(columns={"Chapter": "Cohort Chapter"})
     )
     cohort_students["Cohort Semester"] = cohort_label
-    cohort_students["_cohort_chapter_key"] = cohort_students["Cohort Chapter"].map(_normalize_chapter_key)
 
     base_timeline = compiled.loc[compiled["Student ID"].isin(cohort_students["Student ID"])].copy()
     base_timeline["Cohort Semester"] = cohort_label
@@ -430,7 +452,7 @@ def _timeline_rows_for_cohort(
     )
     base_timeline["Notes"] = ""
 
-    manual_timeline = _manual_rows_for_cohort(manual, cohort_label, cohort_students)
+    manual_timeline = _manual_rows_for_cohort(manual, cohort_students, memberships)
     if not manual_timeline.empty:
         manual_timeline = manual_timeline.rename(columns={"_cohort_semester_normalized": "_manual_cohort_semester"})
         manual_timeline["Cohort Semester"] = cohort_label
@@ -463,6 +485,7 @@ def _timeline_rows_for_cohort(
         "_status_code",
         "_source",
         "_manual_priority",
+        "_manual_sequence",
     ]
     combined = pd.concat(
         [
@@ -476,9 +499,11 @@ def _timeline_rows_for_cohort(
         return pd.DataFrame(columns=_timeline_output_columns())
 
     combined["_included_sort"] = combined["_term_sort"].ge(cohort_sort).astype(int)
+    combined["_manual_sequence"] = pd.to_numeric(combined["_manual_sequence"], errors="coerce").fillna(-1)
     combined = combined.sort_values(
-        ["Student ID", "_semester_normalized", "_manual_priority", "_included_sort", "_source"],
-        ascending=[True, True, False, False, True],
+        ["Student ID", "_semester_normalized", "_manual_priority", "_manual_sequence", "_included_sort", "_source"],
+        ascending=[True, True, False, False, False, True],
+        kind="stable",
         na_position="last",
     )
     resolved = combined.drop_duplicates(subset=["Student ID", "_semester_normalized"], keep="first").copy()
@@ -546,7 +571,6 @@ def _chapter_disappearance_events(
         .set_index("_term_sort")["Semester"]
         .to_dict()
     )
-    term_latest_pass = inventory.groupby("_term_sort")["Roster Pass Priority"].max().to_dict()
     global_latest_sort = int(inventory["_term_sort"].max())
     ordered_terms = sorted(int(value) for value in term_labels if int(value) < 999999)
     zero_member = _prepared_zero_member_periods(zero_member_periods)
@@ -598,25 +622,8 @@ def _chapter_disappearance_events(
         last_row = _latest_chapter_roster_row(group, last_sort)
         if not last_row:
             continue
-        chapter_latest_pass = float(group.loc[group["_term_sort"].eq(last_sort), "Roster Pass Priority"].max())
-        term_latest = float(term_latest_pass.get(last_sort, chapter_latest_pass))
         chapter_name = clean_text(last_row.get("Chapter", ""))
         last_semester = clean_text(last_row.get("Semester", ""))
-
-        if chapter_latest_pass < term_latest:
-            add_event(
-                chapter_key,
-                {
-                    "chapter": chapter_name,
-                    "last_roster_sort": last_sort,
-                    "disappearance_sort": last_sort,
-                    "disappearance_semester": last_semester,
-                    "reason": f"{chapter_name} appeared before the latest roster pass for {last_semester} but was absent from the latest pass.",
-                },
-                last_sort,
-                last_sort,
-            )
-            continue
 
         if last_sort < global_latest_sort:
             future_terms = [term_sort for term_sort in ordered_terms if term_sort > last_sort]
@@ -883,14 +890,18 @@ def build_new_member_cohort_tables(
     zero_member_periods: Optional[pd.DataFrame] = None,
     cohort_semesters: Optional[Sequence[str]] = None,
     all_cohorts: bool = False,
+    new_member_observations: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
     compiled = _prepared_compile_rows(compiled_rows)
     manual = _prepared_manual_rows(manual_rows)
+    joins = (compiled.loc[compiled["_status_code"].eq("N")].copy() if new_member_observations is None
+             else _prepared_compile_rows(new_member_observations.assign(Status="N")))
+    earliest_joins = joins.sort_values(["_term_sort", "_semester_normalized"], kind="stable").drop_duplicates("Student ID", keep="first")
     inventory = _prepared_roster_inventory(roster_inventory)
     zero_member = _prepared_zero_member_periods(
         read_zero_member_periods() if zero_member_periods is None else zero_member_periods
     )
-    selected_semesters = _selected_cohort_semesters(compiled, cohort_semesters, all_cohorts)
+    selected_semesters = _selected_cohort_semesters(earliest_joins, cohort_semesters, all_cohorts)
     chapter_events = _chapter_disappearance_events(inventory, zero_member) if selected_semesters else {}
 
     timeline_frames: List[pd.DataFrame] = []
@@ -898,12 +909,10 @@ def build_new_member_cohort_tables(
     review_frames: List[pd.DataFrame] = []
 
     for cohort_label in selected_semesters:
-        cohort_rows = compiled.loc[
-            compiled["_semester_normalized"].eq(cohort_label) & compiled["_status_code"].eq("N")
-        ].copy()
+        cohort_rows = earliest_joins.loc[earliest_joins["_semester_normalized"].eq(cohort_label)].copy()
         if cohort_rows.empty:
             continue
-        timeline = _timeline_rows_for_cohort(compiled, manual, chapter_events, cohort_label, cohort_rows)
+        timeline = _timeline_rows_for_cohort(compiled, manual, chapter_events, cohort_label, cohort_rows, joins)
         outcomes = _build_outcomes_for_cohort(cohort_label, cohort_rows, timeline)
         review = _build_review_rows(outcomes)
         timeline_frames.append(timeline)
@@ -1015,6 +1024,7 @@ def build_new_member_cohort_report(
     manual_path = ensure_manual_status_file(manual_status_file)
     compiled_rows = read_sql_compile_table(database, table_name=table_name)
     roster_inventory = read_roster_inventory_table(database)
+    new_member_observations = read_new_member_observations(database)
     manual_rows = read_manual_status_rows(manual_path)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
@@ -1022,6 +1032,7 @@ def build_new_member_cohort_report(
         roster_inventory=roster_inventory,
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
+        new_member_observations=new_member_observations,
     )
     write_report_tables(database, timeline, outcomes, review, summary)
     report_dir, csv_paths, csv_warnings = write_report_csvs(output_dir, selected_semesters, timeline, outcomes, review, summary)

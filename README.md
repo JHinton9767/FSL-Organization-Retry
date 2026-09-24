@@ -37,6 +37,12 @@ support one council or combined groups. The normal editable dashboard's
 or inferred Chapter Kicked evidence. This review is not included in the shared
 or read-only community dashboard; All councils still retains unmapped cohorts.
 
+The [September 2026 rate corrections](docs/rate_correction_update.md) require one
+full Excel recompile to preserve original new-member evidence. They fix I/S
+reactivation, cohort denominators, unequal-roster-pass removal inference,
+duplicate/manual-history handling, and legacy import validation without erasing
+saved decisions. Review the migration steps before republishing office rates.
+
 ## Shared Dashboard
 
 For browser access from other computers, use `Start_Shared_SQL_Dashboard.bat`

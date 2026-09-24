@@ -5,13 +5,13 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.path_config import ROOT
-from src.sqlCompile import COMPILE_AUDIT_TABLE, COMPILE_ISSUES_TABLE, OUTPUT_COLUMNS, write_sqlite
+from src.sqlCompile import COMPILE_AUDIT_TABLE, COMPILE_ISSUES_TABLE, NEW_MEMBER_OBSERVATION_TABLE, OUTPUT_COLUMNS, build_new_member_observations, write_sqlite
 from src.sqlCompile_cohort import append_manual_status_rows, read_manual_status_rows, read_sql_compile_table
 from src.sqlCompile_dashboard import build_sql_compile_milestone_dashboard, load_dashboard_tables
 from src.sqlCompile_host import load_host_config
 from src.sqlCompile_publication import build_publication_check, publication_changes, read_previous_publication
 from src.sqlCompile_reporting import REPORTING_EXAMPLE, normalize_reporting_cutoff, read_reporting_cutoff, save_reporting_cutoff
-from src.sqlCompile_storage import read_database
+from src.sqlCompile_storage import read_database, atomic_database_update
 from src.sqlCompile_viewer import build_viewer_payload, main, publish_viewer
 
 
@@ -33,8 +33,10 @@ def reporting_host(tmp_path, monkeypatch):
     inventory = pd.DataFrame([{"Semester": term, "Chapter": "Alpha", "Source File": f"PRIVATE-{term}.xlsx",
                                "Roster Pass": "initial" if term == "Fall 2026" else "final", "Student Rows": 1}
                               for term in terms])
-    write_sqlite(pd.DataFrame(rows, columns=OUTPUT_COLUMNS), config.database, roster_inventory=inventory,
-                 compile_issues=pd.DataFrame(), source_file_count=len(terms))
+    compiled = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+    write_sqlite(compiled, config.database, roster_inventory=inventory,
+                 compile_issues=pd.DataFrame(), source_file_count=len(terms),
+                 new_member_observations=build_new_member_observations(compiled))
     read_manual_status_rows(config.manual_status)
     config.zero_member_periods.write_text("Chapter,Start Semester,End Semester,Notes\n", encoding="utf-8")
     save_reporting_cutoff("Spring 2026", config.reporting_settings)
@@ -47,6 +49,21 @@ def load_cutoff_tables(config, cutoff="Spring 2026"):
                                  duplicate_name_resolution_file=config.name_choices, duplicate_name_recheck_file=config.name_rechecks,
                                  zero_member_periods_file=config.zero_member_periods, reporting_cutoff=cutoff,
                                  create_review_files=False)
+
+
+def test_missing_original_join_evidence_pauses_publication_and_preserves_previous_copy(reporting_host, tmp_path):
+    config, _ = reporting_host
+    output = tmp_path / "shared.html"
+    publish_viewer(config, output)
+    previous = output.read_bytes()
+    with atomic_database_update(config.database) as connection:
+        connection.execute(f'DROP TABLE "{NEW_MEMBER_OBSERVATION_TABLE}"')
+    with pytest.raises(ValueError, match="Publication paused"):
+        publish_viewer(config, output)
+    assert output.read_bytes() == previous
+    report = json.loads((config.database.parent / "publication_checks" / "shared.json").read_text())
+    assert not report["new_member_evidence_complete"]
+    assert any("Original new-member evidence" in warning for warning in report["warnings"])
 
 
 def test_confirmed_initial_cutoff():

@@ -18,6 +18,7 @@ from src.sqlCompile_cohort import (
     read_student_name_observations_table,
     read_manual_status_rows,
     read_roster_inventory_table,
+    read_new_member_observations,
     read_student_name_table,
     read_sql_compile_table,
     read_zero_member_periods,
@@ -172,6 +173,7 @@ class SqlCompileDashboardTables:
     duplicate_name_rechecks: pd.DataFrame
     selected_semesters: list[str]
     reporting_cutoff: str | None = None
+    new_member_evidence_complete: bool = False
 
 
 def _count_bucket(frame: pd.DataFrame, bucket: str) -> int:
@@ -481,7 +483,7 @@ def consolidate_duplicate_student_outcomes(
         return outcomes.copy()
 
     columns = list(outcomes.columns)
-    extra_columns = [column for column in ["Last Known Outcome Bucket", "Notes"] if column not in columns]
+    extra_columns = [column for column in ["Student Name", "Last Known Outcome Bucket", "Notes"] if column not in columns]
     work = _ensure_missing_columns(outcomes, [*columns, *extra_columns])
     for column in [
         "Cohort Semester",
@@ -508,16 +510,17 @@ def consolidate_duplicate_student_outcomes(
         .index
         .tolist()
     )
-    if not duplicate_ids:
-        return work.loc[:, [*columns, *extra_columns]].reset_index(drop=True)
-
     observed_names = _observed_names_by_student_id(work, name_observations if name_observations is not None else pd.DataFrame())
     resolved_names = _duplicate_name_resolution_lookup(duplicate_name_resolutions)
+    conflict_ids = {student_id for student_id, names in observed_names.items() if len(names) > 1}
+    review_ids = duplicate_ids | conflict_ids | set(resolved_names)
+    if not review_ids:
+        return work.loc[:, [*columns, *extra_columns]].reset_index(drop=True)
     rows: list[pd.Series] = []
-    non_duplicates = work.loc[~work["Student ID"].isin(duplicate_ids)].copy()
+    non_duplicates = work.loc[~work["Student ID"].isin(review_ids)].copy()
     rows.extend(row for _, row in non_duplicates.iterrows())
 
-    for student_id, group in work.loc[work["Student ID"].isin(duplicate_ids)].groupby("Student ID", sort=False):
+    for student_id, group in work.loc[work["Student ID"].isin(review_ids)].groupby("Student ID", sort=False):
         resolved_name = str(resolved_names.get(str(student_id), "") or "").strip()
         names = [resolved_name] if resolved_name else observed_names.get(str(student_id), [])
         if not names:
@@ -669,8 +672,8 @@ def build_sql_compile_milestone_dashboard(
         for key, group in timeline_work.groupby(["Cohort Semester", "Student ID"], sort=False):
             ordered = group.sort_values(sort_columns, na_position="last")
             outcomes_at_rows = ordered["_outcome"]
-            # Carry the most recent resolved outcome through later active/unknown rows.
-            resolved = outcomes_at_rows.where(~outcomes_at_rows.isin(["Active", "Unknown"])).ffill()
+            # I/S is provisional: a later A/N clears it, but not a terminal outcome.
+            resolved = outcomes_at_rows.where(~outcomes_at_rows.isin(["Active", "Unknown", "Inactive/Suspended"])).ffill()
             timeline_groups[(str(key[0]).strip(), str(key[1]).strip())] = (
                 ordered["_term_sort"].tolist(),
                 resolved.fillna(outcomes_at_rows).tolist(),
@@ -1013,6 +1016,7 @@ def load_dashboard_tables(
     with data_lock(_resolve_path(database_path)):
         compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
         roster_inventory = read_roster_inventory_table(database_path)
+        new_member_observations = read_new_member_observations(database_path)
         student_names = read_student_name_table(database_path)
         student_name_observations = read_student_name_observations_table(database_path)
     manual_rows = read_manual_status_rows(manual_status_file, create_if_missing=create_review_files)
@@ -1025,6 +1029,8 @@ def load_dashboard_tables(
         compiled_rows = through_reporting_cutoff(compiled_rows, reporting_cutoff)
         roster_inventory = through_reporting_cutoff(roster_inventory, reporting_cutoff)
         calculation_manual_rows = through_reporting_cutoff(manual_rows, reporting_cutoff)
+        if new_member_observations is not None:
+            new_member_observations = through_reporting_cutoff(new_member_observations, reporting_cutoff)
     timeline, outcomes, review, summary, selected_semesters = build_new_member_cohort_tables(
         compiled_rows,
         calculation_manual_rows,
@@ -1032,6 +1038,7 @@ def load_dashboard_tables(
         zero_member_periods=read_zero_member_periods(zero_member_periods_file),
         cohort_semesters=cohort_semesters,
         all_cohorts=all_cohorts,
+        new_member_observations=new_member_observations,
     )
     outcomes = attach_student_names(outcomes, student_names)
     outcomes = consolidate_duplicate_student_outcomes(
@@ -1054,6 +1061,7 @@ def load_dashboard_tables(
         duplicate_name_rechecks=duplicate_name_rechecks,
         selected_semesters=selected_semesters,
         reporting_cutoff=reporting_cutoff,
+        new_member_evidence_complete=new_member_observations is not None,
     )
 
 
