@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pandas as pd
 from filelock import FileLock
+from src.sqlCompile_audit import begin_change, finish_change, audit_warning
 
 
 BACKUP_LIMIT = 10
@@ -62,10 +63,15 @@ def _prune_backups(path: Path) -> None:
 
 def _write_csv(frame: pd.DataFrame, path: Path) -> None:
     content = frame.to_csv(index=False).encode("utf-8")
+    before = path.read_bytes() if path.exists() else None
     if path.exists():
-        if path.read_bytes() == content:
+        if before == content:
+            if audit_warning(path):
+                change_id = begin_change(path, before, content)
+                finish_change(path, change_id, "saved")
             return
         shutil.copy2(path, _backup_path(path))
+    change_id = begin_change(path, before, content)
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".tmp", delete=False) as handle:
@@ -74,9 +80,13 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+    except BaseException:
+        finish_change(path, change_id, "failed")
+        raise
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+    finish_change(path, change_id, "saved")
     _prune_backups(path)
 
 

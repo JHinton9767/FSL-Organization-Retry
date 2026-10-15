@@ -75,7 +75,7 @@ def test_roster_pass_and_month_ignore_unrelated_ancestors_and_use_matching_root(
     write_roster(root / "Spring 2021" / "Initial January" / "Alpha Sigma Phi.xlsx", "Spring 2021", ["S"])
     write_roster(root / "Spring 2021" / "Updated March" / "Alpha Sigma Phi.xlsx", "Spring 2021", ["A"])
     rows, issues, _ = load_sql_compile_rows([tmp_path / "other_rosters", root])
-    assert issues.empty
+    assert set(issues["exception_type"]) == {"sql_compile_root_missing"}
     rows = rows.set_index("Status")
     assert rows.loc["S", "_roster_file_version"] == "Initial"
     assert rows.loc["A", "_roster_file_version"] == "Updated"

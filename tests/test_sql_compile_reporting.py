@@ -13,6 +13,10 @@ from src.sqlCompile_publication import build_publication_check, publication_chan
 from src.sqlCompile_reporting import REPORTING_EXAMPLE, normalize_reporting_cutoff, read_reporting_cutoff, save_reporting_cutoff
 from src.sqlCompile_storage import read_database, atomic_database_update
 from src.sqlCompile_viewer import build_viewer_payload, main, publish_viewer
+from src.sqlCompile_quality import save_coverage
+from src.sqlCompile_storage import read_review_csv
+from src.sqlCompile_cohort import ZERO_MEMBER_PERIOD_COLUMNS, _semester_sort
+from src.build_canonical_pipeline import parse_term_code
 
 
 @pytest.fixture
@@ -22,23 +26,30 @@ def reporting_host(tmp_path, monkeypatch):
         "database": str(tmp_path / "data.sqlite"), "manual_status": str(tmp_path / "manual.csv"),
         "name_choices": str(tmp_path / "names.csv"), "name_rechecks": str(tmp_path / "rechecks.csv"),
         "zero_member_periods": str(tmp_path / "zero.csv"), "reporting_settings": str(tmp_path / "reporting.json"),
+        "university_records": str(tmp_path / "university.csv"), "coverage_reviews": str(tmp_path / "coverage.csv"),
     }), encoding="utf-8")
     config = load_host_config(path)
     # Full regular-term inventory, plus the owner's initial-only Fall 2026 roster.
     terms = [f"{season} {year}" for year in range(2020, 2027) for season in ("Spring", "Fall")
              if (year, season) != (2020, "Spring")]
-    rows = [[term, "Alpha", "PRIVATE-1", "N" if term == "Fall 2020" else "A"] for term in terms]
-    rows.extend([["Fall 2025", "Alpha", "PRIVATE-2", "N"], ["Spring 2026", "Alpha", "PRIVATE-2", "A"],
-                 ["Fall 2026", "Alpha", "PRIVATE-3", "N"]])
+    rows = [[term, "Alpha", "A01234567", "N" if term == "Fall 2020" else "A"] for term in terms]
+    rows.extend([["Fall 2025", "Alpha", "A01234568", "N"], ["Spring 2026", "Alpha", "A01234568", "A"],
+                 ["Fall 2026", "Alpha", "A01234569", "N"]])
     inventory = pd.DataFrame([{"Semester": term, "Chapter": "Alpha", "Source File": f"PRIVATE-{term}.xlsx",
                                "Roster Pass": "initial" if term == "Fall 2026" else "final", "Student Rows": 1}
                               for term in terms])
     compiled = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+    observations = compiled.assign(_term_code=compiled.Semester.map(lambda value: parse_term_code(value)[0]),
+        _term_sort=compiled.Semester.map(_semester_sort), _source_version_priority=3, _source_month_priority=0,
+        _source_format_priority=3, _status_priority=compiled.Status.map(lambda status: 2 if status == "N" else 1),
+        _source_file="PRIVATE-roster.xlsx", _source_sheet="Roster", _source_row_index=3)
+    observations.attrs["source_manifest"] = [["PRIVATE-roster.xlsx", "PRIVATE-roster.xlsx", "test-digest", "test", "test", len(compiled), 0, "No"]]
     write_sqlite(compiled, config.database, roster_inventory=inventory,
                  compile_issues=pd.DataFrame(), source_file_count=len(terms),
-                 new_member_observations=build_new_member_observations(compiled))
+                 new_member_observations=build_new_member_observations(compiled), source_observations=observations)
     read_manual_status_rows(config.manual_status)
-    config.zero_member_periods.write_text("Chapter,Start Semester,End Semester,Notes\n", encoding="utf-8")
+    read_review_csv(config.zero_member_periods, ZERO_MEMBER_PERIOD_COLUMNS)
+    save_coverage(pd.DataFrame([{"Chapter": "Alpha", "Semester": term, "Coverage": "Complete", "Source": "PRIVATE-roster.xlsx", "Reviewed By": "Reviewer", "Notes": ""} for term in terms]), config.coverage_reviews)
     save_reporting_cutoff("Spring 2026", config.reporting_settings)
     monkeypatch.setenv("FSL_DASHBOARD_HOST_CONFIG", str(path))
     return config, path
@@ -58,12 +69,12 @@ def test_missing_original_join_evidence_pauses_publication_and_preserves_previou
     previous = output.read_bytes()
     with atomic_database_update(config.database) as connection:
         connection.execute(f'DROP TABLE "{NEW_MEMBER_OBSERVATION_TABLE}"')
-    with pytest.raises(ValueError, match="Publication paused"):
+    with pytest.raises(ValueError, match="Publication blocked"):
         publish_viewer(config, output)
     assert output.read_bytes() == previous
     report = json.loads((config.database.parent / "publication_checks" / "shared.json").read_text())
     assert not report["new_member_evidence_complete"]
-    assert any("Original new-member evidence" in warning for warning in report["warnings"])
+    assert any("Original new-member evidence" in error for error in report["errors"])
 
 
 def test_confirmed_initial_cutoff():
@@ -90,8 +101,8 @@ def test_settings_are_explicit_and_custom_missing_files_fail(tmp_path):
 def test_cutoff_excludes_initial_rosters_and_future_corrections_without_deleting_them(reporting_host):
     config, _ = reporting_host
     append_manual_status_rows(pd.DataFrame([
-        {"Student ID": "PRIVATE-1", "Semester": "Fall 2026", "Chapter": "Alpha", "Status": "G"},
-        {"Student ID": "PRIVATE-2", "Semester": "Spring 2032", "Chapter": "Alpha", "Status": "RS"},
+        {"Student ID": "A01234567", "Semester": "Fall 2026", "Chapter": "Alpha", "Status": "G"},
+        {"Student ID": "A01234568", "Semester": "Spring 2032", "Chapter": "Alpha", "Status": "RS"},
     ]), config.manual_status)
     original = config.database.read_bytes(), config.manual_status.read_bytes()
     tables = load_cutoff_tables(config)
@@ -114,7 +125,7 @@ def test_milestone_builder_uses_cutoff_even_with_unfiltered_future_timeline(repo
     config, _ = reporting_host
     tables = load_cutoff_tables(config)
     timeline = pd.concat([tables.timeline, pd.DataFrame([{
-        "Cohort Semester": "Fall 2025", "Student ID": "PRIVATE-2", "Semester": "Spring 2032",
+        "Cohort Semester": "Fall 2025", "Student ID": "A01234568", "Semester": "Spring 2032",
         "Status Code": "G", "Source": "manual_status", "Included In Outcome": "Yes",
     }])], ignore_index=True)
     result = build_sql_compile_milestone_dashboard(timeline, tables.outcomes, ["Fall 2025"], reporting_cutoff="Spring 2026")
@@ -152,7 +163,7 @@ def test_quality_warnings_require_acknowledgment_and_check_only_does_not_publish
     publish_viewer(config, output)
     previous = output.read_bytes()
     append_manual_status_rows(pd.DataFrame([{
-        "Student ID": "PRIVATE-1", "Semester": "Spring 2024", "Chapter": "Alpha", "Status": "G",
+        "Student ID": "A01234567", "Semester": "Spring 2024", "Chapter": "Alpha", "Status": "G",
     }]), config.manual_status)
     with pytest.raises(ValueError, match="paused for review"):
         publish_viewer(config, output)
@@ -216,7 +227,7 @@ def test_coverage_exceptions_and_unresolved_names_are_reported(reporting_host):
         for chapter in ["Alpha", "Beta"] for term in ["Fall 2025", "Spring 2026"]
         if (chapter, term) != ("Beta", "Spring 2026")
     ])
-    names = pd.DataFrame([{"Student ID": "PRIVATE-1", "Student Name": name, "Observation Count": 1}
+    names = pd.DataFrame([{"Student ID": "A01234567", "Student Name": name, "Observation Count": 1}
                           for name in ["PRIVATE-NAME-1", "PRIVATE-NAME-2"]])
     write_sqlite(rows, config.database, roster_inventory=inventory, student_name_observations=names,
                  compile_issues=pd.DataFrame(), source_file_count=3)

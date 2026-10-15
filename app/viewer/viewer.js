@@ -24,6 +24,10 @@
     });
   }
   addPicker("semesters", payload.semesters);
+  for (const view of Object.keys(payload.views || {"Roster outcomes (legacy)": payload.units})) byId("measure").add(new Option(view, view));
+  byId("measure").value = payload.defaultView || "Roster outcomes (legacy)";
+  byId("measure").addEventListener("change", update);
+  byId("population").addEventListener("change", update);
   addPicker("chapters", payload.chapters);
   addPicker("councils", payload.councils);
   for (const council of [...payload.councils, "Council group"]) byId("council-mode").add(new Option(council, council));
@@ -31,7 +35,7 @@
   for (let year = 1; year <= 6; year++) byId("single-year").add(new Option(`${year} Year`, String(year)));
   byId("single-year").value = "6";
   byId("published").textContent = `Published ${new Date(payload.published).toLocaleString()}`;
-  byId("data-through").textContent = `Data complete through ${payload.dataThrough}`;
+  byId("data-through").textContent = `Reporting cutoff ${payload.dataThrough} | Rules ${payload.metricVersion || "legacy"}${payload.dataRevision ? ` | Snapshot ${payload.dataRevision.slice(0, 12)}` : ""}`;
 
   for (const id of ["semesters", "chapters"]) {
     byId(`all-${id}`).addEventListener("change", event => {
@@ -50,6 +54,8 @@
     byId("council-mode").value = "All councils";
     byId("breakdown").value = "Overall";
     byId("single-year").value = "6";
+    byId("measure").value = payload.defaultView || "Roster outcomes (legacy)";
+    byId("population").value = "Eligible at each year";
     update();
   });
 
@@ -115,7 +121,9 @@
     }
     byId("years-field").hidden = breakdown !== "Overall";
     byId("single-year-field").hidden = breakdown === "Overall";
-    result = aggregateViewer(payload, semesters, chapters, years, breakdown, councils);
+    const view = byId("measure").value, population = byId("population").value;
+    result = aggregateViewer(payload, semesters, chapters, years, breakdown, councils, view, population);
+    byId("definitions").textContent = `${view}. ${population}. Spring checkpoints in join calendar year plus year number (Summer joins use Summer). All eligible students, including Unknown, stay in the denominator. Membership, enrollment, and degrees are independent. ${view === "Roster outcomes (legacy)" ? "Legacy Year 1 may be incomplete; later years require completed checkpoints." : "Unfinished checkpoints are Future. Active membership and enrollment require evidence in the checkpoint semester."}`;
     byId("cohort-size").textContent = format(result.students);
     const cohortLabel = semesters.length === payload.semesters.length ? "All Time" : semesters.length === 1 ? semesters[0] : `${semesters.length} semesters`;
     const chapterLabel = !chapters.length ? "None" : chapters.length === availableChapters.length ? "ALL" : chapters.length === 1 ? chapters[0] : `${chapters.length} chapters`;
@@ -123,7 +131,7 @@
     byId("cohort-label").textContent = cohortLabel;
     byId("chapter-label").textContent = chapterLabel;
     byId("council-label").textContent = councilLabel;
-    byId("chart-title").textContent = breakdown === "Overall" ? "Outcome Rates: Years Since Joining FSL" : `Outcome Rates by ${breakdown}`;
+    byId("chart-title").textContent = breakdown === "Overall" ? `${view}: Years Since Joining FSL` : `${view} by ${breakdown}`;
     byId("selection-label").textContent = `${cohortLabel} | ${councilLabel} councils | ${chapterLabel} chapters | ${years.map(year => `${year} Year`).join(", ")}`;
     byId("empty").hidden = result.groups.length > 0;
     byId("empty").textContent = years.length ? "No students match the selected semesters, councils, and chapters." : "No milestones selected.";

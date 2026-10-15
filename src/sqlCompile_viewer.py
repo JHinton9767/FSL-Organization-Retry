@@ -4,6 +4,8 @@ import argparse
 import json
 import re
 import sys
+import hashlib
+from uuid import uuid4
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -19,6 +21,8 @@ from src.sqlCompile_councils import COUNCILS, council_for_chapter
 from src.sqlCompile_publication import build_publication_check, read_previous_publication
 from src.sqlCompile_reporting import REPORTING_EXAMPLE, read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
 from src.sqlCompile_storage import atomic_write_text, data_lock
+from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, METRIC_VERSION
+from src.sqlCompile_sources import read_optional_table, SOURCE_MANIFEST
 
 
 ASSETS = ROOT / "app" / "viewer"
@@ -42,6 +46,18 @@ def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
         [str(semester), str(chapter), int(year), str(outcome), int(count)]
         for semester, chapter, year, outcome, count in totals.itertuples(index=False, name=None)
     ]
+    views = {ROSTER_VIEW: units}
+    for view in OUTCOME_VIEWS:
+        if view == ROSTER_VIEW:
+            continue
+        independent = build_sql_compile_milestone_dashboard(
+            tables.timeline, tables.outcomes, tables.selected_semesters,
+            selected_chapters=chapters, chart_milestone_offsets=[1, 2, 3, 4, 5, 6],
+            reporting_cutoff=getattr(tables, "reporting_cutoff", None),
+            record_history=getattr(tables, "record_history", None), outcome_view=view,
+        )["detail_frame"]
+        grouped = independent.groupby(columns, dropna=False, sort=False).size().reset_index(name="Count")
+        views[view] = [[str(a), str(b), int(c), str(d), int(e)] for a, b, c, d, e in grouped.itertuples(index=False, name=None)]
     semesters = sorted({row[0] for row in units}, key=_semester_sort)
     latest = getattr(tables, "reporting_cutoff", None) or max(tables.timeline["Semester"].dropna().astype(str), key=_semester_sort, default="")
     return {
@@ -52,9 +68,12 @@ def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
         "chapters": sorted({row[1] for row in units}, key=str.casefold),
         "councils": list(COUNCILS),
         "chapterCouncils": {chapter: council_for_chapter(chapter) for chapter in sorted({row[1] for row in units})},
-        "outcomes": PERSISTENCE_CHART_OUTCOME_ORDER,
+        "outcomes": [*PERSISTENCE_CHART_OUTCOME_ORDER, "Enrolled", "Not enrolled", "No degree confirmed"],
         "colors": PERSISTENCE_OUTCOME_COLORS,
         "units": units,
+        "views": views,
+        "defaultView": DEGREE_VIEW,
+        "metricVersion": METRIC_VERSION,
     }
 
 
@@ -98,8 +117,20 @@ def publish_viewer(
         database_path=config.database, manual_status_file=config.manual_status,
         duplicate_name_resolution_file=config.name_choices, duplicate_name_recheck_file=config.name_rechecks,
         zero_member_periods_file=config.zero_member_periods, create_review_files=False, reporting_cutoff=cutoff,
+        university_records_file=config.university_records,
     )
     payload = build_viewer_payload(tables)
+    manifest = read_optional_table(config.database, SOURCE_MANIFEST)
+    source_records = manifest.reindex(columns=["Source Path", "SHA256", "Parser Version"]).fillna("").sort_values("Source Path").to_dict("records")
+    payload["sourceRevision"] = hashlib.sha256(json.dumps(source_records, sort_keys=True).encode("utf-8")).hexdigest()
+    fingerprint = hashlib.sha256()
+    for path in source_paths:
+        if path.exists():
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    fingerprint.update(block)
+        fingerprint.update(b"\0")
+    payload["dataRevision"] = fingerprint.hexdigest()
     previous_error = None
     try:
         previous = read_previous_publication(output)
@@ -114,6 +145,8 @@ def publish_viewer(
     approved = review_check(report) if review_check is not None else False
     if data_revision(source_paths) != revision:
         raise RuntimeError("Source records changed during publication. No viewer was replaced. Finish saving and publish again.")
+    if report.get("errors"):
+        raise ValueError(f"Publication blocked by {len(report['errors'])} accuracy error(s). Prior viewer is unchanged. Review {report_path}. Warnings approval cannot bypass these errors.")
     if check_only:
         return output, report["cohort_students"]
     if report["warnings"] and not (allow_warnings or approved):
@@ -122,7 +155,15 @@ def publish_viewer(
     with data_lock(output):
         if data_revision(source_paths) != revision or data_revision((output,)) != previous_revision:
             raise RuntimeError("Source records or the published viewer changed. No viewer was replaced; publish again.")
+        archive = config.database.parent / "publications" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ") + "_" + uuid4().hex[:8])
+        # Archive in owner storage: the quality report can contain private source references.
+        if output.exists():
+            atomic_write_text(archive / "previous.html", output.read_text(encoding="utf-8-sig"))
+        atomic_write_text(archive / "candidate.html", html)
+        atomic_write_text(archive / "quality.json", json.dumps(report, indent=2, allow_nan=False) + "\n")
         atomic_write_text(output, html)
+        atomic_write_text(archive / "published.json", json.dumps({"published": payload["published"], "metric_version": METRIC_VERSION,
+                          "data_revision": payload["dataRevision"], "destination": str(output)}, indent=2) + "\n")
     return output, sum(row[4] for row in payload["units"] if row[2] == 1)
 
 
@@ -144,9 +185,11 @@ def main(argv: list[str] | None = None) -> int:
             print("No comparable previous publication; change detection will start with the next publication.")
         for warning in report["warnings"]:
             print(f"WARNING: {warning}")
-        if not report["warnings"]:
+        for error in report.get("errors", []):
+            print(f"ERROR: {error}")
+        if not report["warnings"] and not report.get("errors"):
             print("Publication checks passed without warnings.")
-        if report["warnings"] and not (args.check_only or args.allow_warnings) and sys.stdin.isatty():
+        if report["warnings"] and not report.get("errors") and not (args.check_only or args.allow_warnings) and sys.stdin.isatty():
             return input("After reviewing the warnings, publish this snapshot? [y/N] ").strip().lower() in {"y", "yes"}
         return False
 

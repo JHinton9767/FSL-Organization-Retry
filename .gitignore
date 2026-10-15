@@ -15,6 +15,7 @@ config/local_paths.yaml
 config/sqlCompile_host.json
 *.lock
 _backups/
+_history/
 
 # Raw/source student data. Keep this out of Git and point the code to the
 # shared-drive copy through config/local_paths.yaml instead.

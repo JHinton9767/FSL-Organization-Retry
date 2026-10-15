@@ -6,14 +6,23 @@ function chaptersForCouncils(payload, chapters, councils) {
   return chapters.filter(chapter => selected.has(payload.chapterCouncils[chapter]));
 }
 
-function aggregateViewer(payload, semesters, chapters, years, breakdown, councils = null) {
+function aggregateViewer(payload, semesters, chapters, years, breakdown, councils = null, view = "Roster outcomes (legacy)", population = "Eligible at each year") {
   const selectedSemesters = new Set(semesters);
   const selectedChapters = new Set(chaptersForCouncils(payload, chapters, councils));
   const offsets = breakdown === "Overall" ? years : years.slice(0, 1);
+  const units = payload.views?.[view] || payload.units;
+  const excluded = new Set();
+  if (population === "Same students across selected years" && offsets.length) {
+    const last = Math.max(...offsets);
+    for (const [semester, chapter, year, outcome] of units) {
+      if (year === last && outcome === "Future") excluded.add(JSON.stringify([semester, chapter]));
+    }
+  }
   const groups = new Map();
   let students = 0;
-  for (const [semester, chapter, year, outcome, count] of payload.units) {
+  for (const [semester, chapter, year, outcome, count] of units) {
     if (!selectedSemesters.has(semester) || !selectedChapters.has(chapter)) continue;
+    if (excluded.has(JSON.stringify([semester, chapter]))) continue;
     if (year === 1) students += count;
     if (!offsets.includes(year)) continue;
     const label = breakdown === "Semester joined" ? semester : breakdown === "Chapter joined" ? chapter : `${year} Year`;

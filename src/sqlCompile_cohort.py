@@ -337,6 +337,7 @@ def _prepared_compile_rows(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _prepared_manual_rows(frame: pd.DataFrame) -> pd.DataFrame:
     prepared = _ensure_columns(frame, MANUAL_STATUS_COLUMNS)
+    prepared["Student ID"] = prepared["Student ID"].str.upper()
     prepared = prepared.loc[
         prepared["Student ID"].ne("") & prepared["Semester"].ne("") & prepared["Status"].ne("")
     ].copy()

@@ -6,5 +6,7 @@
   "name_choices": "config/sqlCompile_duplicate_name_resolutions.csv",
   "name_rechecks": "config/sqlCompile_duplicate_name_recheck.csv",
   "zero_member_periods": "config/sqlCompile_zero_member_periods.csv",
-  "reporting_settings": "config/sqlCompile_reporting.json"
+  "reporting_settings": "config/sqlCompile_reporting.json",
+  "university_records": "config/sqlCompile_university_records.csv",
+  "coverage_reviews": "config/sqlCompile_coverage_reviews.csv"
 }

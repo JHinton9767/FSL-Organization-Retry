@@ -7,6 +7,10 @@ or anything else. No web server, sign-in, or inbound firewall change is needed.
 
 ## Publish from the computer with the complete data
 
+For the October accuracy update, start with **Verify_PG_Records.bat** and the
+[record accuracy guide](pg_record_accuracy.md). It backs up existing records,
+preserves correction history, and checks the office database before publication.
+
 1. Save any manual corrections in your existing dashboard.
 2. Open PowerShell in your project folder and get the new publisher:
 
@@ -83,9 +87,11 @@ Both dashboards say **Years since joining FSL**. These are semester-based
 checkpoints from the FSL join cohort, not years since enrolling at TXST. The
 existing checkpoint convention is unchanged: Year 1 for Fall 2021 joins is
 Spring 2022; Year 1 for Spring 2021 joins is also Spring 2022. The counts
-below the bars now explicitly identify **eligible students**. As before, Year
-1 includes selected new members through the cutoff even if their first year
-is still in progress. Years 2-6 require reaching their complete checkpoint.
+below the bars explicitly identify **eligible students**. The separate degree,
+membership, and university enrollment measures require completed checkpoints
+for every year, including Year 1. The explicitly labeled legacy roster view
+retains its earlier provisional Year 1 behavior for comparison. Select the
+same-students population to compare a constant group across selected years.
 
 Roster rows, chapter inventory, and status corrections dated after the cutoff
 are excluded before calculating cohort outcomes. Later records stay in the
@@ -136,6 +142,13 @@ terminal asks for confirmation after displaying them. Noninteractive runs
 stop unless the owner explicitly supplies `--allow-warnings` after review.
 Missing source files, invalid cutoffs, or concurrent changes cannot be
 overridden with that flag.
+
+Missing original join evidence, invalid cohort identifiers, contradictory
+coverage decisions, duplicate student checkpoints, and mismatched published
+counts are blocking errors. Approving warnings cannot bypass them. Successful
+publications retain their prior HTML and owner-only quality report under
+`output/sqlCompile/publications/`. The viewer displays its rules version and
+data fingerprint without including student identities or source references.
 
 To run the check without replacing the office viewer:
 

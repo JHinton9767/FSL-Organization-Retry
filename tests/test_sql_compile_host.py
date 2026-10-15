@@ -16,9 +16,9 @@ from src.sqlCompile_host import data_revision, host_urls, load_host_config
 def shared_host(tmp_path, monkeypatch):
     database = tmp_path / "data.sqlite"
     write_sqlite(pd.DataFrame([
-        ["Fall 2020", "Alpha", "TEST01", "N"],
-        ["Spring 2021", "Alpha", "TEST01", "A"],
-        ["Spring 2026", "Alpha", "TEST02", "N"],
+        ["Fall 2020", "Alpha", "A01234567", "N"],
+        ["Spring 2021", "Alpha", "A01234567", "A"],
+        ["Spring 2026", "Alpha", "A01234568", "N"],
     ], columns=OUTPUT_COLUMNS), database)
     payload = {
         "database": str(database), "manual_status": str(tmp_path / "manual.csv"),
@@ -148,9 +148,10 @@ def test_shared_ui_keeps_snapshot_until_refresh(shared_host):
     assert "Write Report Files" not in [button.label for button in app.button]
     original_revision = app.session_state["sql_compile_shared_snapshot"][1]
     append_manual_status_rows(pd.DataFrame([{
-        "Student ID": "TEST01", "Semester": "Spring 2024", "Status": "G", "Chapter": "Alpha",
+        "Student ID": "A01234567", "Semester": "Spring 2024", "Status": "G", "Chapter": "Alpha",
     }]), config.manual_status)
     assert data_revision(config.data_paths) != original_revision
+    app.selectbox(key="pg_measure").set_value("Roster outcomes (legacy)").run()
     app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
     assert not app.exception and not app.error
     assert any("Saved records changed" in notice.value for notice in app.info)
@@ -171,18 +172,20 @@ def test_shared_ui_keeps_snapshot_until_refresh(shared_host):
 def test_shared_checker_rejects_other_reviewers_newer_decision(shared_host):
     config, _ = shared_host
     app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
+    app.selectbox(key="pg_measure").set_value("Roster outcomes (legacy)").run()
     app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
     queue_key = "sql_compile_manual_checker_rows"
     draft = app.session_state[queue_key].copy()
-    selected = draft["Student ID"].eq("TEST01")
+    selected = draft["Student ID"].eq("A01234567")
     draft.loc[selected, "Semester"] = "Spring 2024"
     draft.loc[selected, "Chapter"] = "Alpha"
+    draft.loc[selected, "Notes"] = "Verified against the student source form"
     draft.loc[selected, "Status"] = "RS"
     app.session_state[queue_key] = draft
     app.run()
     append_manual_status_rows(pd.DataFrame([{
         "Cohort Semester": "Fall 2020", "Cohort Chapter": "Alpha",
-        "Student ID": "TEST01", "Semester": "Spring 2024", "Status": "G", "Chapter": "Alpha",
+        "Student ID": "A01234567", "Semester": "Spring 2024", "Status": "G", "Chapter": "Alpha",
     }]), config.manual_status)
     save = next(button for button in app.button if button.label == "Save All Ready")
     assert not save.disabled
@@ -196,13 +199,15 @@ def test_shared_checker_rejects_other_reviewers_newer_decision(shared_host):
 def test_shared_checker_saves_without_reloading_chart(shared_host):
     config, _ = shared_host
     app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
+    app.selectbox(key="pg_measure").set_value("Roster outcomes (legacy)").run()
     app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
     original_revision = app.session_state["sql_compile_shared_snapshot"][1]
     queue_key = "sql_compile_manual_checker_rows"
     draft = app.session_state[queue_key].copy()
-    selected = draft["Student ID"].eq("TEST01")
+    selected = draft["Student ID"].eq("A01234567")
     draft.loc[selected, "Semester"] = "Spring 2024"
     draft.loc[selected, "Chapter"] = "Alpha"
+    draft.loc[selected, "Notes"] = "Verified against the student source form"
     draft.loc[selected, "Status"] = "G"
     app.session_state[queue_key] = draft
     app.run()

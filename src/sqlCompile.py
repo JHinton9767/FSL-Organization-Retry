@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -36,6 +37,8 @@ from src.build_master_roster import (
 from src.path_config import ROOT, load_path_config
 from src.persistence_outcomes import persistence_outcome_from_status
 from src.sqlCompile_storage import atomic_database_update
+from src.sqlCompile_sources import (file_digest, source_cache, source_version, persist_sources, PARSER_VERSION,
+                                    SOURCE_OBSERVATIONS, SOURCE_MANIFEST)
 from src.shared_utils import clean_text
 
 
@@ -322,6 +325,12 @@ def _load_sheet_rows(
         student_id_raw = get_cell(row, header_map.get("banner_id"))
         student_id = normalize_banner_id(student_id_raw)
         if not student_id:
+            # Do not mistake repeated headers or empty formatting rows for students.
+            candidate_name = _student_name_from_row(row, header_map, header_row)
+            status_raw = clean_text(get_cell(row, header_map.get("status")))
+            if (clean_text(student_id_raw) or (candidate_name and status_raw)) and score_header_row(list(row))[0] < 2:
+                exceptions.append({"exception_type": "sql_compile_invalid_id", "source_file": source_label,
+                                   "source_sheet": sheet_name, "details": f"Row {source_row_index}: invalid or missing student ID {clean_text(student_id_raw)!r}; excluded from calculations."})
             continue
 
         position_raw = get_cell(row, header_map.get("position"))
@@ -359,14 +368,34 @@ def _load_sheet_rows(
     return row_results
 
 
-def load_sql_compile_rows(roots: Sequence[str | Path]) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
+def load_sql_compile_rows(roots: Sequence[str | Path], *, cache_database: Path | None = None) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
     resolved_roots = _dedupe_paths(_resolve_path(root) for root in roots)
     exceptions: List[dict] = []
     rows: List[dict] = []
     paths = excel_files(resolved_roots)
+    cache, previous_paths = source_cache(cache_database)
+    versions, manifest = [], []
+    for root in resolved_roots:
+        if not root.exists():
+            exceptions.append({"exception_type": "sql_compile_root_missing", "source_file": str(root), "source_sheet": "", "details": "Configured source folder is unavailable."})
+    for missing in sorted(previous_paths - {str(path.resolve()) for path in paths}):
+        exceptions.append({"exception_type": "sql_compile_source_removed", "source_file": missing, "source_sheet": "", "details": "Previously compiled file is absent. Prior observations remain in the source-version archive; review this change before publishing."})
+        manifest.append([missing, missing, "", PARSER_VERSION, "", 0, 1, "No"])
 
     for file_index, path in enumerate(paths):
         source_label = _source_label(path, resolved_roots)
+        sha = file_digest(path)
+        cached = cache.get((str(path.resolve()), sha, source_label))
+        if cached:
+            file_rows = json.loads(cached["rows_json"])
+            file_issues = json.loads(cached["issues_json"])
+            for row in file_rows:
+                row["_source_file_index"] = file_index
+            rows.extend(file_rows)
+            exceptions.extend(file_issues)
+            manifest.append([str(path.resolve()), source_label, sha, PARSER_VERSION, cached["imported_at"], len(file_rows), len(file_issues), "Yes"])
+            continue
+        file_rows, file_issues = [], []
         try:
             workbook = load_workbook(path, data_only=True, read_only=True)
         except Exception as exc:
@@ -378,16 +407,28 @@ def load_sql_compile_rows(roots: Sequence[str | Path]) -> Tuple[pd.DataFrame, pd
                     "details": str(exc),
                 }
             )
+            manifest.append([str(path.resolve()), source_label, sha, PARSER_VERSION, "", 0, 1, "No"])
             continue
 
         try:
             for worksheet in workbook.worksheets:
                 table_rows = [tuple(row) for row in worksheet.iter_rows(values_only=True)]
-                rows.extend(_load_sheet_rows(path, resolved_roots, worksheet.title, table_rows, file_index, exceptions))
+                file_rows.extend(_load_sheet_rows(path, resolved_roots, worksheet.title, table_rows, file_index, file_issues))
         finally:
             workbook.close()
+        if file_digest(path) != sha:
+            raise RuntimeError(f"Source changed while reading it: {source_label}. No database was replaced; retry when the file is closed.")
+        imported_at = datetime.now(timezone.utc).isoformat()
+        for row in file_rows:
+            row.update({"_source_path": str(path.resolve()), "_source_sha256": sha, "_imported_at": imported_at})
+        rows.extend(file_rows)
+        exceptions.extend(file_issues)
+        versions.append(source_version(path, source_label, sha, file_rows, file_issues))
+        manifest.append([str(path.resolve()), source_label, sha, PARSER_VERSION, imported_at, len(file_rows), len(file_issues), "No"])
 
-    return pd.DataFrame(rows), pd.DataFrame(exceptions), len(paths)
+    result = pd.DataFrame(rows)
+    result.attrs.update(source_versions=versions, source_manifest=manifest)
+    return result, pd.DataFrame(exceptions), len(paths)
 
 
 def resolve_semester_statuses(rows: pd.DataFrame) -> pd.DataFrame:
@@ -595,6 +636,7 @@ def write_sqlite(
     compile_issues: Optional[pd.DataFrame] = None,
     source_file_count: Optional[int] = None,
     new_member_observations: Optional[pd.DataFrame] = None,
+    source_observations: Optional[pd.DataFrame] = None,
 ) -> Path:
     destination = _resolve_path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -603,6 +645,12 @@ def write_sqlite(
     placeholders = ", ".join(["?"] * len(OUTPUT_COLUMNS))
 
     with atomic_database_update(destination) as connection:
+        if source_observations is not None:
+            persist_sources(connection, source_observations)
+        else:
+            # A direct/legacy database replacement cannot retain stale provenance.
+            connection.execute(f'DROP TABLE IF EXISTS "{SOURCE_OBSERVATIONS}"')
+            connection.execute(f'DROP TABLE IF EXISTS "{SOURCE_MANIFEST}"')
         pd.DataFrame([{
             "Compiled At": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "Source Files": source_file_count,
@@ -694,7 +742,9 @@ def sqlCompile(
     table_name: str = TABLE_NAME,
 ) -> SqlCompileResult:
     roots = list(input_roots) if input_roots else default_input_roots(config_path)
-    source_rows, issues, source_file_count = load_sql_compile_rows(roots)
+    source_rows, issues, source_file_count = load_sql_compile_rows(roots, cache_database=_resolve_path(output_path))
+    if source_rows.empty and _resolve_path(output_path).exists():
+        raise ValueError("No valid source students were read. Existing database preserved; check source folders and the roster archive.")
     frame = resolve_semester_statuses(source_rows)
     roster_inventory = build_roster_inventory(source_rows)
     student_names = build_student_name_lookup(source_rows)
@@ -709,6 +759,7 @@ def sqlCompile(
         compile_issues=issues,
         source_file_count=source_file_count,
         new_member_observations=build_new_member_observations(source_rows),
+        source_observations=source_rows,
     )
     return SqlCompileResult(
         output_path=destination,
@@ -766,7 +817,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"Rows: {result.row_count}")
     print(f"Excel source files scanned: {result.source_file_count}")
     if result.issue_count:
-        print(f"Sheets/files skipped with issues: {result.issue_count}")
+        print(f"Source or excluded-record issues: {result.issue_count}")
     if args.cohort_semesters or args.all_new_member_cohorts:
         from src.sqlCompile_cohort import (
             DEFAULT_COHORT_OUTPUT_DIR,

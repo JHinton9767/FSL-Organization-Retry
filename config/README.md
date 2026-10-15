@@ -14,6 +14,14 @@ stored but are excluded from reporting until the owner confirms completeness
 and advances the cutoff. See [the viewer guide](../docs/readonly_viewer_setup.md).
 
 The repository should track code, app configuration, tests, and templates only.
+
+The P&G owner can review `sqlCompile_coverage_reviews.csv` and
+`sqlCompile_university_records.csv` through **Record accuracy**. Their empty
+`.example.csv` templates are tracked; actual records are private and ignored.
+The optional host settings `coverage_reviews` and `university_records` select
+different locations. Keep each review file's private `_history` folder with it
+when backing up or transferring the dashboard. See the
+[accuracy guide](../docs/pg_record_accuracy.md) for source requirements and definitions.
 Raw student files, roster PDFs, grade reports, generated exports, and caches
 should stay outside Git.
 

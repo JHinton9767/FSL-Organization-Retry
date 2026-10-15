@@ -4,6 +4,13 @@ This repository supports Fraternity / Sorority Life academic reporting. The curr
 
 ## Current sqlCompile workflow
 
+P&G now has separate membership, university enrollment, and degree views, source
+history, permanent correction history, chapter/semester coverage review, and
+publication reconciliation. On the office computer, begin with
+**Verify_PG_Records.bat** to back up, recompile, and check the existing records
+without replacing the shared viewer. See the [accuracy and maintenance guide](docs/pg_record_accuracy.md)
+for the agreed calculation definitions, first verification, and semester routine.
+
 Run from the project root in PowerShell:
 
 ```powershell
@@ -13,6 +20,23 @@ uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py 
 ```
 
 The dashboard reads `output/sqlCompile/sqlCompile.sqlite` and persistent manual-review files under `config/`. It supports selected join semesters/chapters, years 1-6, Future milestones, and duplicate-name review. See [the sqlCompile workflow](docs/sqlCompile_cohort_workflow.md) for correction/import commands and [the architecture](docs/architecture.md) for the boundaries between workflows.
+
+## Export every student ID and name
+
+On the computer with the populated SQL database, double-click
+`Export_FSL_Student_List.bat`, or run:
+
+```powershell
+uv run --no-project python export_fsl_student_list.py
+```
+
+The file to send is `data/outgoing/fsl_student_list/fsl_student_list.csv`.
+It has exactly two columns, **Student ID** and **Student Name**, with one row per
+ID across all available semesters and statuses. It includes students who were
+never observed as new members and semesters beyond the dashboard reporting
+cutoff. It reads the database without changing it and needs no extra Python
+packages. See the [student list export guide](docs/student_list_export.md) for
+name review, custom paths, and the suggested longitudinal outcome request.
 
 ## Read-only office viewer
 

@@ -13,9 +13,13 @@ from src.sqlCompile_cohort import (
     _zero_member_period_covers_gap, read_roster_inventory_table, read_sql_compile_table, read_zero_member_periods,
     read_student_name_observations_table,
 )
-from src.sqlCompile_dashboard import DUPLICATE_NAME_MISMATCH_OUTCOME, _observed_names_by_student_id, _duplicate_name_resolution_lookup
+from src.sqlCompile_dashboard import DUPLICATE_NAME_MISMATCH_OUTCOME, _observed_names_by_student_id, _duplicate_name_resolution_lookup, build_sql_compile_milestone_dashboard
 from src.sqlCompile_reporting import through_reporting_cutoff
 from src.sqlCompile_storage import read_database
+from src.sqlCompile_quality import build_coverage, read_coverage, coverage_findings, reconcile_milestones
+from src.sqlCompile_records import ROSTER_VIEW, METRIC_VERSION
+from src.sqlCompile_sources import read_optional_table, SOURCE_MANIFEST
+from src.sqlCompile_audit import audit_warning
 
 
 COHORT_CHANGE_THRESHOLD = 0.10
@@ -76,6 +80,10 @@ def publication_changes(current: dict, previous: dict | None) -> list[str]:
     if previous is None:
         return []
     warnings = []
+    if previous.get("metricVersion") != current.get("metricVersion"):
+        warnings.append("Calculation definitions changed. Review separate membership/university views before publishing this version.")
+    if previous.get("sourceRevision") and previous.get("sourceRevision") != current.get("sourceRevision"):
+        warnings.append("Roster source files or parsing rules changed since the previous publication. Recheck affected coverage decisions and student histories, including small changes below the rate-alert thresholds.")
     new_cohorts, new_outcomes, new_eligible = _publication_counts(current)
     old_cohorts, old_outcomes, old_eligible = _publication_counts(previous)
     if previous.get("dataThrough") != current["dataThrough"]:
@@ -94,13 +102,25 @@ def publication_changes(current: dict, previous: dict | None) -> list[str]:
         new_rate = new_outcomes[(year, outcome)] / new_eligible[year]
         if abs(new_rate - old_rate) >= OUTCOME_SHARE_CHANGE_THRESHOLD - 1e-12:
             warnings.append(f"Year {year} {outcome}: {old_rate:.1%} to {new_rate:.1%} (at least 5 percentage points; denominators may differ).")
+    for view, units in current.get("views", {}).items():
+        if view == ROSTER_VIEW:
+            continue
+        old_units = previous.get("views", {}).get(view)
+        if old_units is None:
+            warnings.append(f"{view}: no comparable previous measure; review its first publication.")
+            continue
+        warnings.extend(f"{view}: {message}" for message in publication_changes(
+            {"dataThrough": current["dataThrough"], "metricVersion": current.get("metricVersion"), "units": units},
+            {"dataThrough": previous.get("dataThrough"), "metricVersion": previous.get("metricVersion"), "units": old_units},
+        ))
     return warnings
 
 
 def build_publication_check(config, tables, payload: dict, previous: dict | None) -> dict:
     warnings = []
+    errors = []
     if not tables.new_member_evidence_complete:
-        warnings.append("Original new-member evidence is unavailable. Recompile all Excel rosters with the updated compiler before relying on these rates; same-semester exits may be missing from cohorts.")
+        errors.append("Original new-member evidence is unavailable. Recompile all Excel rosters with the updated compiler before relying on these rates; same-semester exits may be missing from cohorts.")
     cutoff = payload["dataThrough"]
     compiled = read_sql_compile_table(config.database)
     roster = read_roster_inventory_table(config.database)
@@ -114,7 +134,7 @@ def build_publication_check(config, tables, payload: dict, previous: dict | None
     if skipped is None:
         warnings.append("Skipped-roster audit is unavailable. Recompile with the updated compiler to record it; this does not mean zero skipped files.")
     elif skipped:
-        warnings.append(f"The last compile recorded {skipped:,} skipped sheet/file issues. Review sqlCompile_issues in the owner's database.")
+        warnings.append(f"The last compile recorded {skipped:,} skipped-source or excluded-record issues. Review the source issues in Record accuracy.")
     through = through_reporting_cutoff(compiled, cutoff)
     missing_chapters = int(through["Chapter"].fillna("").astype(str).str.strip().str.casefold().isin(["", "unknown"]).sum())
     if missing_chapters:
@@ -155,6 +175,32 @@ def build_publication_check(config, tables, payload: dict, previous: dict | None
             warnings.append(f"{len(gaps):,} chapter/semester roster gaps need review. These can reflect real chapter departures, not necessarily missing files; zero-member exceptions are excluded.")
     changes = publication_changes(payload, previous)
     warnings.extend(changes)
+    if tables.outcomes["Student ID"].duplicated().any():
+        errors.append("Cohort records contain duplicate students.")
+    if not tables.outcomes["Student ID"].str.fullmatch(r"A0\d{7}").all():
+        errors.append("Cohort records contain invalid student identifiers.")
+    if compiled.duplicated(["Student ID", "Semester"]).any():
+        errors.append("Compiled records contain duplicate student/semester rows.")
+    for view, units in payload.get("views", {ROSTER_VIEW: payload["units"]}).items():
+        dashboard = build_sql_compile_milestone_dashboard(tables.timeline, tables.outcomes, tables.selected_semesters,
+            chart_milestone_offsets=[1, 2, 3, 4, 5, 6], reporting_cutoff=cutoff,
+            record_history=getattr(tables, "record_history", None), outcome_view=view)
+        errors.extend(f"{view}: {error}" for error in reconcile_milestones(dashboard, units))
+    detail = dashboard["detail_frame"]
+    conflict_count = int(detail.loc[detail.get("Evidence Conflict", pd.Series("", index=detail.index)).fillna("").ne(""), "Student ID"].nunique())
+    if conflict_count:
+        warnings.append(f"{conflict_count:,} students have contradictory university/degree evidence. Affected independent outcomes remain Unknown until reviewed.")
+    coverage = build_coverage(roster, cutoff, read_coverage(config.coverage_reviews), read_zero_member_periods(config.zero_member_periods))
+    coverage_errors, coverage_warnings = coverage_findings(coverage)
+    errors.extend(coverage_errors)
+    warnings.extend(coverage_warnings)
+    manifest = read_optional_table(config.database, SOURCE_MANIFEST)
+    if manifest.empty:
+        warnings.append("Detailed source observations are unavailable. Recompile to enable full record tracing and independent same-term evidence.")
+    for path in (*config.data_paths[1:],):
+        message = audit_warning(path)
+        if message:
+            warnings.append(message)
     return {
         "checked_at": payload["published"], "reporting_cutoff": cutoff,
         "cohort_students": sum(row[4] for row in payload["units"] if row[2] == 1),
@@ -165,5 +211,9 @@ def build_publication_check(config, tables, payload: dict, previous: dict | None
         "deferred_roster_rows": int(compiled["Semester"].map(_semester_sort).between(_semester_sort(cutoff) + 1, 999998).sum()),
         "deferred_manual_rows": int(tables.manual_rows["Semester"].map(_semester_sort).between(_semester_sort(cutoff) + 1, 999998).sum()),
         "chapter_roster_gaps": gaps, "comparison_available": previous is not None,
-        "large_changes": changes, "warnings": warnings,
+        "large_changes": changes, "warnings": warnings, "errors": errors,
+        "metric_version": METRIC_VERSION, "data_revision": payload.get("dataRevision"),
+        "source_revision": payload.get("sourceRevision"), "source_manifest": manifest.to_dict("records"),
+        "evidence_conflicts": conflict_count, "coverage": coverage.to_dict("records"),
+        "coverage_verified": bool(not coverage.empty and not coverage_errors and not coverage_warnings),
     }

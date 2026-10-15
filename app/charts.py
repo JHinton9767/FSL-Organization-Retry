@@ -28,6 +28,9 @@ PERSISTENCE_OUTCOME_COLORS = {
     "Chapter Kicked": "#475569",
     "Unknown": "#B7B4AA",
     "Graduated": "#2F7D4A",
+    "Enrolled": "#5C1418",
+    "Not enrolled": "#0B6C94",
+    "No degree confirmed": "#C69026",
     FUTURE_OUTCOME: "#E5E7EB",
 }
 PERSISTENCE_DARK_TEXT_OUTCOMES = {"Early Alumni", "Unknown", FUTURE_OUTCOME}
@@ -168,7 +171,7 @@ def persistence_milestone_chart(
         if "Milestone Sort" in frame.columns
         else frame["Milestone"].drop_duplicates().astype(str).tolist()
     )
-    for outcome in PERSISTENCE_CHART_OUTCOME_ORDER:
+    for outcome in dict.fromkeys([*PERSISTENCE_CHART_OUTCOME_ORDER, *frame["Outcome"].astype(str).tolist()]):
         subset = frame.loc[frame["Outcome"].eq(outcome)].copy()
         if subset.empty:
             continue

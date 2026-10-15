@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import getpass
+from dataclasses import replace
 
 import pandas as pd
 import plotly.express as px
@@ -57,6 +59,9 @@ from src.sqlCompile_host import data_revision, load_host_config, shared_mode
 from src.sqlCompile_reporting import read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
 from src.sqlCompile_storage import ReviewConflictError, read_database, data_lock
 from src.sqlCompile_councils import COUNCILS, chapters_for_councils, build_unmapped_organization_review
+from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, ENROLLMENT_VIEW, POPULATION_OPTIONS, DEFAULT_UNIVERSITY_PATH
+from src.sqlCompile_audit import review_context
+from app.sql_compile_review import render_record_review, render_university_checker
 
 
 st.set_page_config(
@@ -145,6 +150,29 @@ def _path_text(value: str | Path) -> str:
     return str(Path(value))
 
 
+def _review_save(action, *args, **kwargs):
+    if action in {append_manual_status_rows, write_manual_status_rows}:
+        proposed = args[0].reindex(columns=MANUAL_STATUS_COLUMNS, fill_value="").fillna("").astype(str)
+        before = kwargs.get("expected_rows")
+        if before is None:
+            before = read_manual_status_rows(args[1], create_if_missing=False)
+        prior = set(before.reindex(columns=MANUAL_STATUS_COLUMNS, fill_value="").fillna("").astype(str).itertuples(index=False, name=None))
+        changed = proposed.loc[[tuple(row) not in prior for row in proposed.itertuples(index=False, name=None)]]
+        changed = changed.loc[changed["Student ID"].str.strip().ne("")]
+        if not changed["Student ID"].str.strip().str.upper().str.fullmatch(r"A0\d{7}").all():
+            raise ValueError("Changed records need a valid A0 followed by seven digits. Resolve invalid identities before saving.")
+        if changed["Semester"].map(_semester_sort).ge(999999).any() or not changed["Status"].isin(STATUS_OPTIONS[1:]).all():
+            raise ValueError("Every changed status needs a recognized effective semester and a supported status.")
+        documented = bool(st.session_state.get("record_reason", "").strip() and st.session_state.get("record_evidence", "").strip())
+        if not changed.empty and not documented and changed["Notes"].str.strip().eq("").any():
+            raise ValueError("Add a note identifying the reason and supporting source for each changed status, or fill in both correction fields in the sidebar.")
+        if not st.session_state.get("record_reviewer", getpass.getuser()).strip():
+            raise ValueError("Enter the reviewer's name or initials before saving.")
+    with review_context(st.session_state.get("record_reviewer", getpass.getuser()),
+                        st.session_state.get("record_reason", ""), st.session_state.get("record_evidence", "")):
+        return action(*args, **kwargs)
+
+
 def _mtime_ns(path: Path) -> int:
     try:
         return int(path.stat().st_mtime_ns)
@@ -177,6 +205,7 @@ def _cached_load_dashboard_tables(
     zero_member_periods_file_text: str = str(DEFAULT_ZERO_MEMBER_PERIODS_PATH),
     source_revision: tuple = (),
     reporting_cutoff: str | None = None,
+    university_records_file: str = str(DEFAULT_UNIVERSITY_PATH),
 ):
     del database_mtime_ns, duplicate_name_resolution_mtime_ns, duplicate_name_recheck_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
@@ -187,6 +216,7 @@ def _cached_load_dashboard_tables(
         all_cohorts=True,
         zero_member_periods_file=Path(zero_member_periods_file_text),
         reporting_cutoff=reporting_cutoff,
+        university_records_file=university_records_file,
     )
 
 
@@ -253,6 +283,9 @@ def _session_cached_milestone_dashboard(
     manual_status_file: Path,
     duplicate_name_resolution_file: Path,
     reporting_cutoff: str,
+    record_history: pd.DataFrame | None = None,
+    outcome_view: str = ROSTER_VIEW,
+    population: str = POPULATION_OPTIONS[0],
 ) -> dict[str, object]:
     key = (
         str(database_path.resolve()),
@@ -267,6 +300,7 @@ def _session_cached_milestone_dashboard(
         str(chart_breakdown),
         tuple(int(offset) for offset in chart_milestone_offsets),
         reporting_cutoff,
+        outcome_view, population,
     )
     cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
     if not isinstance(cache, dict):
@@ -283,6 +317,7 @@ def _session_cached_milestone_dashboard(
                 chart_breakdown=chart_breakdown,
                 chart_milestone_offsets=chart_milestone_offsets,
                 reporting_cutoff=reporting_cutoff,
+                record_history=record_history, outcome_view=outcome_view, population=population,
             )
         while len(cache) > MILESTONE_DASHBOARD_CACHE_LIMIT:
             cache.pop(next(iter(cache)))
@@ -712,7 +747,7 @@ def _render_duplicate_name_recheck_list(
                     columns=DUPLICATE_NAME_RECHECK_COLUMNS,
                 )
                 try:
-                    path, saved = append_duplicate_name_recheck_rows(
+                    path, saved = _review_save(append_duplicate_name_recheck_rows,
                         rows, duplicate_name_recheck_file,
                         expected_rows=duplicate_name_rechecks if shared_mode() else None,
                     )
@@ -724,7 +759,7 @@ def _render_duplicate_name_recheck_list(
                         st.warning("No Student IDs were ready to save.")
                 except ReviewConflictError as exc:
                     st.warning(str(exc))
-                except OSError as exc:
+                except (OSError, ValueError) as exc:
                     st.error(f"Could not save the recheck list. Close the CSV if it is open, then try again. Details: {exc}")
 
         if display.empty:
@@ -804,7 +839,7 @@ def _render_duplicate_name_resolver(
 
         if save_requested:
             try:
-                path, saved = append_duplicate_name_resolution_rows(
+                path, saved = _review_save(append_duplicate_name_resolution_rows,
                     pd.DataFrame(selected_rows, columns=DUPLICATE_NAME_RESOLUTION_COLUMNS),
                     duplicate_name_resolution_file,
                     expected_rows=duplicate_name_resolutions if shared_mode() else None,
@@ -817,7 +852,7 @@ def _render_duplicate_name_resolver(
                     st.warning("No duplicate name choices were ready to save.")
             except ReviewConflictError as exc:
                 st.warning(str(exc))
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 st.error(f"Could not save duplicate name choices. Close the CSV if it is open, then try again. Details: {exc}")
 
 
@@ -887,7 +922,7 @@ def _render_legacy_manual_importer(manual_status_file: Path) -> None:
                 _request_dashboard_data_refresh()
                 st.success(f"Imported {result.saved_rows:,} legacy manual row(s) into {result.manual_status_path}.")
                 st.rerun()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 st.error(f"Could not append legacy decisions. Close the manual CSV if it is open, then try again. Details: {exc}")
         st.download_button(
             "Download Import Preview",
@@ -1043,7 +1078,7 @@ def _render_rate_charts(
         xaxis_title = "Years since joining FSL"
     subtitle = (
         f"{selected_label} | {council_label} councils | {chapter_label} chapters | {chart_milestone_label} since joining FSL | "
-        "Roster outcomes first | Manual corrections last | Explicit graduation evidence only"
+        f"{meta.get('outcome_view', ROSTER_VIEW)} | Explicit evidence only"
     )
     st.plotly_chart(
         persistence_milestone_chart(
@@ -1072,6 +1107,18 @@ def _render_rate_charts(
             hide_index=True,
             height=300,
         )
+        st.download_button("Download these chart counts", dataframe_to_csv_bytes(chart_table_frame), "pg_chart_counts.csv", "text/csv")
+    details = milestone_dashboard.get("detail_frame", pd.DataFrame())
+    if not details.empty:
+        with st.expander("Students behind these counts"):
+            year = st.selectbox("Checkpoint", details["Milestone"].drop_duplicates(), key="detail_checkpoint")
+            selected = details.loc[details["Milestone"].eq(year)]
+            bucket = st.selectbox("Outcome", ["All", *sorted(selected["P&G Outcome Bucket"].unique())], key="detail_bucket")
+            if bucket != "All":
+                selected = selected.loc[selected["P&G Outcome Bucket"].eq(bucket)]
+            st.caption(f"{len(selected):,} students in this selection. Evidence columns show the separate membership, enrollment, and degree records.")
+            st.dataframe(selected, hide_index=True, use_container_width=True)
+            st.download_button("Download selected student records", dataframe_to_csv_bytes(selected), "pg_selected_students.csv", "text/csv")
 
 
 def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
@@ -1335,9 +1382,9 @@ def _render_manual_checker(
     with action_cols[3]:
         if st.button("Save Selected", use_container_width=True, disabled=completed_selected_rows.empty):
             try:
-                path, saved = append_manual_status_rows(
+                path, saved = _review_save(append_manual_status_rows,
                     completed_selected_rows, manual_status_file,
-                    expected_rows=manual_rows if shared_mode() else None,
+                    expected_rows=manual_rows,
                 )
                 if saved:
                     st.success(f"Saved {saved:,} selected manual row(s) to {path}.")
@@ -1346,15 +1393,15 @@ def _render_manual_checker(
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except ReviewConflictError as exc:
                 st.warning(str(exc))
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
     with action_cols[4]:
         if st.button("Save All Ready", use_container_width=True, disabled=ready_count == 0):
             try:
                 completed_rows = _completed_manual_checker_rows(queue.loc[ready_mask].copy())
-                path, saved = append_manual_status_rows(
+                path, saved = _review_save(append_manual_status_rows,
                     completed_rows, manual_status_file,
-                    expected_rows=manual_rows if shared_mode() else None,
+                    expected_rows=manual_rows,
                 )
                 if saved:
                     st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
@@ -1363,7 +1410,7 @@ def _render_manual_checker(
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except ReviewConflictError as exc:
                 st.warning(str(exc))
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
 
     utility_cols = st.columns(4)
@@ -1442,16 +1489,16 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
     )
     if st.button("Save Manual CSV", use_container_width=True):
         try:
-            path = write_manual_status_rows(
+            path = _review_save(write_manual_status_rows,
                 edited_manual, manual_status_file,
-                expected_rows=manual_rows if shared_mode() else None,
+                expected_rows=manual_rows,
             )
             _request_dashboard_data_refresh()
             st.success(f"Saved manual rows to {path}.")
             st.rerun()
         except ReviewConflictError as exc:
             st.warning(str(exc))
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             st.error(f"Could not save manual rows. Close the CSV if it is open, then try again. Details: {exc}")
 
 
@@ -1468,7 +1515,7 @@ def main() -> None:
         return
     zero_member_periods_file = config.zero_member_periods
     if shared:
-        database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file = config.data_paths
+        database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file = config.data_paths[:5]
         st.sidebar.caption("Shared dashboard | No sign-in")
     else:
         database_path = Path(st.sidebar.text_input("SQLite database", value=_path_text(config.database)))
@@ -1525,7 +1572,9 @@ def main() -> None:
         return
 
     try:
-        paths = (database_path, manual_status_file, duplicate_name_resolution_file, duplicate_name_recheck_file, zero_member_periods_file)
+        config = replace(config, database=database_path, manual_status=manual_status_file,
+                         name_choices=duplicate_name_resolution_file, name_rechecks=duplicate_name_recheck_file)
+        paths = config.data_paths
         snapshot = st.session_state.get(SHARED_SNAPSHOT_KEY) if shared else None
         if snapshot is not None and len(snapshot) == 4 and snapshot[0] == paths and snapshot[3] == reporting_cutoff:
             _, revision, all_tables, _ = snapshot
@@ -1541,8 +1590,9 @@ def main() -> None:
                 revision[3][0],
                 _dashboard_data_refresh_token(),
                 str(zero_member_periods_file.resolve()),
-                revision if shared else (revision[4],),
+                revision if shared else (revision[4], *revision[5:]),
                 reporting_cutoff,
+                str(config.university_records),
             )
             if shared:
                 # Keep drafts and the displayed data stable until an explicit refresh.
@@ -1557,8 +1607,16 @@ def main() -> None:
     if not all_tables.new_member_evidence_complete:
         st.warning("This database predates the join-evidence fix. Recompile all Excel rosters before using these rates; students who joined and exited in the same semester may be missing.")
 
-    section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, ORGANIZATION_REVIEW_SECTION]
+    section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, "Record accuracy", ORGANIZATION_REVIEW_SECTION]
     section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)
+    if section in {"Manual Checker", "Manual Rows", "Record accuracy"}:
+        st.sidebar.text_input("Reviewer name or initials", value=getpass.getuser(), key="record_reviewer")
+        st.sidebar.text_input("Reason for this correction", key="record_reason")
+        st.sidebar.text_input("Supporting source or reference", key="record_evidence")
+    if not shared and section == "Record accuracy":
+        with review_context(st.session_state.get("record_reviewer", getpass.getuser()), st.session_state.get("record_reason", ""), st.session_state.get("record_evidence", "")):
+            render_record_review(config, all_tables, _request_dashboard_data_refresh)
+        return
     if not shared and section == ORGANIZATION_REVIEW_SECTION:
         _render_organization_review(database_path, manual_status_file, zero_member_periods_file, reporting_cutoff)
         return
@@ -1580,20 +1638,11 @@ def main() -> None:
     if uses_pg_controls:
         selected_chapters, chapter_label = _chapter_filter(selected_chapters)
         chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
+    outcome_view, population = ROSTER_VIEW, POPULATION_OPTIONS[0]
+    if uses_pg_controls:
+        outcome_view = st.sidebar.selectbox("Measure", OUTCOME_VIEWS, key="pg_measure")
+        population = st.sidebar.selectbox("Comparison population", POPULATION_OPTIONS, key="pg_population")
     outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if uses_pg_controls else base_outcomes
-
-    if not shared and st.sidebar.button("Write Report Files", use_container_width=True):
-        try:
-            report = build_new_member_cohort_report(
-                database_path=database_path,
-                cohort_semesters=selected_cohorts or None,
-                all_cohorts=not selected_cohorts,
-                manual_status_file=manual_status_file,
-                output_dir=DEFAULT_COHORT_OUTPUT_DIR,
-            )
-            st.sidebar.success(f"Wrote report files to {report.output_dir}.")
-        except Exception as exc:
-            st.sidebar.error(f"Report write failed: {exc}")
 
     cohort_students = int(
         outcomes.loc[:, ["Cohort Semester", "Student ID"]].drop_duplicates().shape[0]
@@ -1603,7 +1652,8 @@ def main() -> None:
 
     kpis = st.columns(4)
     with kpis[0]:
-        st.metric("Cohort size", f"{cohort_students:,}")
+        cohort_metric = st.empty()
+        cohort_metric.metric("Cohort size", f"{cohort_students:,}")
     with kpis[1]:
         st.metric("Selected cohort", selected_label)
     with kpis[2]:
@@ -1625,7 +1675,9 @@ def main() -> None:
             manual_status_file=manual_status_file,
             duplicate_name_resolution_file=duplicate_name_resolution_file,
             reporting_cutoff=reporting_cutoff,
+            record_history=all_tables.record_history, outcome_view=outcome_view, population=population,
         )
+        cohort_metric.metric("Students in comparison", f"{int(milestone_dashboard['meta']['students']):,}")
 
     if section == "Persistence & Graduation":
         if milestone_dashboard is None:
@@ -1646,6 +1698,10 @@ def main() -> None:
             st.dataframe(outcomes, use_container_width=True, hide_index=True)
 
     elif section == "Manual Checker":
+        if outcome_view in {DEGREE_VIEW, ENROLLMENT_VIEW}:
+            render_university_checker(config, all_tables, milestone_dashboard, max(chart_milestone_offsets), outcome_view, _request_dashboard_data_refresh)
+            return
+        st.caption("This checker saves roster/status evidence. University enrollment and degree facts have their own checker under the Measure selector.")
         checker_template = all_tables.manual_checker_template.loc[all_tables.manual_checker_template["Cohort Semester"].isin(selected_cohorts)].copy() if selected_cohorts and not all_tables.manual_checker_template.empty else all_tables.manual_checker_template.iloc[0:0].copy()
         checker_template = _filter_by_chapters(checker_template, selected_chapters)
         checker_milestone_offset = max([int(offset) for offset in chart_milestone_offsets] or [6])

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from bisect import bisect_right
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -27,6 +27,9 @@ from src.sqlCompile_storage import append_review_csv, data_lock, read_review_csv
 from src.sqlCompile_reporting import normalize_reporting_cutoff, through_reporting_cutoff, validate_reporting_cutoff
 from src.path_config import ROOT
 from src.persistence_outcomes import PERSISTENCE_OUTCOME_ORDER, persistence_outcome_from_status
+from src.sqlCompile_sources import read_optional_table, SOURCE_OBSERVATIONS
+from src.sqlCompile_records import (DEFAULT_UNIVERSITY_PATH, ROSTER_VIEW, DOMAIN_COLUMNS, METRIC_VERSION,
+    POPULATION_OPTIONS, read_university_records, build_record_history, index_record_history, checkpoint_records)
 
 
 FUTURE_MILESTONE_BUCKET = "Future"
@@ -174,6 +177,8 @@ class SqlCompileDashboardTables:
     selected_semesters: list[str]
     reporting_cutoff: str | None = None
     new_member_evidence_complete: bool = False
+    record_history: pd.DataFrame = field(default_factory=pd.DataFrame)
+    university_records: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _count_bucket(frame: pd.DataFrame, bucket: str) -> int:
@@ -572,7 +577,16 @@ def build_sql_compile_milestone_dashboard(
     chart_milestone_offset: int = 6,
     chart_milestone_offsets: Optional[Sequence[int]] = None,
     reporting_cutoff: str | None = None,
+    record_history: pd.DataFrame | None = None,
+    outcome_view: str = ROSTER_VIEW,
+    population: str = POPULATION_OPTIONS[0],
 ) -> dict[str, object]:
+    if outcome_view not in [ROSTER_VIEW, *DOMAIN_COLUMNS]:
+        raise ValueError("Unrecognized outcome view.")
+    if population not in POPULATION_OPTIONS:
+        raise ValueError("Unrecognized comparison population.")
+    domain_index = index_record_history(record_history if record_history is not None else pd.DataFrame())
+    outcome_order = list(dict.fromkeys([*PERSISTENCE_OUTCOME_ORDER, "Enrolled", "Not enrolled", "No degree confirmed"]))
     chart_breakdown = _normalize_pg_chart_breakdown(chart_breakdown)
     capped_max_years = max(0, min(int(max_years), 6))
     selected_offsets = _normalize_pg_milestone_offsets(
@@ -619,7 +633,7 @@ def build_sql_compile_milestone_dashboard(
     cohort_students = (
         _ensure_missing_columns(
             filtered_outcomes,
-            ["Cohort Semester", "Cohort Chapter", "Student ID", "Last Known Outcome Bucket"],
+            ["Cohort Semester", "Cohort Chapter", "Student ID", "Student Name", "Last Known Outcome Bucket"],
         )
         .fillna("")
         .astype(str)
@@ -659,6 +673,15 @@ def build_sql_compile_milestone_dashboard(
     if latest_sort == 0:
         latest_sort = max([_cohort_sort(value) for value in cohort_students["Cohort Semester"].tolist()] or [0])
 
+    excluded_students = 0
+    if population == POPULATION_OPTIONS[1]:
+        eligible = cohort_students["Cohort Semester"].map(lambda term: (outcome_view == ROSTER_VIEW and max(selected_offsets) == 1) or _milestone_target_sort(term, max(selected_offsets)) <= latest_sort)
+        excluded_students = int((~eligible).sum())
+        cohort_students = cohort_students.loc[eligible].copy()
+        if cohort_students.empty:
+            empty["meta"]["note"] = "No selected students have reached every selected checkpoint. Select fewer years or use eligibility at each year."
+            return empty
+
     timeline_groups: dict[tuple[str, str], tuple[list[int], list[str]]] = {}
     if not timeline_work.empty and selected_offsets:
         # Keep the full-data horizon above, but prepare only the selected students' histories.
@@ -690,12 +713,12 @@ def build_sql_compile_milestone_dashboard(
             for semester in cohort_students["Cohort Semester"].unique()
         }
         measurable_mask = cohort_students["Cohort Semester"].map({
-            semester: offset in {0, 1} or (target < 999999 and latest_sort >= target)
+            semester: (outcome_view == ROSTER_VIEW and offset in {0, 1}) or (target < 999999 and latest_sort >= target)
             for semester, target in target_sorts.items()
         })
         measured = cohort_students.loc[measurable_mask].copy()
         future_students = cohort_students.loc[~measurable_mask].copy()
-        counts = {outcome: 0 for outcome in PERSISTENCE_OUTCOME_ORDER}
+        counts = {outcome: 0 for outcome in outcome_order}
         chart_groups: dict[str, dict[str, object]] = {}
         milestone_name = _milestone_name(offset)
         for _, student in future_students.iterrows():
@@ -706,6 +729,7 @@ def build_sql_compile_milestone_dashboard(
                     "Cohort Semester": student["Cohort Semester"],
                     "Cohort Chapter": student.get("Cohort Chapter", ""),
                     "Student ID": student["Student ID"],
+                    "Student Name": student.get("Student Name", ""),
                     "Milestone": milestone_name,
                     "Milestone Sort": offset,
                     "Milestone Status": FUTURE_MILESTONE_BUCKET,
@@ -716,12 +740,16 @@ def build_sql_compile_milestone_dashboard(
             chart_group = _chart_group_state(chart_groups, student, offset, chart_breakdown)
             chart_group["eligible"] = int(chart_group["eligible"]) + 1
             target_sort = target_sorts[student["Cohort Semester"]]
-            if offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
+            if outcome_view == ROSTER_VIEW and offset == 1 and latest_sort and target_sort < 999999 and target_sort > latest_sort:
                 target_sort = latest_sort
+            independent = checkpoint_records(domain_index, str(student["Student ID"]), target_sort, _cohort_sort(student["Cohort Semester"]))
             if str(student.get("Last Known Outcome Bucket", "") or "").strip() == DUPLICATE_NAME_MISMATCH_OUTCOME:
                 outcome = "Unknown"
+                for column in DOMAIN_COLUMNS.values():
+                    independent[column] = "Unknown"
+                independent["Evidence Conflict"] += "Student identity requires review. "
             else:
-                outcome = _checkpoint_outcome(
+                outcome = independent[DOMAIN_COLUMNS[outcome_view]] if outcome_view != ROSTER_VIEW else _checkpoint_outcome(
                     timeline_groups.get(
                         (str(student["Cohort Semester"]).strip(), str(student["Student ID"]).strip()),
                         ([], []),
@@ -742,6 +770,9 @@ def build_sql_compile_milestone_dashboard(
                     "Milestone Sort": offset,
                     "Milestone Status": "Measured",
                     "P&G Outcome Bucket": outcome,
+                    "Checkpoint Sort": target_sort,
+                    "Student Name": student.get("Student Name", ""),
+                    **independent,
                 }
             )
 
@@ -757,7 +788,7 @@ def build_sql_compile_milestone_dashboard(
             "Measured Students": denominator,
             "Future Students": future_count,
         }
-        for outcome in PERSISTENCE_OUTCOME_ORDER:
+        for outcome in outcome_order:
             count = int(counts.get(outcome, 0))
             share = count / denominator if denominator else pd.NA
             table_row[outcome] = share
@@ -791,7 +822,7 @@ def build_sql_compile_milestone_dashboard(
             if eligible_students:
                 chart_outcomes = [
                     (outcome, int(chart_counts.get(outcome, 0)))
-                    for outcome in PERSISTENCE_OUTCOME_ORDER
+                    for outcome in outcome_order
                     if int(chart_counts.get(outcome, 0)) > 0
                 ]
             else:
@@ -822,10 +853,10 @@ def build_sql_compile_milestone_dashboard(
                 chart_rows.append(row)
 
     chart_frame = pd.DataFrame(chart_rows, columns=MILESTONE_CHART_COLUMNS)
-    table_frame = pd.DataFrame(table_rows, columns=MILESTONE_TABLE_COLUMNS)
+    table_frame = pd.DataFrame(table_rows)
     chart_table_frame = chart_frame.drop(columns="Milestone").rename(columns={"Milestone Name": "Milestone"})
     chart_table_frame = chart_table_frame.loc[:, MILESTONE_CHART_TABLE_COLUMNS]
-    detail_frame = pd.DataFrame(detail_rows, columns=MILESTONE_DETAIL_COLUMNS)
+    detail_frame = pd.DataFrame(detail_rows)
     return {
         "chart_frame": chart_frame.sort_values(["Milestone Sort", "Outcome"]).reset_index(drop=True),
         "table_frame": table_frame.reset_index(drop=True),
@@ -838,12 +869,21 @@ def build_sql_compile_milestone_dashboard(
             "max_milestone": last_milestone,
             "chart_breakdown": chart_breakdown,
             "chart_milestone": chart_milestone_label,
+            "outcome_view": outcome_view,
+            "population": population,
+            "excluded_students": excluded_students,
+            "metric_version": METRIC_VERSION,
             "note": (
                 "Year 1 includes selected new members through the reporting cutoff. Years 2-6 use only "
                 "students old enough to reach the semester-based checkpoint since joining FSL, not enrolling at TXST. Bars marked Future are "
                 "selected cohorts with no eligible students yet. Partially future groups keep those newer students "
                 "out of the percentage denominator but show the future count in the chart data. Resolved outcome "
                 "buckets carry forward across later checkpoints."
+            ) if outcome_view == ROSTER_VIEW else (
+                "Spring checkpoints in join calendar year + year number (Summer joins use Summer). "
+                "Only completed checkpoints count. Percentages include all eligible students, including Unknown. "
+                "Membership, university enrollment, and degree evidence are independent. Enrollment and active membership require evidence for the checkpoint semester. "
+                + (f"Same students in each selected year; {excluded_students:,} newer students excluded." if population == POPULATION_OPTIONS[1] else "Each year may have a different eligible population.")
             ),
         },
     }
@@ -1012,6 +1052,7 @@ def load_dashboard_tables(
     zero_member_periods_file: str | Path = DEFAULT_ZERO_MEMBER_PERIODS_PATH,
     create_review_files: bool = True,
     reporting_cutoff: str | None = None,
+    university_records_file: str | Path = DEFAULT_UNIVERSITY_PATH,
 ) -> SqlCompileDashboardTables:
     with data_lock(_resolve_path(database_path)):
         compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
@@ -1019,6 +1060,8 @@ def load_dashboard_tables(
         new_member_observations = read_new_member_observations(database_path)
         student_names = read_student_name_table(database_path)
         student_name_observations = read_student_name_observations_table(database_path)
+        source_observations = read_optional_table(_resolve_path(database_path), SOURCE_OBSERVATIONS)
+    university_records = read_university_records(_resolve_path(university_records_file))
     manual_rows = read_manual_status_rows(manual_status_file, create_if_missing=create_review_files)
     duplicate_name_resolutions = read_duplicate_name_resolution_rows(duplicate_name_resolution_file, create_if_missing=create_review_files)
     duplicate_name_rechecks = read_duplicate_name_recheck_rows(duplicate_name_recheck_file, create_if_missing=create_review_files)
@@ -1062,6 +1105,8 @@ def load_dashboard_tables(
         selected_semesters=selected_semesters,
         reporting_cutoff=reporting_cutoff,
         new_member_evidence_complete=new_member_observations is not None,
+        record_history=build_record_history(source_observations, compiled_rows, timeline, outcomes, calculation_manual_rows, new_member_observations, university_records),
+        university_records=university_records,
     )
 
 

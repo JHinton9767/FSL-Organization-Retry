@@ -38,21 +38,24 @@ def cohort_tables():
 @pytest.fixture
 def publisher_config(tmp_path):
     database = tmp_path / "source.sqlite"
-    write_sqlite(pd.DataFrame([
-        ["Fall 2020", "Alpha", "PRIVATE-ID-1", "N"],
-        ["Spring 2021", "Alpha", "PRIVATE-ID-1", "A"],
-        ["Fall 2025", "Alpha", "PRIVATE-ID-2", "N"],
-        ["Spring 2026", "Alpha", "PRIVATE-ID-2", "A"],
-    ], columns=OUTPUT_COLUMNS), database)
+    rows = pd.DataFrame([
+        ["Fall 2020", "Alpha", "A01234567", "N"],
+        ["Spring 2021", "Alpha", "A01234567", "A"],
+        ["Fall 2025", "Alpha", "A01234568", "N"],
+        ["Spring 2026", "Alpha", "A01234568", "A"],
+    ], columns=OUTPUT_COLUMNS)
+    write_sqlite(rows, database, new_member_observations=rows.loc[rows.Status.eq("N"), OUTPUT_COLUMNS[:3]])
     path = tmp_path / "host.json"
     path.write_text(json.dumps({"database": str(database), "manual_status": str(tmp_path / "manual.csv"),
                                "name_choices": str(tmp_path / "names.csv"), "name_rechecks": str(tmp_path / "rechecks.csv"),
                                "zero_member_periods": str(tmp_path / "zero.csv"),
-                               "reporting_settings": str(tmp_path / "reporting.json")}), encoding="utf-8")
+                               "reporting_settings": str(tmp_path / "reporting.json"),
+                               "university_records": str(tmp_path / "university.csv"),
+                               "coverage_reviews": str(tmp_path / "coverage.csv")}), encoding="utf-8")
     config = load_host_config(path)
     save_reporting_cutoff("Spring 2026", config.reporting_settings)
     append_manual_status_rows(pd.DataFrame([{
-        "Student ID": "PRIVATE-ID-1", "Semester": "Spring 2024", "Chapter": "Alpha", "Status": "G",
+        "Student ID": "A01234567", "Semester": "Spring 2024", "Chapter": "Alpha", "Status": "G",
         "Notes": "PRIVATE-NOTE",
     }]), config.manual_status)
     config.zero_member_periods.write_text("Chapter,Start Semester,End Semester,Notes\n", encoding="utf-8")
@@ -67,7 +70,7 @@ def javascript_results(payload, selections):
         const {aggregateViewer} = require(process.argv[1]);
         const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
         process.stdout.write(JSON.stringify(input.selections.map(s =>
-            aggregateViewer(input.payload, s.semesters, s.chapters, s.years, s.breakdown, s.councils))));
+            aggregateViewer(input.payload, s.semesters, s.chapters, s.years, s.breakdown, s.councils, s.view, s.population))));
     """
     result = subprocess.run([node, "-e", code, str(viewer.ASSETS / "model.js")],
                             input=json.dumps({"payload": payload, "selections": selections}),
@@ -111,9 +114,37 @@ def test_empty_milestone_selection_does_not_show_stale_chart(cohort_tables):
     assert actual == {"students": 50, "groups": [], "rows": []}
 
 
+def test_independent_measures_and_fixed_population_match_browser(cohort_tables):
+    from src.sqlCompile_records import OUTCOME_VIEWS, POPULATION_OPTIONS, RECORD_COLUMNS
+    from src.persistence_outcomes import persistence_outcome_from_status
+    records = []
+    for row in cohort_tables.timeline.to_dict("records"):
+        value = persistence_outcome_from_status(row["Status Code"])
+        records.append({"Student ID": row["Student ID"], "Semester": row["Semester"], "Chapter": "",
+                        "Domain": "degree" if value == "Graduated" else "membership", "Value": value,
+                        "Source": "test source", "Evidence": "PRIVATE-EVIDENCE", "Priority": 0, "Resolution": ""})
+    cohort_tables.record_history = pd.DataFrame(records, columns=RECORD_COLUMNS)
+    payload = viewer.build_viewer_payload(cohort_tables)
+    selections = [{"semesters": payload["semesters"], "chapters": chapters, "years": years, "breakdown": breakdown,
+                   "view": view, "population": population}
+                  for view in OUTCOME_VIEWS for population in POPULATION_OPTIONS
+                  for chapters in [payload["chapters"], ["Alpha"]]
+                  for breakdown, years in [("Overall", [1, 2, 3, 4, 5, 6]), ("Overall", [1]), ("Chapter joined", [6])]]
+    for selected, actual in zip(selections, javascript_results(payload, selections)):
+        result = build_sql_compile_milestone_dashboard(cohort_tables.timeline, cohort_tables.outcomes, selected["semesters"],
+            selected_chapters=selected["chapters"], chart_milestone_offsets=selected["years"], chart_breakdown=selected["breakdown"],
+            reporting_cutoff=cohort_tables.reporting_cutoff, record_history=cohort_tables.record_history,
+            outcome_view=selected["view"], population=selected["population"])
+        expected = {(r["Chart Group"], r["Outcome"]): (r["Count"], r["Share"], r["Eligible Students"], r["Future Students"])
+                    for r in result["chart_frame"].to_dict("records")}
+        assert {(r["group"], r["outcome"]): (r["count"], r["share"], r["eligible"], r["future"]) for r in actual["rows"]} == expected
+        assert actual["students"] == result["meta"]["students"]
+    assert "PRIVATE-" not in json.dumps(payload)
+
+
 def test_payload_contains_only_aggregate_data(cohort_tables):
     payload = viewer.build_viewer_payload(cohort_tables)
-    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units"}
+    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units", "views", "defaultView", "metricVersion"}
     assert "PRIVATE-" not in json.dumps(payload)
     assert payload["dataThrough"] == "Spring 2026"
     assert len(payload["units"]) < len(cohort_tables.outcomes) * 6
@@ -178,6 +209,26 @@ def test_publisher_keeps_sources_and_applies_saved_corrections(publisher_config,
     assert all(path.read_bytes() == content for path, content in before.items())
     assert not config.name_choices.exists() and not config.name_rechecks.exists()
     assert not list(output.parent.glob("*.tmp"))
+    archives = list((config.database.parent / "publications").glob("*/published.json"))
+    assert len(archives) == 1
+    assert (archives[0].parent / "quality.json").exists()
+    assert "A01234567" not in output.read_text(encoding="utf-8")
+
+
+def test_warnings_approval_cannot_bypass_reconciliation(publisher_config, tmp_path, monkeypatch):
+    config, _ = publisher_config
+    output = tmp_path / "published.html"
+    viewer.publish_viewer(config, output, allow_warnings=True)
+    before = output.read_bytes()
+    original = viewer.build_viewer_payload
+    def corrupt(tables):
+        payload = original(tables)
+        payload["units"][0][4] += 1
+        return payload
+    monkeypatch.setattr(viewer, "build_viewer_payload", corrupt)
+    with pytest.raises(ValueError, match="blocked"):
+        viewer.publish_viewer(config, output, allow_warnings=True)
+    assert output.read_bytes() == before
 
 
 @pytest.mark.parametrize("field", ["database", "manual_status", "zero_member_periods"])
