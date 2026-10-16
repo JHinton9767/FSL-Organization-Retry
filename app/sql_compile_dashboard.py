@@ -73,7 +73,7 @@ st.set_page_config(
 
 
 STATUS_OPTIONS = ["", "D", "G", "RS", "RV", "S", "T", "AL", "H", "CK", "A", "N"]
-SECTION_OPTIONS = ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Manual Rows"]
+SECTION_OPTIONS = ["Persistence & Graduation", "Outcome Mix", "Manual Checker", "Duplicate Name Checker", "Manual Rows"]
 ORGANIZATION_REVIEW_SECTION = "Organization Review"
 SECTION_KEY = "sql_compile_dashboard_section"
 DASHBOARD_DATA_REFRESH_KEY = "sql_compile_dashboard_data_refresh_token"
@@ -749,7 +749,7 @@ def _render_duplicate_name_recheck_list(
                 try:
                     path, saved = _review_save(append_duplicate_name_recheck_rows,
                         rows, duplicate_name_recheck_file,
-                        expected_rows=duplicate_name_rechecks if shared_mode() else None,
+                        expected_rows=duplicate_name_rechecks,
                     )
                     if saved:
                         _request_dashboard_data_refresh()
@@ -782,67 +782,76 @@ def _render_duplicate_name_resolver(
 ) -> None:
     conflicts = _duplicate_name_conflicts(queue)
     if conflicts.empty:
+        st.success("No unresolved duplicate-name conflicts in the loaded cohorts.")
         return
 
-    saved_lookup: dict[str, str] = {}
-    if not duplicate_name_resolutions.empty:
-        prepared = duplicate_name_resolutions.copy()
-        for column in DUPLICATE_NAME_RESOLUTION_COLUMNS:
-            if column not in prepared.columns:
-                prepared[column] = ""
-            prepared[column] = prepared[column].fillna("").astype(str).str.strip()
-        prepared = prepared.loc[prepared["Student ID"].ne("") & prepared["Student Name"].ne("")]
-        saved_lookup = prepared.drop_duplicates(subset=["Student ID"], keep="last").set_index("Student ID")[
-            "Student Name"
-        ].to_dict()
+    search = st.text_input("Search duplicate names", placeholder="Student ID, name, chapter, or cohort", key="sql_compile_dup_search").strip()
+    if search:
+        searchable = conflicts[["Student ID", "Observed Names", "Cohort Semester", "Cohort Chapter"]].agg(" | ".join, axis=1)
+        conflicts = conflicts.loc[searchable.str.contains(search, case=False, regex=False)]
+    if conflicts.empty:
+        st.info("No duplicate-name conflicts match your search.")
+        return
+    page_size = 50
+    page_count = (len(conflicts) + page_size - 1) // page_size
+    page_key = "sql_compile_dup_page"
+    signature = (search, tuple(conflicts["Student ID"]))
+    if st.session_state.get("sql_compile_dup_page_signature") != signature:
+        st.session_state[page_key] = 1
+        st.session_state["sql_compile_dup_page_signature"] = signature
+    page = st.selectbox("Duplicate-name page", options=list(range(1, page_count + 1)), key=page_key)
+    start = (page - 1) * page_size
+    visible = conflicts.iloc[start:start + page_size]
 
     with st.expander(f"Duplicate ID name choices ({len(conflicts):,})", expanded=True):
-        st.caption("Pick the correct name for each duplicate Student ID, then save. Refreshing will remove resolved name-mismatch rows from this list.")
+        st.caption(f"Showing {start + 1:,}–{start + len(visible):,} of {len(conflicts):,}. Choose only the names you have verified, then save before changing page or search. Unselected names stay unresolved.")
         with st.form("sql_compile_duplicate_name_resolution_form"):
             selected_rows: list[dict[str, str]] = []
-            for index, row in conflicts.reset_index(drop=True).iterrows():
+            for _, row in visible.iterrows():
                 student_id = str(row["Student ID"]).strip()
                 choices = [str(value).strip() for value in row["Name Choices"] if str(value).strip()]
-                saved_name = saved_lookup.get(student_id, "")
-                selected_index = choices.index(saved_name) if saved_name in choices else 0
+                widget_suffix = f"{student_id}_{_dashboard_data_refresh_token()}"
                 cols = st.columns([1, 1.4, 2.2])
                 with cols[0]:
                     st.text_input(
                         "Student ID",
                         value=student_id,
                         disabled=True,
-                        key=f"sql_compile_dup_id_{student_id}_{index}",
+                        key=f"sql_compile_dup_id_{widget_suffix}",
                     )
                 with cols[1]:
                     st.text_input(
                         "Cohort",
                         value=f"{row['Cohort Semester']} | {row['Cohort Chapter']}",
                         disabled=True,
-                        key=f"sql_compile_dup_cohort_{student_id}_{index}",
+                        key=f"sql_compile_dup_cohort_{widget_suffix}",
                     )
                 with cols[2]:
                     selected_name = st.selectbox(
                         "Correct name",
                         options=choices,
-                        index=selected_index,
-                        key=f"sql_compile_dup_name_{student_id}_{index}",
+                        index=None,
+                        placeholder="Choose a verified name",
+                        key=f"sql_compile_dup_name_{widget_suffix}",
                     )
-                selected_rows.append(
-                    {
+                if selected_name:
+                    selected_rows.append({
                         "Student ID": student_id,
                         "Student Name": selected_name,
                         "Notes": f"Resolved from observed names: {row['Observed Names']}",
-                    }
-                )
+                    })
 
             save_requested = st.form_submit_button("Save Name Choices", type="primary", use_container_width=True)
 
         if save_requested:
+            if not selected_rows:
+                st.warning("Choose at least one verified name before saving.")
+                return
             try:
                 path, saved = _review_save(append_duplicate_name_resolution_rows,
                     pd.DataFrame(selected_rows, columns=DUPLICATE_NAME_RESOLUTION_COLUMNS),
                     duplicate_name_resolution_file,
-                    expected_rows=duplicate_name_resolutions if shared_mode() else None,
+                    expected_rows=duplicate_name_resolutions,
                 )
                 if saved:
                     _request_dashboard_data_refresh()
@@ -854,6 +863,50 @@ def _render_duplicate_name_resolver(
                 st.warning(str(exc))
             except (OSError, ValueError) as exc:
                 st.error(f"Could not save duplicate name choices. Close the CSV if it is open, then try again. Details: {exc}")
+
+
+def _render_saved_name_choices(path: Path, resolutions: pd.DataFrame) -> None:
+    saved = _prepared_duplicate_name_resolutions(resolutions)
+    with st.expander(f"Saved name corrections ({len(saved):,})", expanded=False):
+        if saved.empty:
+            st.caption("Saved name choices will appear here so you can correct them later.")
+            return
+        search = st.text_input("Search saved names", key="sql_compile_saved_name_search").strip()
+        visible = saved.loc[saved.agg(" | ".join, axis=1).str.contains(search, case=False, regex=False)] if search else saved
+        st.caption("Edit the saved name or note, then save your changes. Student IDs stay fixed.")
+        edited = st.data_editor(visible, disabled=["Student ID"], hide_index=True, use_container_width=True,
+                                key=f"sql_compile_saved_name_editor_{_dashboard_data_refresh_token()}_{search}")
+        if st.button("Save Edited Names", use_container_width=True):
+            prepared = _prepared_duplicate_name_resolutions(edited)
+            before = visible.set_index("Student ID")
+            changed = prepared.loc[[
+                row["Student ID"] not in before.index or
+                row["Student Name"] != before.loc[row["Student ID"], "Student Name"] or
+                row["Notes"] != before.loc[row["Student ID"], "Notes"]
+                for _, row in prepared.iterrows()
+            ]]
+            if changed.empty:
+                st.info("No saved names were changed.")
+            elif changed["Student Name"].eq("").any():
+                st.warning("Enter a name for every changed row before saving.")
+            else:
+                try:
+                    _review_save(append_duplicate_name_resolution_rows, changed, path, expected_rows=resolutions)
+                    _request_dashboard_data_refresh()
+                    st.rerun()
+                except ReviewConflictError as exc:
+                    st.warning(str(exc))
+                except (OSError, ValueError) as exc:
+                    st.error(f"Could not save name corrections. Details: {exc}")
+
+
+def _render_duplicate_name_checker(tables, resolution_file: Path, recheck_file: Path) -> None:
+    st.subheader("Duplicate Name Checker")
+    st.caption("Review Student IDs with different observed names across all loaded cohorts. This list is independent of the P&G measure, year, and chart filters. Saving a name refreshes the dashboard automatically.")
+    queue = tables.manual_checker_template
+    _render_duplicate_name_resolver(queue, resolution_file, tables.duplicate_name_resolutions)
+    _render_saved_name_choices(resolution_file, tables.duplicate_name_resolutions)
+    _render_duplicate_name_recheck_list(queue, recheck_file, tables.duplicate_name_rechecks, tables.duplicate_name_resolutions)
 
 
 def _render_legacy_manual_importer(manual_status_file: Path) -> None:
@@ -1142,10 +1195,6 @@ def _render_manual_checker(
     checker_template: pd.DataFrame,
     manual_status_file: Path,
     manual_rows: pd.DataFrame,
-    duplicate_name_resolution_file: Path,
-    duplicate_name_resolutions: pd.DataFrame,
-    duplicate_name_recheck_file: Path,
-    duplicate_name_rechecks: pd.DataFrame,
     *,
     outcome_filter_label: str = "Last outcome",
 ) -> None:
@@ -1157,13 +1206,7 @@ def _render_manual_checker(
 
     queue = _ensure_manual_checker_state(checker_template)
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
-    _render_duplicate_name_resolver(queue, duplicate_name_resolution_file, duplicate_name_resolutions)
-    _render_duplicate_name_recheck_list(
-        queue,
-        duplicate_name_recheck_file,
-        duplicate_name_rechecks,
-        duplicate_name_resolutions,
-    )
+    st.caption("Name mismatches can be fixed in the separate Duplicate Name Checker tab.")
 
     if queue.empty:
         st.success("No student status records are available for the current cohort selection.")
@@ -1609,10 +1652,13 @@ def main() -> None:
 
     section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, "Record accuracy", ORGANIZATION_REVIEW_SECTION]
     section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)
-    if section in {"Manual Checker", "Manual Rows", "Record accuracy"}:
+    if section in {"Manual Checker", "Duplicate Name Checker", "Manual Rows", "Record accuracy"}:
         st.sidebar.text_input("Reviewer name or initials", value=getpass.getuser(), key="record_reviewer")
         st.sidebar.text_input("Reason for this correction", key="record_reason")
         st.sidebar.text_input("Supporting source or reference", key="record_evidence")
+    if section == "Duplicate Name Checker":
+        _render_duplicate_name_checker(all_tables, duplicate_name_resolution_file, duplicate_name_recheck_file)
+        return
     if not shared and section == "Record accuracy":
         with review_context(st.session_state.get("record_reviewer", getpass.getuser()), st.session_state.get("record_reason", ""), st.session_state.get("record_evidence", "")):
             render_record_review(config, all_tables, _request_dashboard_data_refresh)
@@ -1715,10 +1761,6 @@ def main() -> None:
             checker_template.loc[:, LAST_KNOWN_STATUS_COLUMNS] if not checker_template.empty else checker_template,
             manual_status_file,
             all_tables.manual_rows,
-            duplicate_name_resolution_file,
-            all_tables.duplicate_name_resolutions,
-            duplicate_name_recheck_file,
-            all_tables.duplicate_name_rechecks,
             outcome_filter_label=f"Last outcome ({checker_milestone_offset} Year P&G)",
         )
 

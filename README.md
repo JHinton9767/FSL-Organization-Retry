@@ -21,6 +21,11 @@ uv run --with-requirements requirements.txt python run_sql_compile_dashboard.py 
 
 The dashboard reads `output/sqlCompile/sqlCompile.sqlite` and persistent manual-review files under `config/`. It supports selected join semesters/chapters, years 1-6, Future milestones, and duplicate-name review. See [the sqlCompile workflow](docs/sqlCompile_cohort_workflow.md) for correction/import commands and [the architecture](docs/architecture.md) for the boundaries between workflows.
 
+Open **Duplicate Name Checker** beside **Manual Checker** to search name
+mismatches, choose verified names, edit saved name corrections, or keep a recheck
+list. Only explicitly selected names are saved. The checker includes all loaded
+cohorts independently of the chart filters and refreshes after a successful save.
+
 ## Export every student ID and name
 
 On the computer with the populated SQL database, double-click
