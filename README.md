@@ -32,6 +32,16 @@ mismatches, choose verified names, edit saved name corrections, or keep a rechec
 list. Only explicitly selected names are saved. The checker includes all loaded
 cohorts independently of the chart filters and refreshes after a successful save.
 
+## Student Success & Impact
+
+The owner dashboard also includes **Student Success & Impact**: fully verified
+award records, enrollment/degree checkpoint metrics, weighted GPA and honors,
+community impact totals, and a separate external summary. Download templates
+and import records when available. Missing data stays visibly unverified.
+Use **Publish_Student_Success.bat** for an aggregate external HTML report;
+see the [student success guide](docs/student_success_impact.md) for definitions,
+verification requirements, and commands.
+
 ## Export every student ID and name
 
 On the computer with the populated SQL database, double-click

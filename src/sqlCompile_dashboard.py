@@ -179,6 +179,9 @@ class SqlCompileDashboardTables:
     new_member_evidence_complete: bool = False
     record_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     university_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+    graduation_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+    academic_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+    impact_records: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _count_bucket(frame: pd.DataFrame, bucket: str) -> int:
@@ -1054,7 +1057,15 @@ def load_dashboard_tables(
     create_review_files: bool = True,
     reporting_cutoff: str | None = None,
     university_records_file: str | Path = DEFAULT_UNIVERSITY_PATH,
+    graduation_records_file: str | Path | None = None,
+    academic_records_file: str | Path | None = None,
+    impact_records_file: str | Path | None = None,
 ) -> SqlCompileDashboardTables:
+    from src.sqlCompile_success_records import (DEFAULT_GRADUATION_PATH, DEFAULT_ACADEMIC_PATH, DEFAULT_IMPACT_PATH,
+                                               read_success_records, graduation_university_rows)
+    graduation_records = read_success_records(_resolve_path(graduation_records_file or DEFAULT_GRADUATION_PATH), "graduation")
+    academic_records = read_success_records(_resolve_path(academic_records_file or DEFAULT_ACADEMIC_PATH), "academic")
+    impact_records = read_success_records(_resolve_path(impact_records_file or DEFAULT_IMPACT_PATH), "impact")
     with data_lock(_resolve_path(database_path)):
         compiled_rows = read_sql_compile_table(database_path, table_name=table_name)
         roster_inventory = read_roster_inventory_table(database_path)
@@ -1106,8 +1117,12 @@ def load_dashboard_tables(
         selected_semesters=selected_semesters,
         reporting_cutoff=reporting_cutoff,
         new_member_evidence_complete=new_member_observations is not None,
-        record_history=build_record_history(source_observations, compiled_rows, timeline, outcomes, calculation_manual_rows, new_member_observations, university_records),
+        record_history=build_record_history(source_observations, compiled_rows, timeline, outcomes, calculation_manual_rows, new_member_observations,
+                                           pd.concat([university_records, graduation_university_rows(graduation_records)], ignore_index=True)),
         university_records=university_records,
+        graduation_records=graduation_records,
+        academic_records=academic_records,
+        impact_records=impact_records,
     )
 
 

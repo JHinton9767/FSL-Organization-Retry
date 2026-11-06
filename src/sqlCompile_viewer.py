@@ -23,6 +23,7 @@ from src.sqlCompile_reporting import REPORTING_EXAMPLE, read_reporting_cutoff, s
 from src.sqlCompile_storage import atomic_write_text, data_lock
 from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, METRIC_VERSION, OUTCOME_VIEW_LABELS, OUTCOME_VIEW_DESCRIPTIONS
 from src.sqlCompile_sources import read_optional_table, SOURCE_MANIFEST
+from src.sqlCompile_success import build_student_success, render_public_summary
 
 
 ASSETS = ROOT / "app" / "viewer"
@@ -81,6 +82,7 @@ def build_viewer_payload(tables: SqlCompileDashboardTables, *, dashboards: dict 
         "viewLabels": OUTCOME_VIEW_LABELS,
         "viewDescriptions": OUTCOME_VIEW_DESCRIPTIONS,
         "metricVersion": METRIC_VERSION,
+        "studentSuccess": build_student_success(tables)["public"],
     }
 
 
@@ -94,6 +96,7 @@ def render_viewer(payload: dict) -> str:
         "/*VIEWER_MODEL*/": (ASSETS / "model.js").read_text(encoding="utf-8"),
         "/*VIEWER_UI*/": (ASSETS / "viewer.js").read_text(encoding="utf-8"),
         "/*VIEWER_DATA*/": serialized,
+        "/*SUCCESS_REPORT*/": render_public_summary(payload["studentSuccess"], standalone=False) if "studentSuccess" in payload else "",
     }
     for marker in parts:
         if template.count(marker) != 1:
@@ -125,6 +128,9 @@ def publish_viewer(
         duplicate_name_resolution_file=config.name_choices, duplicate_name_recheck_file=config.name_rechecks,
         zero_member_periods_file=config.zero_member_periods, create_review_files=False, reporting_cutoff=cutoff,
         university_records_file=config.university_records,
+        graduation_records_file=config.graduation_records,
+        academic_records_file=config.academic_records,
+        impact_records_file=config.impact_records,
     )
     dashboards = {}
     payload = build_viewer_payload(tables, dashboards=dashboards)

@@ -62,6 +62,7 @@ from src.sqlCompile_councils import COUNCILS, chapters_for_councils, build_unmap
 from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, ENROLLMENT_VIEW, POPULATION_OPTIONS, DEFAULT_UNIVERSITY_PATH, outcome_view_label, OUTCOME_VIEW_DESCRIPTIONS
 from src.sqlCompile_audit import review_context
 from app.sql_compile_review import render_record_review, render_university_checker
+from app.sql_compile_success import render_student_success
 
 
 st.set_page_config(
@@ -207,6 +208,9 @@ def _cached_load_dashboard_tables(
     source_revision: tuple = (),
     reporting_cutoff: str | None = None,
     university_records_file: str = str(DEFAULT_UNIVERSITY_PATH),
+    graduation_records_file: str | None = None,
+    academic_records_file: str | None = None,
+    impact_records_file: str | None = None,
 ):
     del database_mtime_ns, duplicate_name_resolution_mtime_ns, duplicate_name_recheck_mtime_ns, dashboard_refresh_token
     return load_dashboard_tables(
@@ -218,6 +222,9 @@ def _cached_load_dashboard_tables(
         zero_member_periods_file=Path(zero_member_periods_file_text),
         reporting_cutoff=reporting_cutoff,
         university_records_file=university_records_file,
+        graduation_records_file=graduation_records_file,
+        academic_records_file=academic_records_file,
+        impact_records_file=impact_records_file,
     )
 
 
@@ -1667,6 +1674,9 @@ def main() -> None:
                 revision if shared else (revision[4], *revision[5:]),
                 reporting_cutoff,
                 str(config.university_records),
+                str(config.graduation_records),
+                str(config.academic_records),
+                str(config.impact_records),
             )
             if shared:
                 # Keep drafts and the displayed data stable until an explicit refresh.
@@ -1681,7 +1691,7 @@ def main() -> None:
     if not all_tables.new_member_evidence_complete:
         st.warning("This database predates the join-evidence fix. Recompile all Excel rosters before using these rates; students who joined and exited in the same semester may be missing.")
 
-    section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, "Record accuracy", ORGANIZATION_REVIEW_SECTION]
+    section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, "Student Success & Impact", "Record accuracy", ORGANIZATION_REVIEW_SECTION]
     section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)
     if section != "Manual Checker" and st.session_state.get("sql_compile_pending_status_refresh"):
         # Refresh rates without discarding other unsaved checker edits or
@@ -1690,12 +1700,16 @@ def main() -> None:
         st.session_state["sql_compile_restore_checker_baseline"] = st.session_state.get("sql_compile_checker_saved_baseline", all_tables.manual_rows)
         _request_dashboard_data_refresh()
         st.rerun()
-    if section in {"Manual Checker", "Duplicate Name Checker", "Manual Rows", "Record accuracy"}:
+    if section in {"Manual Checker", "Duplicate Name Checker", "Manual Rows", "Record accuracy", "Student Success & Impact"}:
         st.sidebar.text_input("Reviewer name or initials", value=getpass.getuser(), key="record_reviewer")
         st.sidebar.text_input("Reason for this correction", key="record_reason")
         st.sidebar.text_input("Supporting source or reference", key="record_evidence")
     if section == "Duplicate Name Checker":
         _render_duplicate_name_checker(all_tables, duplicate_name_resolution_file, duplicate_name_recheck_file)
+        return
+    if not shared and section == "Student Success & Impact":
+        with review_context(st.session_state.get("record_reviewer", getpass.getuser()), st.session_state.get("record_reason", ""), st.session_state.get("record_evidence", "")):
+            render_student_success(config, all_tables, _request_dashboard_data_refresh)
         return
     if not shared and section == "Record accuracy":
         with review_context(st.session_state.get("record_reviewer", getpass.getuser()), st.session_state.get("record_reason", ""), st.session_state.get("record_evidence", "")):

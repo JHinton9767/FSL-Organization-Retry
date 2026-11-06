@@ -130,8 +130,15 @@ def index_record_history(records: pd.DataFrame) -> dict:
     work = records.copy()
     work["_sort"] = work["Semester"].map(_semester_sort)
     work = work.sort_values(["_sort", "Priority"], kind="stable")
-    for (student, domain), group in work.groupby(["Student ID", "Domain"], sort=False):
-        result[(student, domain)] = (group["_sort"].tolist(), group.to_dict("records"))
+    # Convert once, not once per student/domain. Large university imports can
+    # otherwise spend most of their time constructing tiny pandas frames.
+    for row in work.to_dict("records"):
+        student, domain = row["Student ID"], row["Domain"]
+        if pd.isna(student) or pd.isna(domain):
+            continue  # Preserve groupby's exclusion of missing identity keys.
+        sorts, observations = result.setdefault((student, domain), ([], []))
+        sorts.append(row["_sort"])
+        observations.append(row)
     return result
 
 

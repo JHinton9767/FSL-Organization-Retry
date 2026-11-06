@@ -12,6 +12,7 @@ from src.sqlCompile_cohort import DEFAULT_MANUAL_STATUS_PATH, DEFAULT_ZERO_MEMBE
 from src.sqlCompile_dashboard import DEFAULT_DUPLICATE_NAME_RECHECK_PATH, DEFAULT_DUPLICATE_NAME_RESOLUTION_PATH
 from src.sqlCompile_reporting import DEFAULT_REPORTING_SETTINGS
 from src.sqlCompile_records import DEFAULT_UNIVERSITY_PATH
+from src.sqlCompile_success_records import DEFAULT_GRADUATION_PATH, DEFAULT_ACADEMIC_PATH, DEFAULT_IMPACT_PATH
 
 
 DEFAULT_HOST_CONFIG = ROOT / "config" / "sqlCompile_host.json"
@@ -29,11 +30,14 @@ class HostConfig:
     reporting_settings: Path = DEFAULT_REPORTING_SETTINGS
     university_records: Path = DEFAULT_UNIVERSITY_PATH
     coverage_reviews: Path = ROOT / "config" / "sqlCompile_coverage_reviews.csv"
+    graduation_records: Path = DEFAULT_GRADUATION_PATH
+    academic_records: Path = DEFAULT_ACADEMIC_PATH
+    impact_records: Path = DEFAULT_IMPACT_PATH
 
     @property
     def data_paths(self) -> tuple[Path, ...]:
         return (self.database, self.manual_status, self.name_choices, self.name_rechecks, self.zero_member_periods,
-                self.university_records, self.coverage_reviews)
+                self.university_records, self.coverage_reviews, self.graduation_records, self.academic_records, self.impact_records)
 
 
 def shared_mode() -> bool:

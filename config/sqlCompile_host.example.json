@@ -8,5 +8,8 @@
   "zero_member_periods": "config/sqlCompile_zero_member_periods.csv",
   "reporting_settings": "config/sqlCompile_reporting.json",
   "university_records": "config/sqlCompile_university_records.csv",
-  "coverage_reviews": "config/sqlCompile_coverage_reviews.csv"
+  "coverage_reviews": "config/sqlCompile_coverage_reviews.csv",
+  "graduation_records": "config/sqlCompile_graduation_records.csv",
+  "academic_records": "config/sqlCompile_academic_records.csv",
+  "impact_records": "config/sqlCompile_impact_records.csv"
 }

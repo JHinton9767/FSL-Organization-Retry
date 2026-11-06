@@ -144,7 +144,7 @@ def test_independent_measures_and_fixed_population_match_browser(cohort_tables):
 
 def test_payload_contains_only_aggregate_data(cohort_tables):
     payload = viewer.build_viewer_payload(cohort_tables)
-    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units", "views", "defaultView", "viewLabels", "viewDescriptions", "metricVersion"}
+    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units", "views", "defaultView", "viewLabels", "viewDescriptions", "metricVersion", "studentSuccess"}
     assert "PRIVATE-" not in json.dumps(payload)
     assert payload["dataThrough"] == "Spring 2026"
     assert len(payload["units"]) < len(cohort_tables.outcomes) * 6

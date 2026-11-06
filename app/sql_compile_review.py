@@ -140,7 +140,8 @@ def render_record_review(config, tables, refresh) -> None:
                 if "Student ID" in raw:
                     st.dataframe(raw.loc[raw["Student ID"].eq(student)], hide_index=True, use_container_width=True)
     else:
-        paths = [config.manual_status, config.name_choices, config.name_rechecks, config.coverage_reviews, config.university_records]
+        paths = [config.manual_status, config.name_choices, config.name_rechecks, config.coverage_reviews, config.university_records,
+                 config.graduation_records, config.academic_records, config.impact_records]
         path = st.selectbox("Decision file", paths, format_func=lambda p: p.name)
         history = read_change_history(path)
         st.dataframe(history.drop(columns=["before_hash", "after_hash"], errors="ignore"), hide_index=True, use_container_width=True)

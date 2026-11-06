@@ -34,6 +34,13 @@ The editable dashboard keeps its terminal running. A publication command pasted
 after the launch command will wait until the server stops. Publish from a
 second PowerShell window in the project folder, or stop the server with Ctrl+C.
 
+The new **Student Success & Impact** section is available after restarting.
+It includes verified graduation records, academic/community imports, outcome
+metrics, and an external summary. Import the supporting records when available;
+no roster recompile is needed to enable these screens. For a separate external
+HTML report, use **Publish_Student_Success.bat** or download it from **External
+summary**. See the [student success guide](docs/student_success_impact.md).
+
 ## Everyday commands
 
 Start editing or viewing existing records:
