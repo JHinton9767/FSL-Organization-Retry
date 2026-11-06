@@ -196,9 +196,10 @@ def persistence_milestone_chart(
             y=subset["Share"],
             name=outcome,
             marker_color=PERSISTENCE_OUTCOME_COLORS.get(outcome, "#6B7280"),
-            text=subset["Label"],
+            text=subset["Label"].str.replace("<br>(n=", " (n=", regex=False),
             textposition="inside",
-            textfont={"color": "#2F2E2A" if outcome in PERSISTENCE_DARK_TEXT_OUTCOMES else "white", "size": 11},
+            textangle=0,
+            textfont={"color": "#2F2E2A" if outcome in PERSISTENCE_DARK_TEXT_OUTCOMES else "white", "size": 12},
             customdata=subset[customdata_columns],
             hovertemplate=hovertemplate,
         )
@@ -214,11 +215,11 @@ def persistence_milestone_chart(
             "xanchor": "left",
             "font": {"color": "#17213A", "size": 18},
         },
-        legend={"orientation": "h", "yanchor": "top", "y": -0.22, "xanchor": "left", "x": 0.0},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         xaxis_title=xaxis_title,
         yaxis_title=yaxis_title,
-        margin={"l": 24, "r": 24, "t": 90, "b": 190},
-        uniformtext={"minsize": 8, "mode": "hide"},
+        margin={"l": 24, "r": 24, "t": 125, "b": 100},
+        uniformtext={"minsize": 12, "mode": "hide"},
     )
     fig.update_yaxes(tickformat=".0%", range=[0, 1])
     fig.update_xaxes(categoryorder="array", categoryarray=milestone_order)

@@ -56,8 +56,11 @@ def main(argv=None) -> int:
     parser.add_argument("--host-config", type=Path)
     parser.add_argument("--path-config", type=Path, help="Optional source-folder configuration used for recompilation.")
     parser.add_argument("--recompile", action="store_true", help="After backing up, import changed rosters and rebuild the owner database.")
+    parser.add_argument("--allow-source-removals", action="store_true", help="Accept deliberate roster removals after reviewing the baseline backup; requires --recompile.")
     parser.add_argument("--viewer", type=Path, default=DEFAULT_VIEWER_PATH, help="Existing viewer to compare; it will not be replaced.")
     args = parser.parse_args(argv)
+    if args.allow_source_removals and not args.recompile:
+        parser.error("--allow-source-removals requires --recompile")
     try:
         config = load_host_config(args.host_config)
         extra = [args.path_config or ROOT / "config" / "local_paths.yaml", args.viewer]
@@ -68,7 +71,7 @@ def main(argv=None) -> int:
         backup = backup_baseline(config, extra_paths=extra)
         print(f"Baseline backup: {backup}")
         if args.recompile:
-            result = sqlCompile(output_path=config.database, config_path=args.path_config)
+            result = sqlCompile(output_path=config.database, config_path=args.path_config, allow_source_removals=args.allow_source_removals)
             print(f"Compiled {result.row_count:,} rows from {result.source_file_count:,} files. Issues: {result.issue_count:,}.")
         def review(report):
             print(f"Owner's quality report: {report['report_file']}")

@@ -247,3 +247,21 @@ def test_legacy_import_requires_positive_graduation_evidence(label):
 @pytest.mark.parametrize("label", ["G", "Graduated", "Graduated Confirmed", "Graduated (Confirmed)", "Degree Awarded"])
 def test_positive_legacy_graduation_labels_remain_importable(label):
     assert legacy_status_to_sql_status(label) == "G"
+
+
+def test_combined_pg_retains_exit_categories_and_allows_return_after_chapter_removal():
+    statuses = ["G", "RS", "AL", "S", "RV", "T", "CK", "A"]
+    rows = [[term, "Alpha", f"A0{index:07d}", status]
+            for index, final in enumerate(statuses, 1)
+            for term, status in [("Fall 2020", "N"), ("Spring 2021", final), ("Spring 2026", final)]]
+    rows.append(["Spring 2022", "Beta", "A00000007", "A"])
+    # The chapter-removal student returns and remains active in the new chapter.
+    rows = [row for row in rows if not (row[2] == "A00000007" and row[0] == "Spring 2026")]
+    rows.append(["Spring 2026", "Beta", "A00000007", "A"])
+    timeline, outcomes, *_ = cohort_tables(rows)
+    result = chart(timeline, outcomes)
+    first = result["detail_frame"].loc[lambda frame: frame["Milestone Sort"].eq(1)]
+    assert set(first["P&G Outcome Bucket"]) == {"Graduated", "Dropped/Resigned", "Early Alumni", "Inactive/Suspended", "Revoked", "Transfer", "Chapter Kicked", "Active"}
+    returned = result["detail_frame"].loc[lambda frame: frame["Student ID"].eq("A00000007") & frame["Milestone Sort"].eq(2)].iloc[0]
+    assert returned["P&G Outcome Bucket"] == "Active"
+    assert returned["Cohort Chapter"] == "Alpha"

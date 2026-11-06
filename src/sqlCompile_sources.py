@@ -34,13 +34,25 @@ def read_optional_table(database: Path, table: str) -> pd.DataFrame:
         return pd.read_sql_query('SELECT * FROM "' + table.replace('"', '""') + '"', connection)
 
 
-def source_cache(database: Path | None) -> tuple[dict, set[str]]:
+def source_cache(database: Path | None, identities: list[tuple[str, str, str]] | None = None) -> tuple[dict, set[str]]:
     if database is None or not database.exists():
         return {}, set()
-    versions = read_optional_table(database, SOURCE_VERSIONS)
     manifest = read_optional_table(database, SOURCE_MANIFEST)
     cache = {}
-    for row in versions.to_dict("records"):
+    if identities is None:
+        records = read_optional_table(database, SOURCE_VERSIONS).to_dict("records")
+    else:
+        # History is permanent, but compiling today's files must not load every
+        # old roster revision and its full JSON observations into memory.
+        records = []
+        with read_database(database) as connection:
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (SOURCE_VERSIONS,)).fetchone():
+                for path, sha, label in identities:
+                    cursor = connection.execute(f"SELECT * FROM {SOURCE_VERSIONS} WHERE source_path=? AND sha256=? AND source_file=? AND parser_version=?", (path, sha, label, PARSER_VERSION))
+                    row = cursor.fetchone()
+                    if row is not None:
+                        records.append(dict(zip([column[0] for column in cursor.description], row)))
+    for row in records:
         if row["parser_version"] == PARSER_VERSION:
             cache[(row["source_path"], row["sha256"], row["source_file"])] = row
     return cache, set(manifest.get("Source Path", []))

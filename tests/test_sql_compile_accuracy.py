@@ -235,6 +235,7 @@ def test_owner_can_open_new_review_screens(tmp_path, monkeypatch):
         next(widget for widget in app.selectbox if widget.label == "Review area").set_value(area).run()
         assert not app.exception and not app.error, area
     app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
+    app.selectbox(key="pg_measure").set_value(DEGREE_VIEW).run()
     assert not app.exception and not app.error
     assert app.selectbox(key="pg_measure").value == DEGREE_VIEW
     assert app.dataframe[0].value["Student ID"].tolist() == [STUDENT]
@@ -249,3 +250,48 @@ def test_small_source_changes_are_still_flagged_for_review():
     before = {"dataThrough": "Spring 2026", "sourceRevision": "old", "units": [["Fall 2020", "Alpha", 1, "Unknown", 100]]}
     after = {**before, "sourceRevision": "changed"}
     assert any("source files" in item for item in publication_changes(after, before))
+
+
+@pytest.mark.parametrize("failure", ["removed", "unreadable", "empty"])
+def test_partial_roster_failure_preserves_database(tmp_path, failure):
+    root, database = tmp_path / "rosters", tmp_path / "data.sqlite"
+    first, second = root / "one.xlsx", root / "two.xlsx"
+    make_roster(first)
+    make_roster(second)
+    sqlCompile([root], database)
+    before = database.read_bytes()
+    if failure == "removed":
+        second.unlink()
+    elif failure == "unreadable":
+        second.write_bytes(b"damaged workbook")
+    else:
+        book = Workbook()
+        book.save(second)
+    with pytest.raises(ValueError, match="database preserved"):
+        sqlCompile([root], database)
+    assert database.read_bytes() == before
+    if failure == "removed":
+        result = sqlCompile([root], database, allow_source_removals=True)
+        assert result.row_count == 1
+
+
+def test_source_cache_can_reuse_an_older_version_without_loading_whole_archive(tmp_path, monkeypatch):
+    import importlib
+    compiler = importlib.import_module("src.sqlCompile")
+    sources = importlib.import_module("src.sqlCompile_sources")
+    root, database = tmp_path / "rosters", tmp_path / "data.sqlite"
+    path = root / "roster.xlsx"
+    make_roster(path)
+    original = path.read_bytes()
+    sqlCompile([root], database)
+    make_roster(path, "G")
+    sqlCompile([root], database)
+    path.write_bytes(original)
+    read_table = sources.read_optional_table
+    def limited_read(database, table):
+        assert table != SOURCE_VERSIONS, "Do not load every historical roster version"
+        return read_table(database, table)
+    monkeypatch.setattr(sources, "read_optional_table", limited_read)
+    monkeypatch.setattr(compiler, "load_workbook", lambda *a, **k: pytest.fail("Archived unchanged workbook was reparsed"))
+    sqlCompile([root], database)
+    assert read_optional_table(database, SOURCE_OBSERVATIONS)["Status"].tolist() == ["N"]

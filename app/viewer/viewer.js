@@ -24,7 +24,7 @@
     });
   }
   addPicker("semesters", payload.semesters);
-  for (const view of Object.keys(payload.views || {"Roster outcomes (legacy)": payload.units})) byId("measure").add(new Option(view, view));
+  for (const view of Object.keys(payload.views || {"Roster outcomes (legacy)": payload.units})) byId("measure").add(new Option(payload.viewLabels?.[view] || view, view));
   byId("measure").value = payload.defaultView || "Roster outcomes (legacy)";
   byId("measure").addEventListener("change", update);
   byId("population").addEventListener("change", update);
@@ -123,7 +123,8 @@
     byId("single-year-field").hidden = breakdown === "Overall";
     const view = byId("measure").value, population = byId("population").value;
     result = aggregateViewer(payload, semesters, chapters, years, breakdown, councils, view, population);
-    byId("definitions").textContent = `${view}. ${population}. Spring checkpoints in join calendar year plus year number (Summer joins use Summer). All eligible students, including Unknown, stay in the denominator. Membership, enrollment, and degrees are independent. ${view === "Roster outcomes (legacy)" ? "Legacy Year 1 may be incomplete; later years require completed checkpoints." : "Unfinished checkpoints are Future. Active membership and enrollment require evidence in the checkpoint semester."}`;
+    const viewLabel = payload.viewLabels?.[view] || view;
+    byId("definitions").textContent = `${payload.viewDescriptions?.[view] || viewLabel} ${population}. Spring checkpoints in join calendar year plus year number (Summer joins use Summer). All eligible students, including Unknown, stay in the denominator. ${view === "Roster outcomes (legacy)" ? "Year 1 includes progress through the reporting cutoff; later years require completed checkpoints." : "Unfinished checkpoints are Future."}`;
     byId("cohort-size").textContent = format(result.students);
     const cohortLabel = semesters.length === payload.semesters.length ? "All Time" : semesters.length === 1 ? semesters[0] : `${semesters.length} semesters`;
     const chapterLabel = !chapters.length ? "None" : chapters.length === availableChapters.length ? "ALL" : chapters.length === 1 ? chapters[0] : `${chapters.length} chapters`;
@@ -131,7 +132,7 @@
     byId("cohort-label").textContent = cohortLabel;
     byId("chapter-label").textContent = chapterLabel;
     byId("council-label").textContent = councilLabel;
-    byId("chart-title").textContent = breakdown === "Overall" ? `${view}: Years Since Joining FSL` : `${view} by ${breakdown}`;
+    byId("chart-title").textContent = breakdown === "Overall" ? `${viewLabel}: Years Since Joining FSL` : `${viewLabel} by ${breakdown}`;
     byId("selection-label").textContent = `${cohortLabel} | ${councilLabel} councils | ${chapterLabel} chapters | ${years.map(year => `${year} Year`).join(", ")}`;
     byId("empty").hidden = result.groups.length > 0;
     byId("empty").textContent = years.length ? "No students match the selected semesters, councils, and chapters." : "No milestones selected.";
@@ -148,8 +149,8 @@
       return {
         type: "bar", name: outcome, marker: {color: payload.colors[outcome]},
         x: rows.map(row => groupIds.get(row.group)), y: rows.map(row => row.share),
-        text: rows.map(row => outcome === "Future" ? "Future" : row.share >= 0.085 ? `${escape(outcome)}<br>${(row.share * 100).toFixed(1)}%<br>(n=${format(row.count)})` : ""),
-        textposition: "inside", textfont: {size: 11, color: ["Early Alumni", "Unknown", "Future"].includes(outcome) ? "#2f2e2a" : "white"},
+        text: rows.map(row => outcome === "Future" ? "Future" : row.share >= 0.085 ? `${escape(outcome)}<br>${(row.share * 100).toFixed(1)}% (n=${format(row.count)})` : ""),
+        textposition: "inside", textangle: 0, textfont: {size: 12, color: ["Early Alumni", "Unknown", "Future"].includes(outcome) ? "#2f2e2a" : "white"},
         customdata: rows.map(row => [row.count, row.eligible, row.future, row.total, escape(row.group)]),
         hovertemplate: `${escape(outcome)}<br>%{customdata[4]}<br>%{y:.1%}<br>Students: %{customdata[0]:,}<br>Eligible: %{customdata[1]:,}<br>Future: %{customdata[2]:,}<br>Cohort: %{customdata[3]:,}<extra></extra>`
       };
@@ -159,11 +160,11 @@
         barmode: "stack", bargap: 0.18, height: 660,
         font: {family: "Segoe UI, Arial, sans-serif", color: "#17213a"},
         paper_bgcolor: "white", plot_bgcolor: "white",
-        margin: {l: 60, r: 18, t: 25, b: 205},
+        margin: {l: 60, r: 18, t: 100, b: 120},
         xaxis: {type: "category", categoryorder: "array", categoryarray: [...groupIds.values()], tickmode: "array", tickvals: [...groupIds.values()], ticktext: labels, tickfont: {size: 11}, tickangle: 0, fixedrange: true},
         yaxis: {range: [0, 1], tickformat: ".0%", title: {text: "Share of eligible students", font: {size: 12}}, gridcolor: "#e3e8f0", fixedrange: true},
-        legend: {orientation: "h", x: 0, y: -0.3, yanchor: "top", font: {size: 11}, itemclick: false, itemdoubleclick: false},
-        uniformtext: {minsize: 8, mode: "hide"}
+        legend: {orientation: "h", x: 0, y: 1.03, yanchor: "bottom", font: {size: 12}, itemclick: false, itemdoubleclick: false},
+        uniformtext: {minsize: 12, mode: "hide"}
       }, {responsive: true, displaylogo: false, displayModeBar: false});
     } catch (error) {
       if (sequence === renderSequence) byId("chart-error").hidden = false;

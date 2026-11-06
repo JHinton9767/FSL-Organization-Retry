@@ -59,7 +59,7 @@ from src.sqlCompile_host import data_revision, load_host_config, shared_mode
 from src.sqlCompile_reporting import read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
 from src.sqlCompile_storage import ReviewConflictError, read_database, data_lock
 from src.sqlCompile_councils import COUNCILS, chapters_for_councils, build_unmapped_organization_review
-from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, ENROLLMENT_VIEW, POPULATION_OPTIONS, DEFAULT_UNIVERSITY_PATH
+from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, ENROLLMENT_VIEW, POPULATION_OPTIONS, DEFAULT_UNIVERSITY_PATH, outcome_view_label, OUTCOME_VIEW_DESCRIPTIONS
 from src.sqlCompile_audit import review_context
 from app.sql_compile_review import render_record_review, render_university_checker
 
@@ -185,6 +185,7 @@ def _dashboard_data_refresh_token() -> int:
 
 
 def _request_dashboard_data_refresh() -> None:
+    st.session_state.pop("sql_compile_pending_status_refresh", None)
     st.session_state[DASHBOARD_DATA_REFRESH_KEY] = _dashboard_data_refresh_token() + 1
     st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = None
     st.session_state.pop(MILESTONE_DASHBOARD_CACHE_KEY, None)
@@ -286,6 +287,7 @@ def _session_cached_milestone_dashboard(
     record_history: pd.DataFrame | None = None,
     outcome_view: str = ROSTER_VIEW,
     population: str = POPULATION_OPTIONS[0],
+    source_revision: tuple = (),
 ) -> dict[str, object]:
     key = (
         str(database_path.resolve()),
@@ -301,6 +303,7 @@ def _session_cached_milestone_dashboard(
         tuple(int(offset) for offset in chart_milestone_offsets),
         reporting_cutoff,
         outcome_view, population,
+        source_revision,
     )
     cache = st.session_state.get(MILESTONE_DASHBOARD_CACHE_KEY)
     if not isinstance(cache, dict):
@@ -385,6 +388,15 @@ def _ensure_manual_checker_state(checker_template: pd.DataFrame) -> pd.DataFrame
     signature = _manual_checker_signature(checker_template)
     if st.session_state.get(MANUAL_CHECKER_SIGNATURE_KEY) != signature:
         queue = _with_manual_checker_row_ids(build_manual_checker_queue(checker_template))
+        drafts = st.session_state.pop("sql_compile_restore_checker_drafts", None)
+        if isinstance(drafts, pd.DataFrame) and not drafts.empty and not queue.empty:
+            keys = ["Cohort Semester", "Cohort Chapter", "Student ID"]
+            edits = ["Semester", "Chapter", "Status", "Notes", MANUAL_CHECKER_SELECT_COLUMN]
+            lookup = drafts.drop_duplicates(keys, keep="last").set_index(keys)
+            for index, row in queue.iterrows():
+                identity = tuple(row[column] for column in keys)
+                if identity in lookup.index:
+                    queue.loc[index, edits] = lookup.loc[identity, edits].to_numpy()
         st.session_state[MANUAL_CHECKER_STATE_KEY] = queue
         st.session_state[MANUAL_CHECKER_SIGNATURE_KEY] = signature
         _refresh_manual_checker_editor()
@@ -1115,7 +1127,7 @@ def _render_rate_charts(
 ) -> None:
     meta = milestone_dashboard.get("meta", {})
     if int(meta.get("students", 0) or 0) <= 0:
-        st.info("No students match the selected semesters, councils, and chapters.")
+        st.info(meta.get("note") or "No students match the selected semesters, councils, and chapters.")
         return
 
     chart_frame = milestone_dashboard.get("chart_frame", pd.DataFrame())
@@ -1127,12 +1139,15 @@ def _render_rate_charts(
         title = f"Persistence and Graduation by Chapter Joined"
         xaxis_title = "Chapter joined"
     else:
-        title = "Outcome Rates: Years Since Joining FSL"
+        title = "Persistence and Graduation: Years Since Joining FSL"
         xaxis_title = "Years since joining FSL"
-    subtitle = (
-        f"{selected_label} | {council_label} councils | {chapter_label} chapters | {chart_milestone_label} since joining FSL | "
-        f"{meta.get('outcome_view', ROSTER_VIEW)} | Explicit evidence only"
-    )
+    view = meta.get("outcome_view", ROSTER_VIEW)
+    if view != ROSTER_VIEW:
+        title = title.replace("Persistence and Graduation", outcome_view_label(view))
+        st.info(OUTCOME_VIEW_DESCRIPTIONS[view])
+    subtitle = f"{selected_label} | {council_label} councils | {chapter_label} chapters"
+    if chart_breakdown != PG_CHART_BREAKDOWN_OVERALL:
+        subtitle += f" | {chart_milestone_label} since joining FSL"
     st.plotly_chart(
         persistence_milestone_chart(
             chart_frame,
@@ -1191,6 +1206,15 @@ def _render_outcome_distribution(distribution: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def _accept_manual_checker_save(before: pd.DataFrame, incoming: pd.DataFrame) -> None:
+    # Advance only this reviewer's saved rows. Other sessions' edits must still
+    # conflict with the version this reviewer actually saw.
+    combined = pd.concat([before, incoming], ignore_index=True).fillna("")
+    keys = ["Cohort Semester", "Cohort Chapter", "Semester", "Chapter", "Student ID"]
+    st.session_state["sql_compile_checker_saved_baseline"] = combined.drop_duplicates(keys, keep="last")
+    st.session_state["sql_compile_pending_status_refresh"] = True
+
+
 def _render_manual_checker(
     checker_template: pd.DataFrame,
     manual_status_file: Path,
@@ -1205,6 +1229,11 @@ def _render_manual_checker(
         _render_legacy_manual_importer(manual_status_file)
 
     queue = _ensure_manual_checker_state(checker_template)
+    context = (str(manual_status_file.resolve()), _dashboard_data_refresh_token())
+    if st.session_state.get("sql_compile_checker_saved_context") != context:
+        st.session_state["sql_compile_checker_saved_context"] = context
+        st.session_state["sql_compile_checker_saved_baseline"] = st.session_state.pop("sql_compile_restore_checker_baseline", manual_rows)
+    manual_rows = st.session_state["sql_compile_checker_saved_baseline"]
     saved_for_queue = _saved_manual_rows_for_queue(manual_rows, queue)
     st.caption("Name mismatches can be fixed in the separate Duplicate Name Checker tab.")
 
@@ -1430,8 +1459,9 @@ def _render_manual_checker(
                     expected_rows=manual_rows,
                 )
                 if saved:
+                    _accept_manual_checker_save(manual_rows, completed_selected_rows)
                     st.success(f"Saved {saved:,} selected manual row(s) to {path}.")
-                    st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
+                    st.caption("Rates will refresh when you return to the chart. You can continue reviewing here.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except ReviewConflictError as exc:
@@ -1447,8 +1477,9 @@ def _render_manual_checker(
                     expected_rows=manual_rows,
                 )
                 if saved:
+                    _accept_manual_checker_save(manual_rows, completed_rows)
                     st.success(f"Saved {saved:,} completed manual row(s) to {path}.")
-                    st.caption("The dashboard keeps cached data for speed. Use Refresh Dashboard Data when you want rates and saved flags recalculated.")
+                    st.caption("Rates will refresh when you return to the chart. You can continue reviewing here.")
                 else:
                     st.warning("Fill in at least Student ID, Semester, and Status before saving.")
             except ReviewConflictError as exc:
@@ -1547,7 +1578,7 @@ def _render_manual_rows_editor(manual_rows: pd.DataFrame, manual_status_file: Pa
 
 def main() -> None:
     _persistence_header()
-    st.caption("New baseline dashboard powered by the sqlCompile roster database and manual status review file.")
+    st.caption("Follow each cohort from joining FSL through its roster history and saved corrections.")
 
     shared = shared_mode()
     try:
@@ -1608,7 +1639,7 @@ def main() -> None:
     if st.sidebar.button("Refresh Dashboard Data", use_container_width=True):
         _request_dashboard_data_refresh()
         st.rerun()
-    st.sidebar.caption("Manual saves are cached for speed. Refresh dashboard data when you want saved statuses reflected in rates and flags.")
+    st.sidebar.caption("Saved status corrections refresh when you return to the chart. Use Refresh Dashboard Data to load changes made elsewhere.")
 
     if not database_path.exists():
         st.error("The host's compiled database is not available. Ask the host operator to compile or restore it." if shared else "No sqlCompile SQLite file was found. Run `python sqlCompile.py --all-semesters` first, or use the sidebar button after your roster paths are configured.")
@@ -1652,6 +1683,13 @@ def main() -> None:
 
     section_options = SECTION_OPTIONS if shared else [*SECTION_OPTIONS, "Record accuracy", ORGANIZATION_REVIEW_SECTION]
     section = st.radio("Dashboard section", options=section_options, horizontal=True, key=SECTION_KEY)
+    if section != "Manual Checker" and st.session_state.get("sql_compile_pending_status_refresh"):
+        # Refresh rates without discarding other unsaved checker edits or
+        # relaxing conflict checks for decisions drafted against older records.
+        st.session_state["sql_compile_restore_checker_drafts"] = st.session_state.get(MANUAL_CHECKER_STATE_KEY)
+        st.session_state["sql_compile_restore_checker_baseline"] = st.session_state.get("sql_compile_checker_saved_baseline", all_tables.manual_rows)
+        _request_dashboard_data_refresh()
+        st.rerun()
     if section in {"Manual Checker", "Duplicate Name Checker", "Manual Rows", "Record accuracy"}:
         st.sidebar.text_input("Reviewer name or initials", value=getpass.getuser(), key="record_reviewer")
         st.sidebar.text_input("Reason for this correction", key="record_reason")
@@ -1686,7 +1724,7 @@ def main() -> None:
         chart_breakdown, chart_milestone_offsets, chart_milestone_label = _pg_chart_controls()
     outcome_view, population = ROSTER_VIEW, POPULATION_OPTIONS[0]
     if uses_pg_controls:
-        outcome_view = st.sidebar.selectbox("Measure", OUTCOME_VIEWS, key="pg_measure")
+        outcome_view = st.sidebar.selectbox("Measure", OUTCOME_VIEWS, format_func=outcome_view_label, key="pg_measure")
         population = st.sidebar.selectbox("Comparison population", POPULATION_OPTIONS, key="pg_population")
     outcomes = _filter_by_chapters(base_outcomes, selected_chapters) if uses_pg_controls else base_outcomes
 
@@ -1722,6 +1760,7 @@ def main() -> None:
             duplicate_name_resolution_file=duplicate_name_resolution_file,
             reporting_cutoff=reporting_cutoff,
             record_history=all_tables.record_history, outcome_view=outcome_view, population=population,
+            source_revision=(revision[4], *revision[5:]),
         )
         cohort_metric.metric("Students in comparison", f"{int(milestone_dashboard['meta']['students']):,}")
 

@@ -116,7 +116,7 @@ def publication_changes(current: dict, previous: dict | None) -> list[str]:
     return warnings
 
 
-def build_publication_check(config, tables, payload: dict, previous: dict | None) -> dict:
+def build_publication_check(config, tables, payload: dict, previous: dict | None, *, dashboards: dict | None = None) -> dict:
     warnings = []
     errors = []
     if not tables.new_member_evidence_complete:
@@ -181,13 +181,17 @@ def build_publication_check(config, tables, payload: dict, previous: dict | None
         errors.append("Cohort records contain invalid student identifiers.")
     if compiled.duplicated(["Student ID", "Semester"]).any():
         errors.append("Compiled records contain duplicate student/semester rows.")
+    conflict_ids = set()
     for view, units in payload.get("views", {ROSTER_VIEW: payload["units"]}).items():
-        dashboard = build_sql_compile_milestone_dashboard(tables.timeline, tables.outcomes, tables.selected_semesters,
-            chart_milestone_offsets=[1, 2, 3, 4, 5, 6], reporting_cutoff=cutoff,
-            record_history=getattr(tables, "record_history", None), outcome_view=view)
+        dashboard = (dashboards or {}).get(view)
+        if dashboard is None:
+            dashboard = build_sql_compile_milestone_dashboard(tables.timeline, tables.outcomes, tables.selected_semesters,
+                chart_milestone_offsets=[1, 2, 3, 4, 5, 6], reporting_cutoff=cutoff,
+                record_history=getattr(tables, "record_history", None), outcome_view=view)
         errors.extend(f"{view}: {error}" for error in reconcile_milestones(dashboard, units))
-    detail = dashboard["detail_frame"]
-    conflict_count = int(detail.loc[detail.get("Evidence Conflict", pd.Series("", index=detail.index)).fillna("").ne(""), "Student ID"].nunique())
+        detail = dashboard["detail_frame"]
+        conflict_ids.update(detail.loc[detail.get("Evidence Conflict", pd.Series("", index=detail.index)).fillna("").ne(""), "Student ID"])
+    conflict_count = len(conflict_ids)
     if conflict_count:
         warnings.append(f"{conflict_count:,} students have contradictory university/degree evidence. Affected independent outcomes remain Unknown until reviewed.")
     coverage = build_coverage(roster, cutoff, read_coverage(config.coverage_reviews), read_zero_member_periods(config.zero_member_periods))

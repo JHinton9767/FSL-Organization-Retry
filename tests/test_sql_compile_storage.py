@@ -94,6 +94,25 @@ def test_failed_csv_replacement_keeps_original_and_backup(tmp_path, monkeypatch)
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_brief_windows_file_lock_retries_without_losing_saved_rows(tmp_path, monkeypatch):
+    from src import sqlCompile_storage as storage
+    if storage.os.name != "nt":
+        pytest.skip("Windows sharing-lock behavior")
+    path = tmp_path / "manual.csv"
+    append_manual_status_rows(manual_row("0001"), path)
+    replace = storage.os.replace
+    attempts = []
+    def temporarily_locked(source, destination):
+        attempts.append(destination)
+        if len(attempts) < 3:
+            raise PermissionError("Temporary sync lock")
+        return replace(source, destination)
+    monkeypatch.setattr(storage.os, "replace", temporarily_locked)
+    append_manual_status_rows(manual_row("0002"), path)
+    assert len(attempts) == 3
+    assert read_manual_status_rows(path)["Student ID"].tolist() == ["0001", "0002"]
+
+
 def test_database_publish_is_atomic_and_preserves_other_tables(tmp_path, monkeypatch):
     path = tmp_path / "data.sqlite"
     original = pd.DataFrame([["Fall 2020", "Alpha", "0001", "N"]], columns=OUTPUT_COLUMNS)

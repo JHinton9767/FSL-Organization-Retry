@@ -3,7 +3,7 @@ import pandas as pd
 from app.charts import persistence_milestone_chart
 
 
-def test_persistence_milestone_chart_keeps_legend_below_cohort_labels() -> None:
+def test_persistence_milestone_chart_keeps_legend_visible_and_labels_readable() -> None:
     frame = pd.DataFrame(
         [
             {
@@ -34,5 +34,7 @@ def test_persistence_milestone_chart_keeps_legend_below_cohort_labels() -> None:
     chart = persistence_milestone_chart(frame, title="1-6 Year Outcome Rates", xaxis_title="Milestone")
 
     assert chart.layout.legend.orientation == "h"
-    assert chart.layout.legend.y <= -0.2
-    assert chart.layout.margin.b >= 180
+    assert chart.layout.legend.y > 1
+    assert chart.layout.margin.t >= 100
+    assert chart.layout.uniformtext.minsize >= 12
+    assert all(trace.textangle == 0 for trace in chart.data)

@@ -21,7 +21,7 @@ from src.sqlCompile_councils import COUNCILS, council_for_chapter
 from src.sqlCompile_publication import build_publication_check, read_previous_publication
 from src.sqlCompile_reporting import REPORTING_EXAMPLE, read_reporting_cutoff, save_reporting_cutoff, validate_reporting_cutoff
 from src.sqlCompile_storage import atomic_write_text, data_lock
-from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, DEGREE_VIEW, METRIC_VERSION
+from src.sqlCompile_records import OUTCOME_VIEWS, ROSTER_VIEW, METRIC_VERSION, OUTCOME_VIEW_LABELS, OUTCOME_VIEW_DESCRIPTIONS
 from src.sqlCompile_sources import read_optional_table, SOURCE_MANIFEST
 
 
@@ -29,13 +29,16 @@ ASSETS = ROOT / "app" / "viewer"
 DEFAULT_VIEWER_PATH = ROOT / "output" / "sqlCompile" / "viewer" / "FSL_Dashboard.html"
 
 
-def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
+def build_viewer_payload(tables: SqlCompileDashboardTables, *, dashboards: dict | None = None) -> dict:
+    dashboards = {} if dashboards is None else dashboards
     chapters = sorted({str(value).strip() for value in tables.outcomes["Cohort Chapter"].dropna() if str(value).strip()})
     dashboard = build_sql_compile_milestone_dashboard(
         tables.timeline, tables.outcomes, tables.selected_semesters,
         selected_chapters=chapters, chart_milestone_offsets=[1, 2, 3, 4, 5, 6],
         reporting_cutoff=getattr(tables, "reporting_cutoff", None),
+        record_history=getattr(tables, "record_history", None),
     )
+    dashboards[ROSTER_VIEW] = dashboard
     details = dashboard["detail_frame"]
     if details.empty:
         raise ValueError("No new-member cohorts are available to publish. Compile the complete roster database first.")
@@ -55,7 +58,9 @@ def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
             selected_chapters=chapters, chart_milestone_offsets=[1, 2, 3, 4, 5, 6],
             reporting_cutoff=getattr(tables, "reporting_cutoff", None),
             record_history=getattr(tables, "record_history", None), outcome_view=view,
-        )["detail_frame"]
+        )
+        dashboards[view] = independent
+        independent = independent["detail_frame"]
         grouped = independent.groupby(columns, dropna=False, sort=False).size().reset_index(name="Count")
         views[view] = [[str(a), str(b), int(c), str(d), int(e)] for a, b, c, d, e in grouped.itertuples(index=False, name=None)]
     semesters = sorted({row[0] for row in units}, key=_semester_sort)
@@ -72,7 +77,9 @@ def build_viewer_payload(tables: SqlCompileDashboardTables) -> dict:
         "colors": PERSISTENCE_OUTCOME_COLORS,
         "units": units,
         "views": views,
-        "defaultView": DEGREE_VIEW,
+        "defaultView": ROSTER_VIEW,
+        "viewLabels": OUTCOME_VIEW_LABELS,
+        "viewDescriptions": OUTCOME_VIEW_DESCRIPTIONS,
         "metricVersion": METRIC_VERSION,
     }
 
@@ -119,7 +126,8 @@ def publish_viewer(
         zero_member_periods_file=config.zero_member_periods, create_review_files=False, reporting_cutoff=cutoff,
         university_records_file=config.university_records,
     )
-    payload = build_viewer_payload(tables)
+    dashboards = {}
+    payload = build_viewer_payload(tables, dashboards=dashboards)
     manifest = read_optional_table(config.database, SOURCE_MANIFEST)
     source_records = manifest.reindex(columns=["Source Path", "SHA256", "Parser Version"]).fillna("").sort_values("Source Path").to_dict("records")
     payload["sourceRevision"] = hashlib.sha256(json.dumps(source_records, sort_keys=True).encode("utf-8")).hexdigest()
@@ -136,7 +144,7 @@ def publish_viewer(
         previous = read_previous_publication(output)
     except ValueError as exc:
         previous, previous_error = None, str(exc)
-    report = build_publication_check(config, tables, payload, previous)
+    report = build_publication_check(config, tables, payload, previous, dashboards=dashboards)
     if previous_error:
         report["warnings"].append(f"Previous publication cannot be compared: {previous_error}")
     report_path = config.database.parent / "publication_checks" / f"{output.stem}.json"

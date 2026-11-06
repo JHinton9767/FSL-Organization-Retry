@@ -749,19 +749,23 @@ def _build_outcomes_for_cohort(cohort_label: str, cohort_source_rows: pd.DataFra
     )
     rows: List[dict] = []
     outcome_rows = timeline.loc[timeline["Included In Outcome"].eq("Yes")].copy()
+    # Sort once and look up each student instead of scanning the whole cohort
+    # and sorting a new frame for every student.
+    ordered = _ensure_missing_columns(outcome_rows, list(dict.fromkeys([*outcome_rows.columns, "_term_sort", "_manual_priority", "_source"])))
+    ordered = ordered.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
+    latest_by_student = ordered.drop_duplicates("Student ID", keep="last").set_index("Student ID").to_dict("index")
+    manual_ids = set(ordered.loc[ordered["_source"].eq("manual_status"), "Student ID"])
     for _, student in cohort_students.iterrows():
         student_id = student["Student ID"]
-        student_rows = outcome_rows.loc[outcome_rows["Student ID"].eq(student_id)].copy()
-        if student_rows.empty:
+        latest = latest_by_student.get(student_id, {})
+        if not latest:
             latest = {}
             latest_status_code = ""
             needs_review = True
             manual_status_applied = "No"
         else:
-            student_rows = student_rows.sort_values(["_term_sort", "_manual_priority", "Semester"], na_position="last")
-            latest = student_rows.iloc[-1].to_dict()
             latest_status_code = clean_text(latest.get("_status_code", ""))
-            manual_status_applied = "Yes" if student_rows["_source"].eq("manual_status").any() else "No"
+            manual_status_applied = "Yes" if student_id in manual_ids else "No"
             needs_review = latest_status_code == "A" and clean_text(latest.get("_source", "")) != "manual_status"
 
         rows.append(

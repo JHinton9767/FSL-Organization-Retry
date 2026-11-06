@@ -38,7 +38,7 @@ from src.path_config import ROOT, load_path_config
 from src.persistence_outcomes import persistence_outcome_from_status
 from src.sqlCompile_storage import atomic_database_update
 from src.sqlCompile_sources import (file_digest, source_cache, source_version, persist_sources, PARSER_VERSION,
-                                    SOURCE_OBSERVATIONS, SOURCE_MANIFEST)
+                                    SOURCE_OBSERVATIONS, SOURCE_MANIFEST, read_optional_table)
 from src.shared_utils import clean_text
 
 
@@ -373,7 +373,10 @@ def load_sql_compile_rows(roots: Sequence[str | Path], *, cache_database: Path |
     exceptions: List[dict] = []
     rows: List[dict] = []
     paths = excel_files(resolved_roots)
-    cache, previous_paths = source_cache(cache_database)
+    fingerprints = {path: file_digest(path) for path in paths}
+    cache, previous_paths = source_cache(cache_database, [
+        (str(path.resolve()), fingerprints[path], _source_label(path, resolved_roots)) for path in paths
+    ])
     versions, manifest = [], []
     for root in resolved_roots:
         if not root.exists():
@@ -384,11 +387,13 @@ def load_sql_compile_rows(roots: Sequence[str | Path], *, cache_database: Path |
 
     for file_index, path in enumerate(paths):
         source_label = _source_label(path, resolved_roots)
-        sha = file_digest(path)
+        sha = fingerprints[path]
         cached = cache.get((str(path.resolve()), sha, source_label))
         if cached:
             file_rows = json.loads(cached["rows_json"])
             file_issues = json.loads(cached["issues_json"])
+            if file_digest(path) != sha:
+                raise RuntimeError(f"Source changed while reading it: {source_label}. No database was replaced; retry when the file is closed.")
             for row in file_rows:
                 row["_source_file_index"] = file_index
             rows.extend(file_rows)
@@ -735,16 +740,37 @@ def write_sqlite(
     return destination
 
 
+def _check_recompile_sources(database: Path, source_rows: pd.DataFrame, issues: pd.DataFrame, *, allow_source_removals: bool) -> None:
+    if not issues.empty:
+        unreadable = issues.loc[issues["exception_type"].eq("sql_compile_open_error"), "source_file"]
+        if not unreadable.empty:
+            raise ValueError(f"Existing database preserved: {len(unreadable)} roster file(s) could not be opened. Restore or close these files and retry: " + "; ".join(unreadable.head(5)))
+    previous = read_optional_table(database, SOURCE_MANIFEST)
+    if previous.empty or allow_source_removals:
+        return
+    required = set(previous.loc[pd.to_numeric(previous["Student Rows"], errors="coerce").gt(0), "Source Path"])
+    observed = {row[0] for row in source_rows.attrs.get("source_manifest", []) if int(row[5]) > 0}
+    missing = sorted(required - observed)
+    if missing:
+        raise ValueError(
+            f"Existing database preserved: {len(missing)} previously imported roster file(s) are missing or now contain no valid students. "
+            "Restore the complete roster archive and retry. For deliberate removals only, review the backup and rerun with --allow-source-removals. "
+            "Affected files: " + "; ".join(missing[:5])
+        )
+
+
 def sqlCompile(
     input_roots: Optional[Sequence[str | Path]] = None,
     output_path: str | Path = DEFAULT_OUTPUT_PATH,
     config_path: Optional[str | Path] = None,
     table_name: str = TABLE_NAME,
+    allow_source_removals: bool = False,
 ) -> SqlCompileResult:
     roots = list(input_roots) if input_roots else default_input_roots(config_path)
     source_rows, issues, source_file_count = load_sql_compile_rows(roots, cache_database=_resolve_path(output_path))
     if source_rows.empty and _resolve_path(output_path).exists():
         raise ValueError("No valid source students were read. Existing database preserved; check source folders and the roster archive.")
+    _check_recompile_sources(_resolve_path(output_path), source_rows, issues, allow_source_removals=allow_source_removals)
     frame = resolve_semester_statuses(source_rows)
     roster_inventory = build_roster_inventory(source_rows)
     student_names = build_student_name_lookup(source_rows)
@@ -785,6 +811,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_PATH), help="SQLite database path to write.")
     parser.add_argument("--table", default=TABLE_NAME, help="SQLite table name to replace.")
+    parser.add_argument("--allow-source-removals", action="store_true", help="Accept deliberately removed or emptied roster files after reviewing a backup. Never use to bypass an unavailable source drive.")
     parser.add_argument(
         "--cohort-semester",
         action="append",
@@ -811,6 +838,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_path=args.output,
         config_path=args.config,
         table_name=args.table,
+        allow_source_removals=args.allow_source_removals,
     )
     print(f"SQL compile database written to: {result.output_path}")
     print(f"Table: {result.table_name}")

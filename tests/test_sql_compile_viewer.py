@@ -144,13 +144,25 @@ def test_independent_measures_and_fixed_population_match_browser(cohort_tables):
 
 def test_payload_contains_only_aggregate_data(cohort_tables):
     payload = viewer.build_viewer_payload(cohort_tables)
-    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units", "views", "defaultView", "metricVersion"}
+    assert set(payload) == {"schema", "published", "dataThrough", "semesters", "chapters", "councils", "chapterCouncils", "outcomes", "colors", "units", "views", "defaultView", "viewLabels", "viewDescriptions", "metricVersion"}
     assert "PRIVATE-" not in json.dumps(payload)
     assert payload["dataThrough"] == "Spring 2026"
     assert len(payload["units"]) < len(cohort_tables.outcomes) * 6
+    assert payload["defaultView"] == "Roster outcomes (legacy)"
+    assert payload["viewLabels"][payload["defaultView"]] == "Persistence and graduation"
+    assert {row[3] for row in payload["views"][payload["defaultView"]]} >= {"Graduated", "Dropped/Resigned", "Revoked", "Transfer"}
     for semester in payload["semesters"]:
         for year in range(1, 7):
             assert sum(row[4] for row in payload["units"] if row[0] == semester and row[2] == year) == 10
+
+
+def test_publisher_reuses_calculated_dashboards_for_validation(publisher_config, tmp_path, monkeypatch):
+    import src.sqlCompile_publication as publication
+    config, _ = publisher_config
+    def unexpected_recalculation(*args, **kwargs):
+        pytest.fail("Publication must validate the calculated student records, not rebuild every view")
+    monkeypatch.setattr(publication, "build_sql_compile_milestone_dashboard", unexpected_recalculation)
+    viewer.publish_viewer(config, tmp_path / "viewer.html", allow_warnings=True)
 
 
 class ScriptInspector(HTMLParser):
@@ -221,8 +233,8 @@ def test_warnings_approval_cannot_bypass_reconciliation(publisher_config, tmp_pa
     viewer.publish_viewer(config, output, allow_warnings=True)
     before = output.read_bytes()
     original = viewer.build_viewer_payload
-    def corrupt(tables):
-        payload = original(tables)
+    def corrupt(tables, **kwargs):
+        payload = original(tables, **kwargs)
         payload["units"][0][4] += 1
         return payload
     monkeypatch.setattr(viewer, "build_viewer_payload", corrupt)

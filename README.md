@@ -4,6 +4,12 @@ This repository supports Fraternity / Sorority Life academic reporting. The curr
 
 ## Current sqlCompile workflow
 
+Start the editable P&G dashboard with **Start_PG_Dashboard.bat**. The default
+**Persistence and graduation** measure includes the full roster outcome mix and
+saved corrections. Degree-only and enrollment analyses remain optional. See
+[update and run instructions](PG_UPDATE_README.md) for when to start, recompile,
+or publish; these are separate actions.
+
 P&G now has separate membership, university enrollment, and degree views, source
 history, permanent correction history, chapter/semester coverage review, and
 publication reconciliation. On the office computer, begin with

@@ -695,8 +695,9 @@ def build_sql_compile_milestone_dashboard(
         for key, group in timeline_work.groupby(["Cohort Semester", "Student ID"], sort=False):
             ordered = group.sort_values(sort_columns, na_position="last")
             outcomes_at_rows = ordered["_outcome"]
-            # I/S is provisional: a later A/N clears it, but not a terminal outcome.
-            resolved = outcomes_at_rows.where(~outcomes_at_rows.isin(["Active", "Unknown", "Inactive/Suspended"])).ffill()
+            # A verified return can clear I/S or a chapter removal. Preserve other
+            # terminal outcomes and the original entry cohort/chapter.
+            resolved = outcomes_at_rows.where(~outcomes_at_rows.isin(["Active", "Unknown", "Inactive/Suspended", "Chapter Kicked"])).ffill()
             timeline_groups[(str(key[0]).strip(), str(key[1]).strip())] = (
                 ordered["_term_sort"].tolist(),
                 resolved.fillna(outcomes_at_rows).tolist(),

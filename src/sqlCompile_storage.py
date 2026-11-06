@@ -4,6 +4,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,20 @@ BACKUP_LIMIT = 10
 Normalizer = Callable[[pd.DataFrame], pd.DataFrame]
 
 
+def _replace_file(source: Path, destination: Path) -> None:
+    """Allow brief Windows sync/indexing locks without abandoning atomic saves."""
+    delays = (0, 0.05, 0.1, 0.2, 0.4)
+    for attempt, delay in enumerate(delays):
+        if delay:
+            time.sleep(delay)
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == len(delays) - 1:
+                raise
+
+
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -28,7 +43,7 @@ def atomic_write_text(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -79,7 +94,7 @@ def _write_csv(frame: pd.DataFrame, path: Path) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
     except BaseException:
         finish_change(path, change_id, "failed")
         raise
@@ -185,7 +200,7 @@ def atomic_database_update(path: Path) -> Iterator[sqlite3.Connection]:
                 shutil.copy2(backup, temporary)
             with closing(sqlite3.connect(temporary)) as connection, connection:
                 yield connection
-            os.replace(temporary, path)
+            _replace_file(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
         _prune_backups(path)

@@ -14,12 +14,27 @@ from src.persistence_outcomes import persistence_outcome_from_status
 from src.sqlCompile_storage import read_review_csv, write_review_csv
 
 
-METRIC_VERSION = "pg-2026-10-15.1"
+METRIC_VERSION = "pg-2026-11-06.1"
 ROSTER_VIEW = "Roster outcomes (legacy)"
 MEMBERSHIP_VIEW = "FSL membership"
 DEGREE_VIEW = "Graduation after joining FSL"
 ENROLLMENT_VIEW = "University enrollment"
-OUTCOME_VIEWS = [DEGREE_VIEW, MEMBERSHIP_VIEW, ENROLLMENT_VIEW, ROSTER_VIEW]
+# Keep the established combined P&G chart as the primary view. The stored key
+# stays compatible with earlier published snapshots and comparison reports.
+OUTCOME_VIEWS = [ROSTER_VIEW, MEMBERSHIP_VIEW, DEGREE_VIEW, ENROLLMENT_VIEW]
+OUTCOME_VIEW_LABELS = {ROSTER_VIEW: "Persistence and graduation"}
+OUTCOME_VIEW_DESCRIPTIONS = {
+    ROSTER_VIEW: "Roster history and saved corrections: Active, Early Alumni, Inactive/Suspended, Dropped/Resigned, Revoked, Transfer, Chapter Kicked, Unknown, and Graduated.",
+    MEMBERSHIP_VIEW: "Chapter membership only. A degree does not erase a membership exit. Active requires evidence at the checkpoint.",
+    DEGREE_VIEW: "Degree evidence only. A known membership status is still Unknown here unless degree evidence is available; this is not the combined P&G chart.",
+    ENROLLMENT_VIEW: "University enrollment evidence only. Roster membership does not establish enrollment; missing university records remain Unknown.",
+}
+
+
+def outcome_view_label(view: str) -> str:
+    return OUTCOME_VIEW_LABELS.get(view, view)
+
+
 DOMAIN_COLUMNS = {MEMBERSHIP_VIEW: "Membership Outcome", DEGREE_VIEW: "Degree Outcome", ENROLLMENT_VIEW: "Enrollment Outcome"}
 POPULATION_OPTIONS = ["Eligible at each year", "Same students across selected years"]
 UNIVERSITY_COLUMNS = ["Student ID", "Semester", "Enrollment Status", "Degree Status", "Source", "Reviewed By", "Resolution", "Notes"]

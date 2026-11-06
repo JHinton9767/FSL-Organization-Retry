@@ -218,3 +218,50 @@ def test_shared_checker_saves_without_reloading_chart(shared_host):
     second = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
     assert not second.exception and not second.error
     assert second.session_state["sql_compile_shared_snapshot"][2].manual_rows["Status"].tolist() == ["G"]
+
+
+def test_default_pg_and_own_corrections_refresh_without_losing_drafts(shared_host):
+    config, _ = shared_host
+    app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
+    assert app.selectbox(key="pg_measure").value == "Roster outcomes (legacy)"
+    app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
+    key = "sql_compile_manual_checker_rows"
+    draft = app.session_state[key].copy()
+    selected = draft["Student ID"].eq("A01234567")
+    draft.loc[selected, ["Semester", "Chapter", "Status", "Notes"]] = ["Spring 2024", "Alpha", "G", "Verified degree"]
+    draft.loc[~selected, "Notes"] = "Unsaved research in progress"
+    app.session_state[key] = draft
+    app.run()
+    next(button for button in app.button if button.label == "Save All Ready").click().run()
+    # Correcting your own just-saved decision must not be mistaken for another reviewer.
+    draft = app.session_state[key].copy()
+    draft.loc[selected, "Status"] = "RS"
+    app.session_state[key] = draft
+    app.run()
+    next(button for button in app.button if button.label == "Save All Ready").click().run()
+    assert not app.exception and not app.error
+    assert not any("No rows were saved" in notice.value for notice in app.warning)
+    assert read_manual_status_rows(config.manual_status)["Status"].tolist() == ["RS"]
+    app.radio(key="sql_compile_dashboard_section").set_value("Persistence & Graduation").run()
+    assert not app.exception and not app.error
+    assert "Dropped/Resigned" in set(app.dataframe[0].value["Outcome"])
+    app.radio(key="sql_compile_dashboard_section").set_value("Manual Checker").run()
+    assert not app.exception and not app.error
+    assert app.session_state[key].loc[lambda rows: rows["Student ID"].eq("A01234568"), "Notes"].tolist() == ["Unsaved research in progress"]
+
+
+def test_owner_chart_refreshes_when_university_evidence_changes(shared_host, monkeypatch, tmp_path):
+    from src.sqlCompile_records import DEGREE_VIEW, save_university_records
+    config, path = shared_host
+    settings = json.loads(path.read_text())
+    settings["university_records"] = str(tmp_path / "university.csv")
+    path.write_text(json.dumps(settings), encoding="utf-8")
+    monkeypatch.delenv("FSL_DASHBOARD_SHARED")
+    app = AppTest.from_file(str(ROOT / "app" / "sql_compile_dashboard.py"), default_timeout=30).run()
+    app.selectbox(key="pg_measure").set_value(DEGREE_VIEW).run()
+    assert "Graduated" not in set(app.dataframe[0].value["Outcome"])
+    save_university_records(pd.DataFrame([{"Student ID": "A01234567", "Semester": "Spring 2024", "Degree Status": "Graduated",
+                                         "Source": "Verified record", "Reviewed By": "Owner"}]), tmp_path / "university.csv")
+    app.run()
+    assert not app.exception and not app.error
+    assert "Graduated" in set(app.dataframe[0].value["Outcome"])
